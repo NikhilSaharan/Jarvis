@@ -1,0 +1,4 @@
+config/secrets.env
+data/jarvis.db
+__pycache__/
+*.py[cod]
