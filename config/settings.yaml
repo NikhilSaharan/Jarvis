@@ -1,0 +1,30 @@
+# JARVIS System Settings & Persona Configuration
+
+system:
+  name: "J.A.R.V.I.S."
+  owner_honorific: "Sir"
+  version: "2.1.0"
+  timezone: "Asia/Kolkata"
+  language: "Hinglish/English"
+
+voice:
+  provider: "elevenlabs"
+  model: "eleven_multilingual_v2"
+  voice_id: "f1abxvIEijusskcPWE5x"
+  fallback_voice_id: "JBFqnCBsd6RMkjVDRZzb" # George (British Male) for Free Tier API
+
+brain:
+  model: "gemini-3.1-flash-lite"
+  temperature: 0.6
+  max_output_tokens: 250
+  rate_limit_rpm: 15
+
+heartbeat:
+  interval_seconds: 2
+  battery_warning_threshold: 15
+  idle_check_minutes: 45
+
+quarantine:
+  focus_assist_enabled: true
+  master_mute_on_sleep: true
+  auto_wake_volume_percent: 50

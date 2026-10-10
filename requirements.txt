@@ -1,0 +1,12 @@
+google-genai>=1.0.0
+elevenlabs>=1.0.0
+soundfile>=0.12.1
+sounddevice>=0.4.6
+pycaw>=20240206
+pywin32>=306
+psutil>=5.9.8
+pyautogui>=0.9.54
+APScheduler>=3.10.4
+pyyaml>=6.0.1
+python-dotenv>=1.0.1
+pytest>=7.0.0
