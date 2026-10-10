@@ -285,6 +285,34 @@ class ComputerUseEngine:
 
         return self._execute_in_desktop_thread(_inner)
 
+    def browser_action(self, action: str) -> dict:
+        """
+        Performs browser manipulation on the active browser window:
+        - new_tab, close_tab, next_tab, prev_tab, reopen_tab, refresh
+        - scroll_down, scroll_up, scroll_top, scroll_bottom
+        - zoom_in, zoom_out, zoom_reset
+        """
+        action_map = {
+            "new_tab": "{Ctrl}t",
+            "close_tab": "{Ctrl}w",
+            "next_tab": "{Ctrl}{Tab}",
+            "prev_tab": "{Ctrl}{Shift}{Tab}",
+            "reopen_tab": "{Ctrl}{Shift}t",
+            "refresh": "{F5}",
+            "scroll_down": "{PageDown}",
+            "scroll_up": "{PageUp}",
+            "scroll_top": "{Home}",
+            "scroll_bottom": "{End}",
+            "zoom_in": "{Ctrl}+",
+            "zoom_out": "{Ctrl}-",
+            "zoom_reset": "{Ctrl}0"
+        }
+        shortcut = action_map.get(action.lower())
+        if not shortcut:
+            return {"success": False, "message": f"Unsupported browser action: '{action}'"}
+
+        return self.send_keyboard_shortcut(shortcut)
+
     # =========================================================================
     # UNIVERSAL COMMUNICATIONS DISPATCHER (< 1.5 Seconds)
     # =========================================================================

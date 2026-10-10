@@ -20,15 +20,17 @@ JARVIS_TOOL_DECLARATIONS = [
     },
     {
         "name": "schedule_proactive_reminder",
-        "description": "Call when user wants to be reminded of something or follow up on a task/call at a specific time.",
+        "description": "Call when user wants to be reminded of something or follow up on a task/call at a specific time or in a few seconds/minutes.",
         "parameters": {
             "type": "object",
             "properties": {
                 "target_time": {"type": "string", "description": "Time in HH:MM (24-hour format)."},
+                "delay_seconds": {"type": "integer", "description": "Relative delay in seconds (e.g. 10 for 10 seconds)."},
+                "delay_minutes": {"type": "integer", "description": "Relative delay in minutes (e.g. 5 for 5 minutes)."},
                 "topic_or_person": {"type": "string", "description": "Name of person or subject of the task."},
                 "proactive_speech": {"type": "string", "description": "The exact polite prompt Jarvis should say aloud when the time arrives."}
             },
-            "required": ["target_time", "topic_or_person", "proactive_speech"]
+            "required": ["topic_or_person", "proactive_speech"]
         }
     },
     {
@@ -49,8 +51,49 @@ JARVIS_TOOL_DECLARATIONS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["mute", "unmute", "set_volume", "lock_screen", "check_battery"]},
+                "action": {"type": "string", "enum": ["mute", "unmute", "set_volume", "volume_up", "volume_down", "lock_screen", "check_battery"]},
                 "value": {"type": "integer", "description": "Optional level (e.g. volume 0-100)."}
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "browser_and_web_action",
+        "description": "Universal browser and web controller: open URLs, search Google, search/play YouTube, switch tabs, close tabs, refresh, or scroll.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "open_url", "search_google", "search_youtube", "play_youtube",
+                        "new_tab", "close_tab", "next_tab", "prev_tab", "reopen_tab",
+                        "refresh", "scroll_down", "scroll_up"
+                    ],
+                    "description": "The browser or web action to execute."
+                },
+                "query": {"type": "string", "description": "Search query or target URL if applicable."}
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "window_and_system_action",
+        "description": "Control Windows desktop windows and media playback: maximize, minimize, restore, close window, show desktop, switch window, media play/pause, next track, prev track, volume up, or volume down.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "maximize", "minimize", "restore", "close_window",
+                        "show_desktop", "switch_window",
+                        "media_play_pause", "media_next", "media_prev", "media_stop",
+                        "volume_up", "volume_down"
+                    ],
+                    "description": "Window or media action to execute."
+                },
+                "value": {"type": "integer", "description": "Optional step value (e.g. 10 for volume change)."}
             },
             "required": ["action"]
         }
@@ -85,15 +128,58 @@ JARVIS_TOOL_DECLARATIONS = [
     },
     {
         "name": "update_personal_knowledge",
-        "description": "Store or update facts about family, friends, relationships, or user habits.",
+        "description": "Store or update facts about family, friends, colleagues, relationships, phone numbers, or user habits in the Knowledge Graph.",
         "parameters": {
             "type": "object",
             "properties": {
-                "person_name": {"type": "string"},
-                "relationship": {"type": "string"},
-                "notes": {"type": "string"}
+                "person_name": {"type": "string", "description": "Full name or primary identifier of the person."},
+                "relationship": {"type": "string", "description": "Relationship to Sir (e.g. 'Friend', 'Manager', 'Colleague', 'Father', 'Brother', 'Family')."},
+                "phone": {"type": "string", "description": "Phone number, email, or communication handle."},
+                "aliases": {"type": "string", "description": "Nicknames or alternative names (e.g. 'bhai', 'lead', 'boss')."},
+                "importance": {"type": "integer", "description": "Importance level: 1 = Normal, 2 = High Priority, 3 = VIP / Critical Family Member."},
+                "notes": {"type": "string", "description": "Habits, preferences, role details, or life facts."}
             },
             "required": ["person_name"]
         }
+    },
+    {
+        "name": "query_personal_knowledge",
+        "description": "Query facts, relationships, or contact information about a person or role from the Knowledge Graph (e.g. 'Who is Dhruv?', 'Who is my manager?', 'Tell me about Manish').",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Name, role, or relationship to look up."}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "list_personal_knowledge",
+        "description": "List all people, relationships, and contacts stored in JARVIS's memory graph.",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "resume_or_wake_up",
+        "description": "Call when user wakes up, finishes resting, or requests to resume normal mode (e.g. 'mai jag gaya', 'wake up', 'uth gaya', 'resume normal mode', 'stop rest mode').",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_confirmation": {"type": "string", "description": "User statement (e.g. 'I am awake', 'mai jag gaya')."}
+            }
+        }
+    },
+    {
+        "name": "review_quarantined_disturbances",
+        "description": "Call when user asks to review, inspect, or see messages and calls held in quarantine while they were resting or in DND mode.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Number of recent quarantined items to retrieve."}
+            }
+        }
     }
 ]
+

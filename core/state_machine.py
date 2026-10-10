@@ -16,6 +16,7 @@ class JarvisState:
         self.current_state = SystemState.NORMAL
         self.sleep_target_time = None
         self.quarantine_reason = None
+        self.sleep_started_at = None
         self.last_user_interaction = time.time()
         self.active_context = {}
 
@@ -24,18 +25,34 @@ class JarvisState:
         self.current_state = SystemState.SLEEPING
         self.sleep_target_time = target_time_str
         self.quarantine_reason = reason
+        self.sleep_started_at = time.time()
 
     def activate_dnd_mode(self, reason: str = "Focus"):
         """Activates DND mode without sleeping."""
         self.current_state = SystemState.DND
         self.quarantine_reason = reason
+        self.sleep_started_at = time.time()
 
     def wake_up_or_resume(self):
         """Restores normal operating state."""
         self.current_state = SystemState.NORMAL
         self.sleep_target_time = None
         self.quarantine_reason = None
+        self.sleep_started_at = None
         self.last_user_interaction = time.time()
+
+    @property
+    def target_wake_time(self):
+        """Property alias for sleep_target_time."""
+        return self.sleep_target_time
+
+    @target_wake_time.setter
+    def target_wake_time(self, val):
+        self.sleep_target_time = val
+
+    def wake_up(self):
+        """Alias for wake_up_or_resume."""
+        self.wake_up_or_resume()
 
     def is_quarantined(self) -> bool:
         """Returns True if user should not be disturbed."""

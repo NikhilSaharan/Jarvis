@@ -8,20 +8,41 @@ from memory.database import KnowledgeDatabase
 from brain.gemini_client import UniversalGeminiBrain
 from brain.tool_executor import ToolExecutor
 from speech.speaker import JarvisSpeaker
+from speech.listener import JarvisListener
 from core.heartbeat import HeartbeatDaemon
 
 class JarvisOrchestrator:
-    def __init__(self, start_heartbeat: bool = True):
+    def __init__(self, start_heartbeat: bool = True, start_listener: bool = False):
         self.state = JarvisState()
         self.win_ctrl = WindowsController()
         self.db = KnowledgeDatabase()
         self.brain = UniversalGeminiBrain()
-        self.executor = ToolExecutor(self.win_ctrl, self.db, self.state)
+        self.executor = ToolExecutor(self.win_ctrl, self.db, self.state, brain=self.brain)
         self.speaker = JarvisSpeaker()
         self.heartbeat = HeartbeatDaemon(self.state, self.win_ctrl, self.db, self.speaker)
+        self.listener = JarvisListener()
 
         if start_heartbeat:
             self.heartbeat.start()
+
+        if start_listener:
+            self.start_voice_listening()
+
+    def start_voice_listening(self):
+        """Starts 24/7 background voice listening for wake words ('Jarvis', 'Hey Jarvis', 'Sun Jarvis')."""
+        def _on_command(cmd: str):
+            if cmd:
+                print(f"[Orchestrator Voice Dispatch] Processing command: '{cmd}'")
+                self.process_command(cmd, speak_output=True)
+
+        def _on_wake():
+            print("[Orchestrator] Wake word confirmed. Standing by for Sir's orders.")
+
+        self.listener.start_background_listening(callback=_on_command, on_wake=_on_wake)
+
+    def stop_voice_listening(self):
+        """Stops background voice listener."""
+        self.listener.stop_background_listening()
 
     def process_command(self, user_text: str, speak_output: bool = True) -> dict:
         """
