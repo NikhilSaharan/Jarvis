@@ -312,7 +312,12 @@ class CommunicationsController:
         time.sleep(0.3)
 
         legacy = wake_chrome_accessibility(win)
-        doc = legacy.DocumentControl(Name='WhatsApp') if legacy else win
+        doc = win
+        if legacy:
+            for c in legacy.GetChildren():
+                if c.ControlTypeName == 'DocumentControl':
+                    doc = c
+                    break
 
         # Find search box
         search_edit = None
@@ -411,7 +416,12 @@ class CommunicationsController:
         time.sleep(0.3)
 
         legacy = wake_chrome_accessibility(win)
-        doc = legacy.DocumentControl(Name='WhatsApp') if legacy else win
+        doc = win
+        if legacy:
+            for c in legacy.GetChildren():
+                if c.ControlTypeName == 'DocumentControl':
+                    doc = c
+                    break
 
         search_edit = None
         for c in doc.GetChildren():

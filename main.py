@@ -40,7 +40,7 @@ def print_hud_status(orchestrator: JarvisOrchestrator):
     vol = orchestrator.win_ctrl.get_volume_percent()
     is_muted = orchestrator.win_ctrl.is_muted()
     voice_mode = "ElevenLabs LIVE" if orchestrator.speaker.is_live else "Console Voice Emulation"
-    brain_mode = f"Gemini 3.1 Flash Lite ({orchestrator.brain.model_name})" if orchestrator.brain.is_connected else "Local Cognitive Emulation"
+    brain_mode = f"Gemini High-Speed ({orchestrator.brain.model_name})" if orchestrator.brain.is_connected else "Local Cognitive Emulation"
     mic_status = "ONLINE (Ready for 'Hey Jarvis')" if orchestrator.listener.mic_available else "OFFLINE (No input device)"
 
     print(BANNER)
@@ -59,6 +59,7 @@ def print_hud_status(orchestrator: JarvisOrchestrator):
 def main():
     print("[Initializing J.A.R.V.I.S. Core Systems...]")
     orchestrator = JarvisOrchestrator(start_heartbeat=True, start_listener=False)
+    orchestrator.win_ctrl.unmute_audio()
     print_hud_status(orchestrator)
 
     # Initial boot greeting in natural casual Hinglish
@@ -96,6 +97,7 @@ def main():
 
             if prompt.lower() == "voice on":
                 if not voice_active:
+                    orchestrator.win_ctrl.unmute_audio()
                     orchestrator.start_voice_listening()
                     voice_active = True
                     print("[Voice Mode] Background listening active! Speak 'Jarvis' or 'Hey Jarvis' at any time.")

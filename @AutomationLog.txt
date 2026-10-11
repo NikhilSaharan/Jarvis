@@ -1,0 +1,2 @@
+2026-10-11 04:38:47.823 computer_use.py[294] _inner -> 2026-10-11 06:09:35.771 computer_use.py[479] _inner -> Find Control Timeout(10s): {Name: 'WhatsApp', ControlType: DocumentControl}
+2026-10-11 06:10:39.437 computer_use.py[479] _inner -> Find Control Timeout(10s): {Name: 'WhatsApp', ControlType: DocumentControl}

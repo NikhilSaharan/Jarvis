@@ -37,18 +37,33 @@ class JarvisListener:
         self.wake_words = [w.lower().strip() for w in (wake_words or self.DEFAULT_WAKE_WORDS)]
         self.language = language
         self.recognizer = sr.Recognizer()
-        self.recognizer.energy_threshold = 300
+        self.recognizer.energy_threshold = 280
         self.recognizer.dynamic_energy_threshold = True
-        self.recognizer.pause_threshold = 0.8
+        self.recognizer.pause_threshold = 0.85
+        self.recognizer.non_speaking_duration = 0.5
 
         self._chime_sound = None
         self._init_chime()
+
+        self.speaker = None
+        self._conversation_session_active = False
+        self._last_interaction_time = 0.0
+        self.session_timeout = 30.0
 
         self._is_listening_bg = False
         self._bg_thread = None
         self.mic_available = False
 
         self._check_mic()
+
+    def set_speaker(self, speaker):
+        """Attaches speaker reference so listener pauses while Jarvis is talking."""
+        self.speaker = speaker
+
+    def keep_session_alive(self):
+        """Keeps conversation session open after Jarvis finishes speaking so Sir can reply without wake word."""
+        self._conversation_session_active = True
+        self._last_interaction_time = time.time()
 
     def _init_chime(self):
         """Synthesizes a clean futuristic two-tone chime in memory via pygame.mixer."""
@@ -160,44 +175,82 @@ class JarvisListener:
             return
 
         self._is_listening_bg = True
+        self._conversation_session_active = False
+        self._last_interaction_time = 0.0
+        self.session_timeout = 30.0
 
         def _loop():
-            print("[Listener Daemon] Continuous Wake-Word Voice Monitoring ACTIVE ('Jarvis' / 'Hey Jarvis' / 'Sun Jarvis').")
+            print("[Listener Daemon] Continuous Wake-Word & Conversational Flow ACTIVE ('Jarvis' / 'Hey Jarvis').")
             while self._is_listening_bg:
                 try:
                     with sr.Microphone() as source:
                         self.recognizer.adjust_for_ambient_noise(source, duration=0.2)
                         while self._is_listening_bg:
+                            # Do not capture audio while Jarvis is speaking through speakers
+                            if self.speaker and getattr(self.speaker, "is_speaking", False):
+                                time.sleep(0.3)
+                                if self._conversation_session_active:
+                                    self._last_interaction_time = time.time()
+                                continue
+
                             try:
-                                audio = self.recognizer.listen(source, timeout=2.0, phrase_time_limit=6.0)
+                                audio = self.recognizer.listen(source, timeout=1.5, phrase_time_limit=7.0)
                             except sr.WaitTimeoutError:
+                                # Check session timeout
+                                if self._conversation_session_active and (time.time() - self._last_interaction_time > self.session_timeout):
+                                    self._conversation_session_active = False
+                                    print("[Listener] Conversational session idle timeout. Standing by for 'Hey Jarvis'...")
                                 continue
 
                             text = self.transcribe_audio(audio)
                             if not text:
+                                if self._conversation_session_active and (time.time() - self._last_interaction_time > self.session_timeout):
+                                    self._conversation_session_active = False
+                                    print("[Listener] Conversational session idle timeout. Standing by for 'Hey Jarvis'...")
                                 continue
 
+                            text_lower = text.lower().strip()
+
+                            # 1. Dismiss phrases
+                            dismiss_phrases = ["thank you", "thanks", "bye", "bas jarvis", "bas itna hi", "so jao", "rest karo", "shant ho jao"]
+                            if any(dp in text_lower for dp in dismiss_phrases):
+                                self._conversation_session_active = False
+                                print(f"[Listener] User ended session: '{text}'. Returning to wake-word standby.")
+                                self.play_chime()
+                                continue
+
+                            # 2. If in active conversational session, accept speech directly without wake word
+                            if self._conversation_session_active and (time.time() - self._last_interaction_time <= self.session_timeout):
+                                self._last_interaction_time = time.time()
+                                is_wake, cmd = self.is_wake_word_triggered(text)
+                                cmd_to_run = cmd if (is_wake and cmd) else text
+                                print(f"[Listener Conversational Flow] Speech recognized: '{cmd_to_run}'")
+                                callback(cmd_to_run)
+                                continue
+
+                            # 3. Standard Wake Word Detection
                             is_wake, command = self.is_wake_word_triggered(text)
                             if is_wake:
                                 self.play_chime()
+                                self._conversation_session_active = True
+                                self._last_interaction_time = time.time()
                                 if on_wake:
                                     on_wake()
 
                                 if command:
-                                    # User spoke command in the same sentence: "Jarvis, open Chrome"
-                                    print(f"[Listener] Wake detected with in-stream command: '{command}'")
+                                    print(f"[Listener] Wake detected with command: '{command}'")
                                     callback(command)
                                 else:
-                                    # User just said wake word: "Jarvis" -> listen for next phrase
-                                    print("[Listener] Wake word detected. Listening for command...")
+                                    print("[Listener] Wake word detected. Listening for command (Flow Mode ACTIVE)...")
                                     try:
                                         follow_up_audio = self.recognizer.listen(source, timeout=4.0, phrase_time_limit=8.0)
                                         follow_up_text = self.transcribe_audio(follow_up_audio)
                                         if follow_up_text:
+                                            self._last_interaction_time = time.time()
                                             print(f"[Listener] Received command: '{follow_up_text}'")
                                             callback(follow_up_text)
                                     except sr.WaitTimeoutError:
-                                        print("[Listener] Listening timed out.")
+                                        print("[Listener] Flow mode active for 25s.")
                 except Exception as e:
                     time.sleep(1.0)
 

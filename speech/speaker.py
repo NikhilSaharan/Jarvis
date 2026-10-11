@@ -35,6 +35,7 @@ class JarvisSpeaker:
         self.api_key = api_key or os.getenv("ELEVENLABS_API_KEY")
         self.voice_id = voice_id or os.getenv("ELEVENLABS_VOICE_ID", self.DEFAULT_PREMADE_BRITISH_VOICE)
         self.is_live = False
+        self.is_speaking = False
         self.client = None
         self._init_elevenlabs()
 
@@ -43,6 +44,10 @@ class JarvisSpeaker:
             print("[Speaker] ElevenLabs credentials not provided. Running in Console Voice Mode.")
             self.is_live = False
             return
+
+        # Avoid known unpaid library voice that triggers 402 payment errors and delays
+        if self.voice_id == "f1abxvIEijusskcPWE5x":
+            self.voice_id = self.DEFAULT_PREMADE_BRITISH_VOICE
 
         try:
             from elevenlabs.client import ElevenLabs
@@ -61,7 +66,7 @@ class JarvisSpeaker:
     def _play_audio_stream(self, audio_generator):
         """Plays audio stream chunks using pygame mixer without requiring ffplay/ffmpeg."""
         import pygame
-        # Collect audio chunks into a byte buffer (raises ApiError if 402 on unpaid voices)
+        # Collect audio chunks into a byte buffer
         audio_bytes = b"".join(chunk for chunk in audio_generator if isinstance(chunk, bytes))
         if not audio_bytes:
             return
@@ -79,7 +84,7 @@ class JarvisSpeaker:
 
     def speak(self, text: str, play_audio: bool = True):
         """
-        Synthesizes speech via ElevenLabs.
+        Synthesizes ultra-low latency speech via ElevenLabs Turbo v2.5 (~250ms).
         Falls back to premade British voice if user is on Free Tier and requested library voice.
         Plays directly through Windows audio output using pygame mixer.
         """
@@ -91,27 +96,27 @@ class JarvisSpeaker:
         print(f"=======================================================\n")
 
         if self.is_live and play_audio:
+            self.is_speaking = True
             try:
-                # 1. Try target Voice ID
-                audio_stream = self.client.text_to_speech.convert(
-                    voice_id=self.voice_id,
-                    text=text,
-                    model_id="eleven_multilingual_v2"
-                )
-                self._play_audio_stream(audio_stream)
+                # 1. High-speed path: ElevenLabs Turbo v2.5 (250ms)
+                try:
+                    audio_stream = self.client.text_to_speech.convert(
+                        voice_id=self.voice_id,
+                        text=text,
+                        model_id="eleven_turbo_v2_5"
+                    )
+                    self._play_audio_stream(audio_stream)
+                except Exception as turbo_err:
+                    err_str = str(turbo_err)
+                    if "Free users cannot use library voices" in err_str or "paid_plan_required" in err_str or "402" in err_str:
+                        self.voice_id = self.DEFAULT_PREMADE_BRITISH_VOICE
+                    audio_stream = self.client.text_to_speech.convert(
+                        voice_id=self.voice_id,
+                        text=text,
+                        model_id="eleven_multilingual_v2"
+                    )
+                    self._play_audio_stream(audio_stream)
             except Exception as e:
-                err_str = str(e)
-                if "Free users cannot use library voices" in err_str or "paid_plan_required" in err_str or "402" in err_str:
-                    print(f"ℹ️  [Speaker Info] Voice ID '{self.voice_id}' is a community library voice requiring a paid ElevenLabs tier.")
-                    print(f"🔄 [Speaker Fallback] Using Premade British Butler Voice (George) for audio synthesis...")
-                    try:
-                        audio_stream = self.client.text_to_speech.convert(
-                            voice_id=self.DEFAULT_PREMADE_BRITISH_VOICE,
-                            text=text,
-                            model_id="eleven_multilingual_v2"
-                        )
-                        self._play_audio_stream(audio_stream)
-                    except Exception as fallback_err:
-                        print(f"[Speaker Error] Fallback voice synthesis error: {fallback_err}")
-                else:
-                    print(f"[Speaker Error] Audio synthesis error: {e}")
+                print(f"[Speaker Error] Audio synthesis error: {e}")
+            finally:
+                self.is_speaking = False

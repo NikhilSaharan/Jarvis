@@ -100,7 +100,7 @@ JARVIS_TOOL_DECLARATIONS = [
     },
     {
         "name": "universal_communicate",
-        "description": "Universal communication tool: call or send a message to any person on ANY application (Teams, WhatsApp, Telegram, Discord, Slack, etc.) by contact name.",
+        "description": "Universal communication tool: call or send a message to any person on ANY application (Teams, WhatsApp, Telegram, Discord, Slack, etc.) by contact name. Can be executed immediately or scheduled for a specific time/delay.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -108,20 +108,23 @@ JARVIS_TOOL_DECLARATIONS = [
                 "action": {"type": "string", "enum": ["call", "message", "open"]},
                 "contact_name": {"type": "string", "description": "Name of the person (e.g. 'Dhruv', 'Vishal', 'Manish')."},
                 "message": {"type": "string", "description": "Message content if sending a message."},
-                "call_type": {"type": "string", "enum": ["audio", "video"], "description": "Type of call ('audio' or 'video')."}
+                "call_type": {"type": "string", "enum": ["audio", "video"], "description": "Type of call ('audio' or 'video')."},
+                "schedule_time": {"type": "string", "description": "Time in HH:MM (e.g. '02:42', '14:30') if the communication should be sent at a future scheduled time instead of immediately."},
+                "delay_minutes": {"type": "integer", "description": "Relative delay in minutes (e.g. 2 for 2 minutes later) if specified."}
             },
             "required": ["app_name", "action", "contact_name"]
         }
     },
     {
         "name": "universal_computer_action",
-        "description": "Perform any general autonomous computer-use action on the PC: open any app/URL, click any button by name, or type text.",
+        "description": "Perform any general autonomous computer-use action on the PC: open any app/URL, click any button by name (e.g. 'Accept All', 'Accept', 'Proceed', 'Keep', 'Save', 'Submit', 'Run'), type text, or press keyboard shortcuts. Always use this when user asks to accept task changes, click a button in any app, or interact with GUI controls.",
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["open_app_or_url", "click_button", "type_text", "press_keys"]},
-                "target": {"type": "string", "description": "App name, website URL, button name, or key combination to press."},
-                "text": {"type": "string", "description": "Text to type if action is 'type_text'."}
+                "target": {"type": "string", "description": "Button name (e.g. 'Accept All', 'Accept', 'Proceed', 'Save'), app name, website URL, or key combination to press."},
+                "text": {"type": "string", "description": "Text to type if action is 'type_text'."},
+                "app_name": {"type": "string", "description": "Optional application name to bring to foreground first (e.g. 'Antigravity', 'Chrome', 'VS Code')."}
             },
             "required": ["action", "target"]
         }
@@ -179,6 +182,76 @@ JARVIS_TOOL_DECLARATIONS = [
             "properties": {
                 "limit": {"type": "integer", "description": "Number of recent quarantined items to retrieve."}
             }
+        }
+    },
+    {
+        "name": "inspect_inbox_or_emails",
+        "description": "Inspect, read, and check visible emails from Gmail or the active email client. Call whenever Sir asks to check emails, see if an email arrived from someone, or ask what emails are in the inbox.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sender_filter": {"type": "string", "description": "Optional sender name, topic, or keyword to check for."},
+                "open_if_closed": {"type": "boolean", "description": "Whether to open Gmail if not already visible (default true)."}
+            }
+        }
+    },
+    {
+        "name": "inspect_screen_or_window_content",
+        "description": "Perceive and extract visible text, items, and UI hierarchy from any open application or window on screen. Use for inspecting any screen content without hardcoded filters.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_app_or_url": {"type": "string", "description": "Application name, window title, or URL (e.g. 'chrome', 'teams', 'gmail', 'antigravity', or leave empty for active window)."},
+                "query": {"type": "string", "description": "What Sir wants to verify or check on screen."}
+            }
+        }
+    },
+    {
+        "name": "activate_detective_mode",
+        "description": "Activate Detective Mode to monitor, track, and record every single window switch, app launch, file opened, and touch on the laptop (e.g. 'detective mode on', 'activate detective mode', 'sentry mode on').",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "custom_note": {"type": "string", "description": "Optional context or reason."}
+            }
+        }
+    },
+    {
+        "name": "deactivate_detective_mode",
+        "description": "Deactivate Detective Mode and return to normal operation (e.g. 'detective mode off', 'stop detective mode').",
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "get_laptop_activity_timeline",
+        "description": "Inspect and retrieve the real chronological timeline of applications, windows, files, folders, and web pages opened or used on Sir's laptop in the past N minutes (e.g. 'kya hua tha', 'kya kya open hua tha', 'pichhle 2 minute mein kya open hua', 'kisne chhua tha', 'mere piche se kya hua'). If Detective Mode is active, automatically presents the full debrief and turns Detective Mode OFF.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "minutes": {
+                    "type": "integer",
+                    "description": "How many minutes into the past to check (default 5 minutes, e.g. 2 for last 2 minutes)."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional specific question or activity Sir asked about."
+                }
+            }
+        }
+    },
+    {
+        "name": "monitor_incoming_messages",
+        "description": "Continuously monitor and check for incoming messages from ANY contact or on ANY communication application (e.g. WhatsApp, Teams, Telegram, Slack, etc.) in the background, and proactively alert Sir the moment a new message arrives.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contact_name": {"type": "string", "description": "The person or contact to monitor (any name specified by Sir)."},
+                "app_name": {"type": "string", "description": "Application name to check (e.g. 'WhatsApp', 'Teams', 'Telegram', 'Slack', etc., default 'WhatsApp')."},
+                "instruction": {"type": "string", "description": "User instruction or intent."}
+            },
+            "required": ["contact_name"]
         }
     }
 ]

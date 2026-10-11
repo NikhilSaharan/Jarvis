@@ -100,6 +100,7 @@ class ComputerUseEngine:
         def worker():
             attach_thread_to_default_desktop()
             import uiautomation as auto
+            auto.SetGlobalSearchTimeout(1.0)
             with auto.UIAutomationInitializerInThread(True):
                 try:
                     res_container["result"] = func(*args, **kwargs)
@@ -213,31 +214,73 @@ class ComputerUseEngine:
 
         return self._execute_in_desktop_thread(_inner)
 
-    def click_element_by_name(self, semantic_query: str) -> dict:
+    def click_element_by_name(self, semantic_query: str, app_name: Optional[str] = None) -> dict:
         """
         Universally finds and clicks ANY button, tab, menu, or element matching semantic_query.
-        Uses UIA InvokePattern / Click — 0 hardcoded pixel coordinates!
+        Supports optional app_name to bring target window to front.
+        Zero hardcoded pixel coordinates!
         """
         def _inner():
             import uiautomation as auto
+            root = auto.GetRootControl()
+            target_win = None
+
+            if app_name:
+                app_lower = app_name.lower()
+                for w in root.GetChildren():
+                    w_name = (w.Name or "").lower()
+                    w_class = (w.ClassName or "").lower()
+                    if app_lower in w_name or app_lower in w_class:
+                        target_win = w
+                        break
+                if target_win:
+                    force_foreground_focus(target_win.NativeWindowHandle)
+                    target_win.SetActive()
+                    target_win.SetFocus()
+                    time.sleep(0.4)
+
             hwnd = user32.GetForegroundWindow()
-            win = auto.ControlFromHandle(hwnd)
+            win = target_win or auto.ControlFromHandle(hwnd)
             query_lower = semantic_query.lower()
 
             target_ctrl = None
+            q_words = [w for w in query_lower.split() if len(w) > 2]
             def find_match(ctrl, depth=0):
                 nonlocal target_ctrl
-                if target_ctrl or depth > 12:
+                if target_ctrl or depth > 22:
                     return
                 for child in ctrl.GetChildren():
                     name = (child.Name or "").lower()
                     auto_id = (child.AutomationId or "").lower()
-                    if query_lower in name or query_lower in auto_id:
+                    help_txt = (child.HelpText or "").lower()
+                    ct_lower = (child.ControlTypeName or "").lower()
+                    is_match = (
+                        query_lower in name or
+                        (name and name in query_lower and len(name) >= 4) or
+                        query_lower in auto_id or
+                        query_lower in help_txt or
+                        (any(qw in name for qw in q_words) and any(kw in ct_lower for kw in ['button', 'item', 'hyperlink', 'text']))
+                    )
+                    if is_match:
                         target_ctrl = child
                         return
                     find_match(child, depth + 1)
 
-            find_match(win)
+            if win:
+                find_match(win)
+
+            # If not found in current/target window, search across all open application windows
+            if not target_ctrl:
+                for w in root.GetChildren():
+                    w_name = (w.Name or "").lower()
+                    if any(ignored in w_name for ignored in ["program manager", "taskbar", "powershell", "cmd.exe"]):
+                        continue
+                    find_match(w)
+                    if target_ctrl:
+                        force_foreground_focus(w.NativeWindowHandle)
+                        w.SetActive()
+                        time.sleep(0.3)
+                        break
 
             if target_ctrl:
                 try:
@@ -248,10 +291,27 @@ class ComputerUseEngine:
                 except Exception:
                     pass
 
-                target_ctrl.Click()
-                return {"success": True, "clicked": target_ctrl.Name, "method": "Click"}
+                try:
+                    target_ctrl.Click()
+                    return {"success": True, "clicked": target_ctrl.Name, "method": "Click"}
+                except Exception:
+                    r = target_ctrl.BoundingRectangle
+                    if r.width() > 0 and r.height() > 0:
+                        auto.Click(r.xcenter(), r.ycenter())
+                        return {"success": True, "clicked": target_ctrl.Name, "method": "CoordClick"}
 
-            return {"success": False, "message": f"Element matching '{semantic_query}' not found in active window."}
+            # Smart fallback for IDEs when accepting changes (e.g. Antigravity / VS Code)
+            if any(w in query_lower for w in ["accept", "proceed", "keep"]):
+                # Bring target window to focus if known
+                if win:
+                    force_foreground_focus(win.NativeWindowHandle)
+                    time.sleep(0.2)
+                auto.SendKeys('{Alt}a')
+                time.sleep(0.3)
+                auto.SendKeys('{Ctrl}{Enter}')
+                return {"success": True, "clicked": f"Accepted changes via shortcut in {app_name or 'IDE'}", "method": "Shortcut"}
+
+            return {"success": False, "message": f"Element matching '{semantic_query}' not found."}
 
         return self._execute_in_desktop_thread(_inner)
 
@@ -351,24 +411,75 @@ class ComputerUseEngine:
                     win.SetFocus()
                     time.sleep(0.3)
 
-                    # Ensure in chat view
-                    auto.SendKeys('{Ctrl}2')
-                    time.sleep(0.3)
+                    legacy = wake_chrome_accessibility(win)
+                    doc = legacy.GetChildren()[0] if legacy and legacy.GetChildren() else win
 
-                    # Search contact
-                    auto.SendKeys('{Ctrl}e')
-                    time.sleep(0.2)
-                    auto.SendKeys('{Ctrl}a{Back}')
-                    auto.SendKeys(contact_name, waitTime=0.05)
-                    time.sleep(1.0)
-                    auto.SendKeys('{Down}{Enter}')
-                    time.sleep(1.0)
+                    win_rect = win.BoundingRectangle
+                    mid_x = win_rect.left + win_rect.width() * 0.5
 
-                    # Official Teams 2.1 shortcut: Alt+Shift+A (Audio Call), Alt+Shift+V (Video Call)
-                    if call_type.lower() == "video":
-                        auto.SendKeys('{Alt}{Shift}v')
+                    # 1. Look for contact directly in the visible chat list on the left with mouse hover & click
+                    contact_ctrl = None
+                    def find_contact(ctrl, d=0):
+                        nonlocal contact_ctrl
+                        if contact_ctrl or d > 25: return
+                        nm = (ctrl.Name or '').strip().lower()
+                        if ctrl.ControlTypeName in ['TreeItemControl', 'ListItemControl', 'TextControl'] and contact_name.lower() in nm:
+                            r = ctrl.BoundingRectangle
+                            if r.left < mid_x and r.top > 80:
+                                contact_ctrl = ctrl
+                                return
+                        for sub in ctrl.GetChildren():
+                            find_contact(sub, d + 1)
+                    find_contact(doc)
+
+                    if contact_ctrl:
+                        r = contact_ctrl.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.12)
+                        auto.Click(r.xcenter(), r.ycenter())
+                        time.sleep(0.8)
                     else:
-                        auto.SendKeys('{Alt}{Shift}a')
+                        # Fallback: search box
+                        auto.SendKeys('{Ctrl}e')
+                        time.sleep(0.2)
+                        auto.SendKeys('{Ctrl}a{Back}')
+                        auto.SendKeys(contact_name, waitTime=0.03)
+                        time.sleep(0.8)
+                        auto.SendKeys('{Enter}')
+                        time.sleep(1.0)
+
+                    # 2. In chat header, hover mouse to Audio call / Video call button and click
+                    target_call = "video call" if call_type.lower() == "video" else "audio call"
+                    call_btn = None
+                    for _ in range(5):
+                        for c in doc.GetChildren():
+                            def find_call(ctrl, d=0):
+                                nonlocal call_btn
+                                if call_btn or d > 25: return
+                                nm = (ctrl.Name or '').strip().lower()
+                                if ctrl.ControlTypeName == 'ButtonControl' and target_call in nm:
+                                    call_btn = ctrl
+                                    return
+                                for sub in ctrl.GetChildren():
+                                    find_call(sub, d + 1)
+                            find_call(c)
+                        if call_btn:
+                            break
+                        time.sleep(0.3)
+
+                    if call_btn:
+                        r = call_btn.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.15)
+                        try:
+                            call_btn.Click()
+                        except Exception:
+                            auto.Click(r.xcenter(), r.ycenter())
+                    else:
+                        if call_type.lower() == "video":
+                            auto.SendKeys('{Alt}{Shift}v')
+                        else:
+                            auto.SendKeys('{Alt}{Shift}a')
 
                     return {
                         "success": True,
@@ -382,7 +493,7 @@ class ComputerUseEngine:
             # WHATSAPP WEB (Google Chrome / Edge)
             # -------------------------------------------------------------
             elif "whatsapp" in app_lower:
-                # Find WhatsApp window (Chrome or Desktop)
+                # Find WhatsApp Web / Desktop window
                 win = None
                 root = auto.GetRootControl()
                 for w in root.GetChildren():
@@ -393,7 +504,7 @@ class ComputerUseEngine:
 
                 if not win:
                     webbrowser.open("https://web.whatsapp.com")
-                    time.sleep(3.5)
+                    time.sleep(2.5)
                     for w in root.GetChildren():
                         if "whatsapp" in (w.Name or "").lower():
                             win = w
@@ -405,86 +516,94 @@ class ComputerUseEngine:
 
                     # Wake Chrome accessibility if in browser
                     legacy = wake_chrome_accessibility(win)
-                    doc = legacy.DocumentControl(Name='WhatsApp') if legacy else win
+                    doc = win
+                    if legacy:
+                        for c in legacy.GetChildren():
+                            if c.ControlTypeName == 'DocumentControl':
+                                doc = c
+                                break
 
-                    # Find Search Edit Box
+                    # Find and click WhatsApp Search box
                     search_edit = None
                     for c in doc.GetChildren():
-                        def find_se(ctrl):
+                        def find_se(ctrl, d=0):
                             nonlocal search_edit
-                            if search_edit: return
-                            if ctrl.ControlTypeName == 'EditControl':
-                                r = ctrl.BoundingRectangle
-                                if 200 < r.top < 300 and r.left < 300:
-                                    search_edit = ctrl
-                                    return
+                            if search_edit or d > 12: return
+                            if ctrl.ControlTypeName == 'EditControl' and ('search' in (ctrl.Name or '').lower() or not search_edit):
+                                search_edit = ctrl
+                                return
                             for sub in ctrl.GetChildren():
-                                find_se(sub)
-                        find_se(doc)
+                                find_se(sub, d + 1)
+                        find_se(c)
+                        if search_edit:
+                            break
 
                     if search_edit:
-                        search_edit.Click()
+                        r = search_edit.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.1)
+                        try:
+                            search_edit.Click()
+                        except Exception:
+                            auto.Click(r.xcenter(), r.ycenter())
                         time.sleep(0.2)
-                        auto.SendKeys('{Ctrl}a{Back}')
-                        time.sleep(0.2)
-                        auto.SendKeys(contact_name, waitTime=0.05)
-                        time.sleep(1.0)
-
-                    # Select recipient from search results
-                    target_item = None
-                    for _ in range(5):
-                        for c in doc.GetChildren():
-                            def find_item(ctrl):
-                                nonlocal target_item
-                                if target_item: return
-                                if ctrl.ControlTypeName == 'DataItemControl' and contact_name.lower() in (ctrl.Name or '').lower():
-                                    target_item = ctrl
-                                    return
-                                for sub in ctrl.GetChildren():
-                                    find_item(sub)
-                            find_item(doc)
-                        if target_item:
-                            break
-                        time.sleep(0.3)
-
-                    if target_item:
-                        target_item.Click()
-                        time.sleep(1.2)
                     else:
-                        auto.SendKeys('{Down}{Enter}')
-                        time.sleep(1.2)
+                        auto.SendKeys('{Ctrl}{Alt}/')
+                        time.sleep(0.2)
 
-                    # Click Call Button in Header
-                    btn_name = "Video call" if call_type.lower() == "video" else "Voice call"
+                    auto.SendKeys('{Ctrl}a{Back}')
+                    time.sleep(0.15)
+                    auto.SendKeys(contact_name, waitTime=0.03)
+                    time.sleep(0.8)
+                    auto.SendKeys('{Enter}')
+                    time.sleep(1.0)
+
+                    # Click Call Button in Chat Header (RIGHT side of window, NOT left nav tab)
+                    btn_name = "video call" if call_type.lower() == "video" else "voice call"
+                    win_rect = win.BoundingRectangle
+                    min_header_x = win_rect.left + win_rect.width() * 0.4
                     call_btn = None
-                    for _ in range(5):
+                    for _ in range(6):
                         for c in doc.GetChildren():
-                            def find_btn(ctrl):
+                            def find_btn(ctrl, d=0):
                                 nonlocal call_btn
-                                if call_btn: return
-                                if ctrl.ControlTypeName == 'ButtonControl' and ctrl.Name == btn_name:
-                                    call_btn = ctrl
-                                    return
+                                if call_btn or d > 12: return
+                                if ctrl.ControlTypeName == 'ButtonControl':
+                                    nm = (ctrl.Name or '').strip().lower()
+                                    r = ctrl.BoundingRectangle
+                                    if nm == btn_name and r.left > min_header_x:
+                                        call_btn = ctrl
+                                        return
                                 for sub in ctrl.GetChildren():
-                                    find_btn(sub)
-                            find_btn(doc)
+                                    find_btn(sub, d + 1)
+                            find_btn(c)
                         if call_btn:
                             break
                         time.sleep(0.3)
 
                     if call_btn:
-                        call_btn.Click()
+                        r = call_btn.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.15)
+                        try:
+                            call_btn.Click()
+                        except Exception:
+                            try:
+                                call_btn.GetInvokePattern().Invoke()
+                            except Exception:
+                                auto.Click(r.xcenter(), r.ycenter())
                         time.sleep(1.5)
 
                         # Auto-accept Chrome camera/mic permission if prompted
                         for c in win.GetChildren():
-                            def check_allow(ctrl):
+                            def check_allow(ctrl, d=0):
+                                if d > 8: return False
                                 name = (ctrl.Name or "").lower()
-                                if ctrl.ControlTypeName == 'ButtonControl' and any(k in name for k in ['allow while visiting', 'allow this time']):
+                                if ctrl.ControlTypeName == 'ButtonControl' and any(k in name for k in ['allow while visiting', 'allow this time', 'allow']):
                                     ctrl.Click()
                                     return True
                                 for sub in ctrl.GetChildren():
-                                    if check_allow(sub): return True
+                                    if check_allow(sub, d + 1): return True
                                 return False
                             if check_allow(c): break
 
@@ -494,6 +613,13 @@ class ComputerUseEngine:
                             "contact": contact_name,
                             "call_type": call_type,
                             "message": f"WhatsApp {call_type} call placed to '{contact_name}'."
+                        }
+                    else:
+                        return {
+                            "success": False,
+                            "app": "WhatsApp Web",
+                            "contact": contact_name,
+                            "message": f"Contact '{contact_name}' open ho gaya hai, lekin chat header mein call button nahi mila."
                         }
 
             # Generic fallback
@@ -539,28 +665,99 @@ class ComputerUseEngine:
                     win.SetFocus()
                     time.sleep(0.3)
 
-                    # Ensure in chat view
-                    auto.SendKeys('{Ctrl}2')
-                    time.sleep(0.3)
+                    legacy = wake_chrome_accessibility(win)
+                    doc = legacy.GetChildren()[0] if legacy and legacy.GetChildren() else win
 
-                    # New Chat
-                    auto.SendKeys('{Ctrl}n')
-                    time.sleep(0.5)
+                    win_rect = win.BoundingRectangle
+                    mid_x = win_rect.left + win_rect.width() * 0.5
 
-                    # Search recipient
-                    auto.SendKeys(contact_name, waitTime=0.05)
-                    time.sleep(1.0)
-                    auto.SendKeys('{Down}{Enter}')
-                    time.sleep(0.5)
+                    # 1. Look for contact directly in the visible chat list on the left with mouse hover & click
+                    contact_ctrl = None
+                    def find_contact(ctrl, d=0):
+                        nonlocal contact_ctrl
+                        if contact_ctrl or d > 25: return
+                        nm = (ctrl.Name or '').strip().lower()
+                        if ctrl.ControlTypeName in ['TreeItemControl', 'ListItemControl', 'TextControl'] and contact_name.lower() in nm:
+                            r = ctrl.BoundingRectangle
+                            if r.left < mid_x and r.top > 80:
+                                contact_ctrl = ctrl
+                                return
+                        for sub in ctrl.GetChildren():
+                            find_contact(sub, d + 1)
+                    find_contact(doc)
 
-                    # Jump to message compose box
-                    auto.SendKeys('{Tab}')
-                    time.sleep(0.3)
+                    if contact_ctrl:
+                        r = contact_ctrl.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.12)
+                        auto.Click(r.xcenter(), r.ycenter())
+                        time.sleep(0.8)
+                    else:
+                        # Fallback: search box
+                        auto.SendKeys('{Ctrl}e')
+                        time.sleep(0.2)
+                        auto.SendKeys('{Ctrl}a{Back}')
+                        auto.SendKeys(contact_name, waitTime=0.03)
+                        time.sleep(0.8)
+                        auto.SendKeys('{Enter}')
+                        time.sleep(1.0)
 
-                    # Type & send
+                    # 2. Hover mouse over Compose box ('Type a message') and click
+                    compose_box = None
+                    for _ in range(5):
+                        for c in doc.GetChildren():
+                            def find_compose(ctrl, d=0):
+                                nonlocal compose_box
+                                if compose_box or d > 25: return
+                                nm = (ctrl.Name or '').strip().lower()
+                                if ctrl.ControlTypeName == 'EditControl' and any(k in nm for k in ['type a message', 'message']):
+                                    compose_box = ctrl
+                                    return
+                                for sub in ctrl.GetChildren():
+                                    find_compose(sub, d + 1)
+                            find_compose(c)
+                        if compose_box:
+                            break
+                        time.sleep(0.3)
+
+                    if compose_box:
+                        r = compose_box.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.12)
+                        auto.Click(r.xcenter(), r.ycenter())
+                        time.sleep(0.15)
+                    else:
+                        auto.SendKeys('{Tab}')
+                        time.sleep(0.2)
+
                     auto.SendKeys(message, waitTime=0.03)
                     time.sleep(0.3)
-                    auto.SendKeys('{Enter}')
+
+                    # Look for Teams Send button or use Ctrl+Enter (since modern Teams treats Enter as newline)
+                    send_btn = None
+                    for c in doc.GetChildren():
+                        def find_send(ctrl, d=0):
+                            nonlocal send_btn
+                            if send_btn or d > 25: return
+                            if ctrl.ControlTypeName == 'ButtonControl' and 'send' in (ctrl.Name or '').lower():
+                                send_btn = ctrl
+                                return
+                            for sub in ctrl.GetChildren():
+                                find_send(sub, d + 1)
+                        find_send(c)
+                        if send_btn:
+                            break
+
+                    if send_btn and send_btn.BoundingRectangle.width() > 0 and send_btn.BoundingRectangle.left > 0:
+                        r = send_btn.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.12)
+                        try:
+                            send_btn.Click()
+                        except Exception:
+                            auto.Click(r.xcenter(), r.ycenter())
+                    else:
+                        auto.SendKeys('{Ctrl}{Enter}')
 
                     return {
                         "success": True,
@@ -583,7 +780,7 @@ class ComputerUseEngine:
 
                 if not win:
                     webbrowser.open("https://web.whatsapp.com")
-                    time.sleep(3.5)
+                    time.sleep(2.5)
                     for w in root.GetChildren():
                         if "whatsapp" in (w.Name or "").lower():
                             win = w
@@ -594,77 +791,78 @@ class ComputerUseEngine:
                     time.sleep(0.3)
 
                     legacy = wake_chrome_accessibility(win)
-                    doc = legacy.DocumentControl(Name='WhatsApp') if legacy else win
+                    doc = win
+                    if legacy:
+                        for c in legacy.GetChildren():
+                            if c.ControlTypeName == 'DocumentControl':
+                                doc = c
+                                break
 
-                    # Find Search Edit Box
+                    # Focus WhatsApp Search box
                     search_edit = None
                     for c in doc.GetChildren():
-                        def find_se(ctrl):
+                        def find_se(ctrl, d=0):
                             nonlocal search_edit
-                            if search_edit: return
-                            if ctrl.ControlTypeName == 'EditControl':
-                                r = ctrl.BoundingRectangle
-                                if 200 < r.top < 300 and r.left < 300:
-                                    search_edit = ctrl
-                                    return
+                            if search_edit or d > 12: return
+                            if ctrl.ControlTypeName == 'EditControl' and ('search' in (ctrl.Name or '').lower() or not search_edit):
+                                search_edit = ctrl
+                                return
                             for sub in ctrl.GetChildren():
-                                find_se(sub)
-                        find_se(doc)
+                                find_se(sub, d + 1)
+                        find_se(c)
+                        if search_edit:
+                            break
 
                     if search_edit:
-                        search_edit.Click()
+                        r = search_edit.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.1)
+                        try:
+                            search_edit.Click()
+                        except Exception:
+                            auto.Click(r.xcenter(), r.ycenter())
                         time.sleep(0.2)
-                        auto.SendKeys('{Ctrl}a{Back}')
-                        time.sleep(0.2)
-                        auto.SendKeys(contact_name, waitTime=0.05)
-                        time.sleep(1.0)
-
-                    # Find and click contact
-                    target_item = None
-                    for _ in range(5):
-                        for c in doc.GetChildren():
-                            def find_item(ctrl):
-                                nonlocal target_item
-                                if target_item: return
-                                if ctrl.ControlTypeName == 'DataItemControl' and contact_name.lower() in (ctrl.Name or '').lower():
-                                    target_item = ctrl
-                                    return
-                                for sub in ctrl.GetChildren():
-                                    find_item(sub)
-                            find_item(doc)
-                        if target_item:
-                            break
-                        time.sleep(0.3)
-
-                    if target_item:
-                        target_item.Click()
-                        time.sleep(1.0)
                     else:
-                        auto.SendKeys('{Down}{Enter}')
-                        time.sleep(1.0)
+                        auto.SendKeys('{Ctrl}{Alt}/')
+                        time.sleep(0.2)
 
-                    # Find compose box
+                    auto.SendKeys('{Ctrl}a{Back}')
+                    time.sleep(0.15)
+                    auto.SendKeys(contact_name, waitTime=0.03)
+                    time.sleep(0.8)
+
+                    # In WhatsApp Web, pressing Enter on the search result opens that chat directly
+                    auto.SendKeys('{Enter}')
+                    time.sleep(1.0)
+
+                    # Find and click compose box
                     compose_box = None
-                    for _ in range(5):
+                    for _ in range(6):
                         for c in doc.GetChildren():
-                            def find_msg_box(ctrl):
+                            def find_msg_box(ctrl, d=0):
                                 nonlocal compose_box
-                                if compose_box: return
-                                if ctrl.ControlTypeName == 'EditControl' and any(k in (ctrl.Name or '').lower() for k in ['type a message', 'message']):
+                                if compose_box or d > 15: return
+                                if ctrl.ControlTypeName == 'EditControl' and any(k in (ctrl.Name or '').lower() for k in ['type a message', 'message', 'type']):
                                     compose_box = ctrl
                                     return
                                 for sub in ctrl.GetChildren():
-                                    find_msg_box(sub)
-                            find_msg_box(doc)
+                                    find_msg_box(sub, d + 1)
+                            find_msg_box(c)
                         if compose_box:
                             break
                         time.sleep(0.3)
 
                     if compose_box:
-                        compose_box.Click()
+                        r = compose_box.BoundingRectangle
+                        auto.MoveTo(r.xcenter(), r.ycenter())
+                        time.sleep(0.12)
+                        try:
+                            compose_box.Click()
+                        except Exception:
+                            auto.Click(r.xcenter(), r.ycenter())
                         time.sleep(0.2)
 
-                    auto.SendKeys(message, waitTime=0.04)
+                    auto.SendKeys(message, waitTime=0.03)
                     time.sleep(0.3)
                     auto.SendKeys('{Enter}')
 
@@ -681,5 +879,198 @@ class ComputerUseEngine:
             time.sleep(0.6)
             self.type_into_input(message, press_enter=True)
             return {"success": True, "app": app_name, "contact": contact_name, "message": f"Dispatched '{message}' to '{contact_name}' on {app_name}."}
+
+        return self._execute_in_desktop_thread(_inner)
+
+    def inspect_window_content(self, target_app_or_url: Optional[str] = None, max_items: int = 40) -> dict:
+        """
+        Universal Screen & Window Perception Primitive:
+        Extracts all visible text, items, and UI hierarchy from the target or active window.
+        Pure OS extraction with ZERO hardcoded keywords, company names, or filters.
+        Passes raw observed text directly to Gemini Brain for semantic reasoning.
+        """
+        def _inner():
+            import uiautomation as auto
+            root = auto.GetRootControl()
+
+            target_win = None
+            if target_app_or_url:
+                target_lower = target_app_or_url.lower()
+                for w in root.GetChildren():
+                    name = (w.Name or "").lower()
+                    cls = (w.ClassName or "").lower()
+                    if target_lower in name or target_lower in cls:
+                        target_win = w
+                        break
+
+            if not target_win:
+                hwnd = user32.GetForegroundWindow()
+                target_win = auto.ControlFromHandle(hwnd)
+
+            if not target_win:
+                return {"success": False, "items": [], "raw_text": "", "message": "No active window found on screen."}
+
+            force_foreground_focus(target_win.NativeWindowHandle)
+            target_win.SetActive()
+            time.sleep(0.25)
+
+            # Wake accessibility if browser or Electron app
+            wake_chrome_accessibility(target_win)
+            time.sleep(0.15)
+
+            collected_lines = []
+            seen_texts = set()
+
+            def traverse(ctrl, depth=0):
+                if depth > 22 or len(collected_lines) >= max_items:
+                    return
+
+                name = (ctrl.Name or "").strip()
+                val = ""
+                try:
+                    val = (ctrl.GetValuePattern().Value or "").strip() if ctrl.GetValuePattern() else ""
+                except Exception:
+                    pass
+
+                text = name or val
+                if text and len(text) > 1:
+                    clean_text = " ".join(text.split())
+                    if clean_text not in seen_texts:
+                        seen_texts.add(clean_text)
+                        collected_lines.append(clean_text)
+
+                for child in ctrl.GetChildren():
+                    traverse(child, depth + 1)
+
+            traverse(target_win)
+
+            full_text = "\n".join(collected_lines)
+            return {
+                "success": True,
+                "window_title": target_win.Name or "Active Window",
+                "total_items": len(collected_lines),
+                "items": collected_lines,
+                "raw_text": full_text[:4000]
+            }
+
+        return self._execute_in_desktop_thread(_inner)
+
+    def inspect_messages_in_background(self, app_name: str = "WhatsApp", contact_name: str = "") -> dict:
+        """
+        Background perception primitive: inspects WhatsApp, Teams, or ANY communication window/tab
+        for new incoming messages WITHOUT stealing foreground focus or disrupting user's active work.
+        """
+        def _inner():
+            import uiautomation as auto
+            import psutil
+            import re
+            root = auto.GetRootControl()
+
+            app_lower = (app_name or "").lower().strip()
+            contact_lower = (contact_name or "").lower().strip()
+
+            target_win = None
+            target_tab = None
+            browser_windows = []
+
+            # 1. Scan all top-level desktop windows
+            for w in root.GetChildren():
+                name = (w.Name or "").lower()
+                pid = w.ProcessId
+                pname = ""
+                try:
+                    pname = psutil.Process(pid).name().lower() if pid else ""
+                except Exception:
+                    pass
+
+                # Direct standalone window match (e.g. Teams, WhatsApp Desktop, Telegram, Discord, Slack)
+                if app_lower and (app_lower in name or app_lower in pname):
+                    target_win = w
+                    break
+
+                # Collect real browser windows (Chrome, Edge, Brave, Firefox, Opera)
+                if any(b in pname for b in ["chrome.exe", "msedge.exe", "brave.exe", "firefox.exe", "opera.exe"]):
+                    browser_windows.append(w)
+                elif any(b in name for b in ["google chrome", "microsoft edge", "brave", "firefox"]):
+                    browser_windows.append(w)
+
+            # 2. If not a standalone window, search browser tabs for the web application (e.g. WhatsApp Web, Teams Web)
+            if not target_win and browser_windows:
+                for b_win in browser_windows:
+                    def scan_tabs(ctrl, depth=0):
+                        nonlocal target_win, target_tab
+                        if depth > 12 or target_tab:
+                            return
+                        c_type = ctrl.ControlTypeName.lower()
+                        c_name = (ctrl.Name or "").lower()
+                        if "tabitem" in c_type and app_lower in c_name:
+                            target_win = b_win
+                            target_tab = ctrl
+                            return
+                        for child in ctrl.GetChildren():
+                            scan_tabs(child, depth + 1)
+
+                    scan_tabs(b_win)
+                    if target_tab:
+                        break
+
+            if not target_win:
+                return {
+                    "found": False,
+                    "snippet": None,
+                    "has_unread": False,
+                    "unread_count": 0,
+                    "matched_contact": False
+                }
+
+            # 3. Determine Title & Unread Indicators
+            win_title = target_win.Name or ""
+            tab_title = target_tab.Name or "" if target_tab else ""
+            eval_title = tab_title if tab_title else win_title
+
+            # Check unread badge pattern like (1), (2), (99+), or [1] in tab or window title
+            unread_match = re.search(r'[\(\[](\d+)\+?[\)\]]', eval_title)
+            unread_count = int(unread_match.group(1)) if unread_match else 0
+            has_unread = (unread_count > 0) or ("unread" in eval_title.lower())
+
+            # 4. Deep Inspection for Contact Name and Message Snippet
+            detected_snippet = None
+            matched_contact = False
+
+            if contact_lower and contact_lower in eval_title.lower():
+                matched_contact = True
+                detected_snippet = eval_title
+
+            def traverse_elements(ctrl, depth=0):
+                nonlocal detected_snippet, matched_contact
+                if depth > 15 or (detected_snippet and matched_contact):
+                    return
+
+                nm = (ctrl.Name or "").strip()
+                if nm and len(nm) > 1 and "memory usage" not in nm.lower():
+                    nm_lower = nm.lower()
+                    if contact_lower and contact_lower in nm_lower:
+                        matched_contact = True
+                        detected_snippet = nm
+                        return
+                    if not detected_snippet and any(u in nm_lower for u in ["unread", "new message", "unread message"]):
+                        detected_snippet = nm
+
+                for child in ctrl.GetChildren():
+                    traverse_elements(child, depth + 1)
+
+            traverse_elements(target_tab if target_tab else target_win)
+
+            final_snippet = detected_snippet or eval_title
+
+            return {
+                "found": True,
+                "window_title": win_title,
+                "tab_title": tab_title,
+                "snippet": final_snippet,
+                "has_unread": has_unread or ("unread" in (final_snippet or "").lower()),
+                "unread_count": unread_count,
+                "matched_contact": matched_contact
+            }
 
         return self._execute_in_desktop_thread(_inner)

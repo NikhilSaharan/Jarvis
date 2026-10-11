@@ -19,8 +19,10 @@ class JarvisOrchestrator:
         self.brain = UniversalGeminiBrain()
         self.executor = ToolExecutor(self.win_ctrl, self.db, self.state, brain=self.brain)
         self.speaker = JarvisSpeaker()
-        self.heartbeat = HeartbeatDaemon(self.state, self.win_ctrl, self.db, self.speaker)
+        self.heartbeat = HeartbeatDaemon(self.state, self.win_ctrl, self.db, self.speaker, brain=self.brain)
+        self.executor.set_heartbeat(self.heartbeat)
         self.listener = JarvisListener()
+        self.listener.set_speaker(self.speaker)
 
         if start_heartbeat:
             self.heartbeat.start()
@@ -34,6 +36,7 @@ class JarvisOrchestrator:
             if cmd:
                 print(f"[Orchestrator Voice Dispatch] Processing command: '{cmd}'")
                 self.process_command(cmd, speak_output=True)
+                self.listener.keep_session_alive()
 
         def _on_wake():
             print("[Orchestrator] Wake word confirmed. Standing by for Sir's orders.")
@@ -66,7 +69,15 @@ class JarvisOrchestrator:
         # Step 2: Execute actions on Windows OS / Database
         execution_results = self.executor.execute_all(tool_calls)
 
-        # Step 3: Vocalize response
+        # Step 3: Ground response in real observation data if tool returned live perception
+        for res in execution_results:
+            if res.get("has_observation"):
+                obs_data = res.get("observation_data", res.get("message"))
+                if hasattr(self.brain, "synthesize_observation_speech"):
+                    speech_text = self.brain.synthesize_observation_speech(user_text, obs_data)
+                break
+
+        # Step 4: Vocalize response
         if speak_output and speech_text:
             self.speaker.speak(speech_text)
 

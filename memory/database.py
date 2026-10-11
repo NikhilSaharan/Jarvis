@@ -161,12 +161,40 @@ class KnowledgeDatabase:
 
     def log_activity_session(self, window_title: str, process_name: str, duration_seconds: int) -> int:
         """Logs user active focus time on applications."""
+        return self.log_window_activity(window_title, process_name, duration_seconds)
+
+    def log_window_activity(self, window_title: str, process_name: str, duration_seconds: int = 0) -> int:
+        """Logs active window switch or application event with local timestamp."""
+        if not window_title and not process_name:
+            return 0
         with self.conn:
             cursor = self.conn.execute("""
-                INSERT INTO activity_logs (window_title, process_name, duration_seconds)
-                VALUES (?, ?, ?)
-            """, (window_title, process_name, duration_seconds))
+                INSERT INTO activity_logs (window_title, process_name, duration_seconds, timestamp)
+                VALUES (?, ?, ?, datetime('now', 'localtime'))
+            """, (window_title.strip()[:250], process_name.strip()[:100], int(duration_seconds)))
             return cursor.lastrowid
+
+    def get_recent_activity_logs(self, minutes: int = 5, limit: int = 40) -> list:
+        """Fetches chronological window and application activity for the past N minutes."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT window_title, process_name, duration_seconds, timestamp
+            FROM activity_logs
+            WHERE timestamp >= datetime('now', 'localtime', '-' || ? || ' minutes')
+            ORDER BY id DESC
+            LIMIT ?
+        """, (int(minutes), int(limit)))
+        rows = cursor.fetchall()
+        # Return in chronological order (oldest to newest)
+        return [
+            {
+                "window_title": r[0],
+                "process_name": r[1],
+                "duration_seconds": r[2],
+                "timestamp": r[3]
+            }
+            for r in reversed(rows)
+        ]
 
 
     def delete_entity(self, name: str) -> bool:

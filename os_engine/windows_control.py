@@ -355,5 +355,34 @@ class WindowsController:
         return self.open_url(url)
 
     def play_youtube(self, query: str) -> bool:
-        """Searches YouTube and opens the result in default browser."""
-        return self.search_web(query, engine="youtube")
+        """
+        Searches YouTube, extracts the first matching video ID,
+        and directly opens the watch URL so the video starts playing immediately!
+        """
+        import urllib.request
+        import urllib.parse
+        import re
+
+        clean_query = query.strip()
+        encoded = urllib.parse.quote_plus(clean_query)
+        search_url = f"https://www.youtube.com/results?search_query={encoded}"
+
+        try:
+            req = urllib.request.Request(
+                search_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            )
+            html = urllib.request.urlopen(req, timeout=5.0).read().decode("utf-8")
+            # Extract video IDs from search response
+            video_ids = [
+                vid for vid in re.findall(r'/watch\?v=([a-zA-Z0-9_-]{11})', html)
+                if len(vid) == 11
+            ]
+            if video_ids:
+                play_url = f"https://www.youtube.com/watch?v={video_ids[0]}"
+                print(f"[WindowsController] Found top video for '{clean_query}': {play_url}")
+                return self.open_url(play_url)
+        except Exception as e:
+            print(f"[WindowsController Warning] Could not extract direct video ID ({e}), falling back to search page.")
+
+        return self.open_url(search_url)
