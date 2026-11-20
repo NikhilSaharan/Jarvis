@@ -4,3 +4,9 @@ data/jarvis.db
 mobile/data/
 __pycache__/
 *.py[cod]
+*.zip
+log_server.py
+phone_logs.txt
+android/.gradle
+android/build
+android/app/build

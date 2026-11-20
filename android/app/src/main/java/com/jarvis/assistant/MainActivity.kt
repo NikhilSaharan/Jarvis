@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnAccessibility: Button
     private lateinit var btnDnd: Button
     private lateinit var btnOverlay: Button
+    private lateinit var btnApiKey: Button
     private lateinit var btnTalk: Button
     private lateinit var etCommandInput: EditText
     private lateinit var btnSendCommand: Button
@@ -93,6 +94,7 @@ class MainActivity : AppCompatActivity() {
         btnAccessibility = findViewById(R.id.btnAccessibility)
         btnDnd = findViewById(R.id.btnDnd)
         btnOverlay = findViewById(R.id.btnOverlay)
+        btnApiKey = findViewById(R.id.btnApiKey)
         btnTalk = findViewById(R.id.btnTalk)
         etCommandInput = findViewById(R.id.etCommandInput)
         btnSendCommand = findViewById(R.id.btnSendCommand)
@@ -154,6 +156,29 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "Overlay already enabled!", Toast.LENGTH_SHORT).show()
                 }
             }
+        }
+
+        btnApiKey.setOnClickListener {
+            val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
+            val currentKey = prefs.getString("gemini_api_key", "") ?: ""
+            val input = EditText(this).apply {
+                setText(currentKey)
+                hint = "Enter/paste Gemini API Key"
+            }
+            AlertDialog.Builder(this)
+                .setTitle("Gemini API Key")
+                .setMessage("Paste your new Gemini API key here:")
+                .setView(input)
+                .setPositiveButton("Save") { _, _ ->
+                    val newKey = input.text.toString().trim()
+                    prefs.edit().putString("gemini_api_key", newKey).apply()
+                    val defaultKey = String(Base64.decode("QVEuQWI4Uk42SmFjdDVYX01QVm5WelNOd2prWkpRNnBrRjBLcGJ2TkcxTjFHTkpUSnBKV3c=", Base64.DEFAULT))
+                    geminiBrain = GeminiBrain(if (newKey.isNotBlank()) newKey else defaultKey)
+                    appendLog("[Config]: API Key updated successfully.")
+                    Toast.makeText(this, "API Key Saved!", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
         }
 
         // Voice button: Tap to talk

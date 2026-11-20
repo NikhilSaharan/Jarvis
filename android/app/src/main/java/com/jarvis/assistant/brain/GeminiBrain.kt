@@ -26,7 +26,8 @@ class GeminiBrain(private val apiKey: String) {
 
     private val gson = Gson()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
-    private val models = listOf("gemini-2.0-flash", "gemini-1.5-flash")
+    // STRICT PRIMARY MODEL: gemini-3.5-flash-lite
+    private val models = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 
     suspend fun processCommand(userText: String, screenElementsSummary: String = ""): ActionDecision = withContext(Dispatchers.IO) {
         val trimmed = userText.trim()
