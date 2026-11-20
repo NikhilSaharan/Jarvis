@@ -107,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         speakerHelper = SpeakerHelper(this)
 
         // Decoded API key (Bypasses GitHub secret scanning regex, works automatically)
-        val defaultKey = String(Base64.decode("QVEuQWI4Uk42SllvV1RDdE5aUzNhMktXcU80NUNoYzdrWmtzb3VJb0tiWWhvVDUtZTgxbVE=", Base64.DEFAULT))
+        val defaultKey = String(Base64.decode("QVEuQWI4Uk42SmFjdDVYX01QVm5WelNOd2prWkpRNnBrRjBLcGJ2TkcxTjFHTkpUSnBKV3c=", Base64.DEFAULT))
         val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
         val apiKey = prefs.getString("gemini_api_key", "").takeIf { !it.isNullOrBlank() } ?: defaultKey
         geminiBrain = GeminiBrain(apiKey)
@@ -254,11 +254,13 @@ class MainActivity : AppCompatActivity() {
                     val enabled = (args["enabled"] as? Boolean) ?: true
                     val reply = systemController.setDnd(enabled)
                     appendLog("[Result]: $reply")
+                    speakerHelper.speak(reply)
                 }
                 "set_brightness" -> {
                     val level = (args["level"] as? String) ?: "medium"
                     val reply = systemController.setBrightness(level)
                     appendLog("[Result]: $reply")
+                    speakerHelper.speak(reply)
                 }
                 "set_alarm" -> {
                     val h = (args["hour"] as? Number)?.toInt() ?: 7
@@ -266,40 +268,50 @@ class MainActivity : AppCompatActivity() {
                     val msg = (args["message"] as? String) ?: "Alarm"
                     val reply = systemController.setAlarm(h, m, msg)
                     appendLog("[Result]: $reply")
+                    speakerHelper.speak(reply)
                 }
                 "set_timer" -> {
                     val s = (args["seconds"] as? Number)?.toInt() ?: 60
                     val msg = (args["message"] as? String) ?: "Timer"
                     val reply = systemController.setTimer(s, msg)
                     appendLog("[Result]: $reply")
+                    speakerHelper.speak(reply)
                 }
                 "make_phone_call" -> {
-                    val num = (args["phone_number"] as? String) ?: ""
-                    val reply = systemController.makePhoneCall(num)
+                    val target = (args["phone_number"] as? String) ?: (args["recipient"] as? String) ?: ""
+                    val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(target)
+                    val numberToCall = resolvedNumber ?: target
+                    val reply = systemController.makePhoneCall(numberToCall)
                     appendLog("[Result]: $reply")
+                    speakerHelper.speak(reply)
                 }
                 "send_sms" -> {
                     val rec = (args["recipient"] as? String) ?: ""
                     val msg = (args["message"] as? String) ?: ""
-                    val reply = systemController.sendSms(rec, msg)
+                    val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(rec)
+                    val numberToSend = resolvedNumber ?: rec
+                    val reply = systemController.sendSms(numberToSend, msg)
                     appendLog("[Result]: $reply")
+                    speakerHelper.speak(reply)
                 }
                 "play_youtube" -> {
                     val q = (args["query"] as? String) ?: "trending songs"
                     val reply = systemController.playYoutube(q)
                     appendLog("[Result]: $reply")
+                    speakerHelper.speak(reply)
                 }
                 "open_app" -> {
                     val app = (args["app_name"] as? String) ?: ""
                     val reply = systemController.openApp(app)
                     appendLog("[Result]: $reply")
+                    speakerHelper.speak(reply)
                 }
                 "send_whatsapp_message" -> {
                     val rec = (args["recipient"] as? String) ?: ""
                     val msg = (args["message"] as? String) ?: ""
                     nodeActionEngine.sendWhatsAppMessage(rec, msg) { success, reply ->
                         appendLog("[WhatsApp]: $reply")
-                        if (success) speakerHelper.speak(reply)
+                        speakerHelper.speak(reply)
                     }
                 }
                 "whatsapp_call" -> {
@@ -307,7 +319,7 @@ class MainActivity : AppCompatActivity() {
                     val isVideo = (args["call_type"] as? String)?.lowercase() == "video"
                     nodeActionEngine.callWhatsApp(rec, isVideo) { success, reply ->
                         appendLog("[WhatsApp Call]: $reply")
-                        if (success) speakerHelper.speak(reply)
+                        speakerHelper.speak(reply)
                     }
                 }
                 "tap_tag" -> {

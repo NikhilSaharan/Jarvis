@@ -104,16 +104,28 @@ class SystemController(private val context: Context) {
     }
 
     /**
-     * Cellular SIM Call via native CALL intent.
+     * Cellular SIM Call via native CALL intent with DIAL fallback.
      */
     fun makePhoneCall(phoneNumber: String): String {
         val cleanNumber = phoneNumber.replace(Regex("[^0-9+]"), "")
-        val intent = Intent(Intent.ACTION_CALL).apply {
-            data = Uri.parse("tel:$cleanNumber")
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        if (cleanNumber.isEmpty()) {
+            return "Sir, '$phoneNumber' ka number nahi mil saka."
         }
-        context.startActivity(intent)
-        return "$phoneNumber ko call mila raha hoon Sir."
+        return try {
+            val intent = Intent(Intent.ACTION_CALL).apply {
+                data = Uri.parse("tel:$cleanNumber")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+            "$phoneNumber ko call mila raha hoon Sir."
+        } catch (e: Exception) {
+            val dialIntent = Intent(Intent.ACTION_DIAL).apply {
+                data = Uri.parse("tel:$cleanNumber")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(dialIntent)
+            "$phoneNumber dial pad par bhej diya hai Sir."
+        }
     }
 
     /**

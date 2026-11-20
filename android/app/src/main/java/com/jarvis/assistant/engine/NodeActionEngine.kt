@@ -53,10 +53,19 @@ class NodeActionEngine(
 
             val targetDesc = if (isVideo) "Video call" else "Voice call"
             val callBtn = service.findClickableNode(targetDesc)
+                ?: service.findClickableNode(if (isVideo) "video call" else "voice call")
+                ?: service.findClickableNode(if (isVideo) "Video" else "Voice")
+                ?: service.findClickableNode("Call")
 
             if (callBtn != null) {
                 val clicked = service.clickNode(callBtn)
                 if (clicked) {
+                    delay(500)
+                    // Auto-click confirmation dialog if WhatsApp shows "Start voice call? -> Call"
+                    val confirmBtn = service.findClickableNode("Call") ?: service.findClickableNode("CALL")
+                    if (confirmBtn != null && confirmBtn != callBtn) {
+                        service.clickNode(confirmBtn)
+                    }
                     val callTypeStr = if (isVideo) "video" else "voice"
                     callback(true, "WhatsApp par $displayName ko $callTypeStr call laga di hai Sir.")
                     return@launch
