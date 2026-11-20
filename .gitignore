@@ -1,4 +1,6 @@
 config/secrets.env
+mobile/config/secrets.env
 data/jarvis.db
+mobile/data/
 __pycache__/
 *.py[cod]

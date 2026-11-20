@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">J.A.R.V.I.S.</string>
+    <string name="accessibility_service_desc">J.A.R.V.I.S. Autonomous Android Assistant. Allows hands-free operation of apps, calling, and messaging via voice.</string>
+    <string name="status_online">J.A.R.V.I.S. Systems Online</string>
+    <string name="btn_enable_accessibility">1. Enable Accessibility Service</string>
+    <string name="btn_enable_dnd">2. Grant Do Not Disturb (DND) Access</string>
+    <string name="btn_enable_overlay">3. Enable Floating Arc-Reactor Overlay</string>
+    <string name="btn_test_voice">Talk to J.A.R.V.I.S.</string>
+</resources>

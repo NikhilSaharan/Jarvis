@@ -1,0 +1,17 @@
+{
+  "device": {
+    "default_pin": "1234"
+  },
+  "notification_watcher": {
+    "poll_interval_seconds": 2.5,
+    "ignored_packages": [
+      "com.android.systemui",
+      "com.google.android.googlequicksearchbox"
+    ]
+  },
+  "speech": {
+    "voice_id": "JBFqnCBsd6RMkjVDRZzb",
+    "model_id": "eleven_turbo_v2_5",
+    "fallback_voice": "en-GB-RyanNeural"
+  }
+}
