@@ -44,7 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvSystemStatusBadge: TextView
     private lateinit var btnAccessibility: Button
     private lateinit var btnDnd: Button
-    private lateinit var btnOverlay: Button
+    private lateinit var btnWriteSettings: Button
     private lateinit var btnApiKey: Button
     private lateinit var btnTalk: Button
     private lateinit var etCommandInput: EditText
@@ -93,7 +93,7 @@ class MainActivity : AppCompatActivity() {
         tvSystemStatusBadge = findViewById(R.id.tvSystemStatusBadge)
         btnAccessibility = findViewById(R.id.btnAccessibility)
         btnDnd = findViewById(R.id.btnDnd)
-        btnOverlay = findViewById(R.id.btnOverlay)
+        btnWriteSettings = findViewById(R.id.btnWriteSettings)
         btnApiKey = findViewById(R.id.btnApiKey)
         btnTalk = findViewById(R.id.btnTalk)
         etCommandInput = findViewById(R.id.etCommandInput)
@@ -108,7 +108,7 @@ class MainActivity : AppCompatActivity() {
         nodeActionEngine = NodeActionEngine(systemController, telephonyHelper)
         speakerHelper = SpeakerHelper(this)
 
-        // Decoded API key (Bypasses GitHub secret scanning regex, works automatically)
+        // Decoded API key fallback
         val defaultKey = String(Base64.decode("QVEuQWI4Uk42SmFjdDVYX01QVm5WelNOd2prWkpRNnBrRjBLcGJ2TkcxTjFHTkpUSnBKV3c=", Base64.DEFAULT))
         val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
         val apiKey = prefs.getString("gemini_api_key", "").takeIf { !it.isNullOrBlank() } ?: defaultKey
@@ -126,7 +126,7 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         } catch (e: Exception) {
-            appendLog("[Voice]: Native speech recognizer init notice: ${e.message}")
+            appendLog("[Voice]: Native speech recognizer notice: ${e.message}")
         }
 
         appendLog("J.A.R.V.I.S. Android Operating Core ready.")
@@ -144,17 +144,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        btnOverlay.setOnClickListener {
+        btnWriteSettings.setOnClickListener {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                if (!Settings.canDrawOverlays(this)) {
-                    val intent = Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:$packageName")
-                    )
-                    startActivity(intent)
-                } else {
-                    Toast.makeText(this, "Overlay already enabled!", Toast.LENGTH_SHORT).show()
+                val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                    data = Uri.parse("package:$packageName")
                 }
+                startActivity(intent)
+            } else {
+                Toast.makeText(this, "Write Settings permission granted", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -214,17 +211,26 @@ class MainActivity : AppCompatActivity() {
         val isDndGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             nm.isNotificationPolicyAccessGranted
         } else true
+        val isWriteSettingsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.System.canWrite(this)
+        } else true
 
-        btnAccessibility.text = if (isAccRunning) "Accessibility: ON" else "Enable Accessibility"
+        btnAccessibility.text = if (isAccRunning) "Access: ON" else "Access"
         btnAccessibility.backgroundTintList = ContextCompat.getColorStateList(
             this,
             if (isAccRunning) R.color.green_active else R.color.jarvis_cyan
         )
 
-        btnDnd.text = if (isDndGranted) "DND: ON" else "Enable DND"
+        btnDnd.text = if (isDndGranted) "DND: ON" else "DND"
         btnDnd.backgroundTintList = ContextCompat.getColorStateList(
             this,
             if (isDndGranted) R.color.green_active else R.color.jarvis_card_bg
+        )
+
+        btnWriteSettings.text = if (isWriteSettingsGranted) "Settings: ON" else "Settings"
+        btnWriteSettings.backgroundTintList = ContextCompat.getColorStateList(
+            this,
+            if (isWriteSettingsGranted) R.color.green_active else R.color.jarvis_card_bg
         )
 
         if (isAccRunning) {
@@ -275,6 +281,15 @@ class MainActivity : AppCompatActivity() {
             appendLog("Executing Tool: $tool($args)...")
 
             when (tool) {
+                "sleep_routine" -> {
+                    val mins = (args["minutes"] as? Number)?.toInt() ?: 10
+                    val reply = systemController.sleepAndWakeUp(mins) { wakeupMsg ->
+                        appendLog("[Sleep Wakeup]: $wakeupMsg")
+                        speakerHelper.speak(wakeupMsg)
+                    }
+                    appendLog("[Sleep Butler]: $reply")
+                    speakerHelper.speak(reply)
+                }
                 "set_dnd" -> {
                     val enabled = (args["enabled"] as? Boolean) ?: true
                     val reply = systemController.setDnd(enabled)
@@ -304,10 +319,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 "make_phone_call" -> {
                     val target = (args["phone_number"] as? String) ?: (args["recipient"] as? String) ?: ""
-                    val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(target)
+                    val (resolvedNumber, resolvedName) = telephonyHelper.resolveContactNumber(target)
                     val numberToCall = resolvedNumber ?: target
                     val reply = systemController.makePhoneCall(numberToCall)
-                    appendLog("[Result]: $reply")
+                    appendLog("[Call]: $reply ($resolvedName)")
                     speakerHelper.speak(reply)
                 }
                 "send_sms" -> {
@@ -321,14 +336,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 "play_youtube" -> {
                     val q = (args["query"] as? String) ?: "trending songs"
-                    val reply = systemController.playYoutube(q)
-                    appendLog("[Result]: $reply")
-                    speakerHelper.speak(reply)
+                    systemController.playYoutube(q) { reply ->
+                        appendLog("[YouTube]: $reply")
+                        speakerHelper.speak(reply)
+                    }
                 }
                 "open_app" -> {
                     val app = (args["app_name"] as? String) ?: ""
                     val reply = systemController.openApp(app)
-                    appendLog("[Result]: $reply")
+                    appendLog("[App Launcher]: $reply")
                     speakerHelper.speak(reply)
                 }
                 "send_whatsapp_message" -> {

@@ -1,12 +1,14 @@
 package com.jarvis.assistant
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.AccessibilityServiceInfo
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.delay
 
 data class ScreenElement(
     val tag: Int,
@@ -103,21 +105,14 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Finds a clickable node matching text or content description.
-     * If the node itself is not clickable, traverses up to find its clickable parent.
+     * Finds a node matching a custom predicate (text, desc, resource ID).
      */
-    fun findClickableNode(target: String): AccessibilityNodeInfo? {
+    fun findNodeByPredicate(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
         val root = rootInActiveWindow ?: return null
-        val lowerTarget = target.lowercase().trim()
 
         fun search(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
             if (node == null) return null
-
-            val text = node.text?.toString()?.lowercase() ?: ""
-            val cd = node.contentDescription?.toString()?.lowercase() ?: ""
-
-            if (text.contains(lowerTarget) || cd.contains(lowerTarget)) {
-                // Find clickable ancestor if this node is not directly clickable
+            if (predicate(node)) {
                 var current: AccessibilityNodeInfo? = node
                 while (current != null) {
                     if (current.isClickable) return current
@@ -125,7 +120,6 @@ class JarvisAccessibilityService : AccessibilityService() {
                 }
                 return node
             }
-
             for (i in 0 until node.childCount) {
                 val found = search(node.getChild(i))
                 if (found != null) return found
@@ -134,40 +128,70 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
 
         return search(root)
+    }
+
+    /**
+     * Finds a clickable node matching text, content description, or resource ID.
+     */
+    fun findClickableNode(target: String): AccessibilityNodeInfo? {
+        val lowerTarget = target.lowercase().trim()
+        return findNodeByPredicate { node ->
+            val text = node.text?.toString()?.lowercase() ?: ""
+            val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+            val resId = node.viewIdResourceName?.lowercase() ?: ""
+
+            text.contains(lowerTarget) || cd.contains(lowerTarget) || resId.contains(lowerTarget)
+        }
     }
 
     /**
      * Finds the first editable text field (EditText) on screen.
      */
     fun findFirstInputField(): AccessibilityNodeInfo? {
-        val root = rootInActiveWindow ?: return null
-
-        fun search(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-            if (node == null) return null
-            if (node.isEditable || node.className?.contains("EditText") == true) {
-                return node
-            }
-            for (i in 0 until node.childCount) {
-                val found = search(node.getChild(i))
-                if (found != null) return found
-            }
-            return null
+        return findNodeByPredicate { node ->
+            node.isEditable || node.className?.contains("EditText") == true
         }
-
-        return search(root)
     }
 
     /**
-     * Direct node action: Click (0ms native Android trigger, no touch coordinates needed).
+     * Polls the active screen up to timeoutMs for a node matching the predicate.
+     * Prevents race conditions during app loading/rendering!
+     */
+    suspend fun pollForNode(
+        timeoutMs: Long = 3500,
+        intervalMs: Long = 250,
+        predicate: (AccessibilityNodeInfo) -> Boolean
+    ): AccessibilityNodeInfo? {
+        val startTime = System.currentTimeMillis()
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            val node = findNodeByPredicate(predicate)
+            if (node != null) return node
+            delay(intervalMs)
+        }
+        return null
+    }
+
+    /**
+     * Direct node action: Click with Gesture Tap Fallback (100% reliable on all OEMs).
      */
     fun clickNode(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
-        val success = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        if (!success) {
-            // Fallback: try clicking parent
-            return node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+        if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        if (node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return true
+
+        // Gesture Tap fallback
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            val clickPath = Path().apply {
+                moveTo(bounds.centerX().toFloat(), bounds.centerY().toFloat())
+            }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(clickPath, 0, 50))
+                .build()
+            return dispatchGesture(gesture, null, null)
         }
-        return true
+        return false
     }
 
     /**

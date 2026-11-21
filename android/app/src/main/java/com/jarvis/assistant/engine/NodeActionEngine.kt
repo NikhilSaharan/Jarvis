@@ -16,11 +16,12 @@ class NodeActionEngine(
     private val mainScope = CoroutineScope(Dispatchers.Main)
 
     // ═════════════════════════════════════════════════════════════════
-    // LAYER 2: IN-MEMORY ACCESSIBILITY ACTIONS (5 Milliseconds Speed)
+    // LAYER 2: IN-MEMORY ACCESSIBILITY ACTIONS (Polled & Guaranteed)
     // ═════════════════════════════════════════════════════════════════
 
     /**
-     * Places a WhatsApp Voice or Video Call in <1.0 second without coordinates.
+     * Places a WhatsApp Voice or Video Call in <1.2 seconds without coordinates.
+     * Uses polling up to 4.0 seconds to wait for chat rendering, then auto-confirms prompts.
      */
     fun callWhatsApp(recipient: String, isVideo: Boolean, callback: (Boolean, String) -> Unit) {
         val (number, displayName) = telephonyHelper.resolveContactNumber(recipient)
@@ -36,48 +37,58 @@ class NodeActionEngine(
         }
 
         mainScope.launch {
-            // Wait 600ms for chat screen to render
-            delay(600)
             val service = JarvisAccessibilityService.instance
             if (service == null) {
                 callback(false, "Accessibility Service active nahi hai Sir.")
                 return@launch
             }
 
-            // Auto-dismiss any privacy sheet if present
+            // Dismiss any modal/privacy bottom-sheet if shown
+            delay(400)
             val closeBtn = service.findClickableNode("Close") ?: service.findClickableNode("close")
             if (closeBtn != null) {
                 service.clickNode(closeBtn)
                 delay(200)
             }
 
-            val targetDesc = if (isVideo) "Video call" else "Voice call"
-            val callBtn = service.findClickableNode(targetDesc)
-                ?: service.findClickableNode(if (isVideo) "video call" else "voice call")
-                ?: service.findClickableNode(if (isVideo) "Video" else "Voice")
-                ?: service.findClickableNode("Call")
+            val targetIdKeyword = if (isVideo) "video" else "voice"
+            val targetDesc = if (isVideo) "video call" else "voice call"
+
+            // Poll for call button by Resource ID, Content Description, or Text (up to 4.0 seconds)
+            val callBtn = service.pollForNode(timeoutMs = 4000) { node ->
+                val resId = node.viewIdResourceName?.lowercase() ?: ""
+                val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+                val text = node.text?.toString()?.lowercase() ?: ""
+
+                resId.contains(targetIdKeyword) ||
+                        cd.contains(targetDesc) ||
+                        (cd.contains("call") && !cd.contains("history")) ||
+                        (text.contains("call") && !text.contains("history"))
+            }
 
             if (callBtn != null) {
                 val clicked = service.clickNode(callBtn)
                 if (clicked) {
                     delay(500)
-                    // Auto-click confirmation dialog if WhatsApp shows "Start voice call? -> Call"
+                    // Auto-confirm if WhatsApp shows confirmation dialog ("Start voice call? -> Call")
                     val confirmBtn = service.findClickableNode("Call") ?: service.findClickableNode("CALL")
                     if (confirmBtn != null && confirmBtn != callBtn) {
                         service.clickNode(confirmBtn)
                     }
+
                     val callTypeStr = if (isVideo) "video" else "voice"
                     callback(true, "WhatsApp par $displayName ko $callTypeStr call laga di hai Sir.")
                     return@launch
                 }
             }
 
-            callback(false, "WhatsApp par $targetDesc button nahi mil saka Sir.")
+            callback(false, "WhatsApp par Call button nahi mil saka Sir.")
         }
     }
 
     /**
      * Sends a WhatsApp Text Message in <1.2 seconds.
+     * Pre-fills message via WhatsApp deep link and automatically clicks Send.
      */
     fun sendWhatsAppMessage(recipient: String, message: String, callback: (Boolean, String) -> Unit) {
         val (number, displayName) = telephonyHelper.resolveContactNumber(recipient)
@@ -86,36 +97,59 @@ class NodeActionEngine(
             return
         }
 
-        val opened = systemController.openChatWhatsApp(number)
+        // Pre-fill text via URL so WhatsApp loads with the message already in the input field!
+        val opened = systemController.openChatWhatsApp(number, prefillMessage = message)
         if (!opened) {
             callback(false, "WhatsApp open nahi ho saka Sir.")
             return
         }
 
         mainScope.launch {
-            delay(600)
             val service = JarvisAccessibilityService.instance
             if (service == null) {
                 callback(false, "Accessibility Service active nahi hai Sir.")
                 return@launch
             }
 
-            // Step 1: Find message input field
-            val inputField = service.findFirstInputField() ?: service.findClickableNode("Message")
-            if (inputField != null) {
-                service.typeText(inputField, message)
-                delay(250)
+            // Poll for Send button by Resource ID or Description (up to 4.0 seconds)
+            val sendBtn = service.pollForNode(timeoutMs = 4000) { node ->
+                val resId = node.viewIdResourceName?.lowercase() ?: ""
+                val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+                val text = node.text?.toString()?.lowercase() ?: ""
 
-                // Step 2: Find Send button
-                val sendBtn = service.findClickableNode("Send")
-                if (sendBtn != null) {
-                    service.clickNode(sendBtn)
+                resId.contains("send") || cd == "send" || text == "send"
+            }
+
+            if (sendBtn != null) {
+                val clicked = service.clickNode(sendBtn)
+                if (clicked) {
                     callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
                     return@launch
                 }
             }
 
-            callback(false, "WhatsApp me message type ya send nahi ho saka Sir.")
+            // Fallback: If not sent via pre-fill, type into input field and click Send
+            val inputField = service.findNodeByPredicate { node ->
+                val resId = node.viewIdResourceName?.lowercase() ?: ""
+                node.isEditable || resId.contains("entry") || node.text?.contains("Message") == true
+            }
+
+            if (inputField != null) {
+                service.typeText(inputField, message)
+                delay(300)
+                val retrySend = service.findNodeByPredicate { node ->
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+                    val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+                    resId.contains("send") || cd.contains("send")
+                }
+                if (retrySend != null) {
+                    service.clickNode(retrySend)
+                    callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
+                    return@launch
+                }
+            }
+
+            callback(false, "WhatsApp me message send nahi ho saka Sir.")
         }
     }
 
@@ -156,10 +190,10 @@ class NodeActionEngine(
         if (targetElement != null) {
             val typed = service.typeText(targetElement.node, text)
             if (typed) {
-                callback(true, "Text enter kar diya hai Sir.")
+                callback(true, "Element [${tag}] me text likh diya hai Sir.")
                 return
             }
         }
-        callback(false, "Tag [${tag}] me text enter nahi ho saka Sir.")
+        callback(false, "Tag [${tag}] me text nahi likh saka Sir.")
     }
 }

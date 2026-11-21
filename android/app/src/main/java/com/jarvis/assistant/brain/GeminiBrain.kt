@@ -26,6 +26,7 @@ class GeminiBrain(private val apiKey: String) {
 
     private val gson = Gson()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+
     // STRICT PRIMARY MODEL: gemini-3.5-flash-lite
     private val models = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 
@@ -35,7 +36,7 @@ class GeminiBrain(private val apiKey: String) {
             return@withContext ActionDecision("Ji Sir, kahiye?", null, null)
         }
 
-        // STEP 1: Attempt Cloud AI Intelligence (Gemini) if API key is provided
+        // STEP 1: Attempt Cloud AI Intelligence (Strictly gemini-3.5-flash-lite)
         if (apiKey.isNotBlank() && !apiKey.startsWith("your_")) {
             val prompt = buildPrompt(trimmed, screenElementsSummary)
             for (model in models) {
@@ -101,101 +102,135 @@ class GeminiBrain(private val apiKey: String) {
             }
         }
 
-        // STEP 2: Zero-Latency Local Rule Engine (100% Offline Resilience)
+        // STEP 2: Zero-Latency Local Butler Engine (100% Offline / Fail-Safe)
         val localDecision = parseLocalIntent(trimmed)
         if (localDecision != null) {
             return@withContext localDecision
         }
 
-        // STEP 3: Polite Butler Conversational Default
+        // STEP 3: Polite Butler Default
         ActionDecision("Ji Sir, main aapke aadesh ke intezaar me hoon.", null, null)
     }
 
     /**
      * Local Butler Engine: Parses voice & text commands directly on-device in 0.001s
-     * Handles Hindi, Hinglish, English, and slang without requiring internet.
      */
     fun parseLocalIntent(userText: String): ActionDecision? {
         val lower = userText.lowercase().trim()
 
-        // 1. WhatsApp Voice / Video Call
+        // 1. Sleep Butler Routine: "so raha hoon ... min baad utha dena"
+        if ((lower.contains("so raha") || lower.contains("sone ja") || lower.contains("neend") || lower.contains("disturbance")) &&
+            (lower.contains("utha") || lower.contains("jaga") || lower.contains("min") || lower.contains("minute"))
+        ) {
+            val mins = parseMinutes(lower)
+            return ActionDecision(
+                "Bilkul Sir, Do Not Disturb mode on kar raha hoon aur $mins minute baad ka alarm laga diya hai.",
+                "sleep_routine",
+                mapOf("minutes" to mins)
+            )
+        }
+
+        // 2. WhatsApp Voice / Video Call
         if (lower.contains("whatsapp") && (lower.contains("call") || lower.contains("kol") || lower.contains("video"))) {
             val isVideo = lower.contains("video")
-            val contact = extractTargetName(userText, listOf("whatsapp", "video", "voice", "normal", "call", "kol", "ko", "par", "pe", "lagao", "karo", "to", "kijiye", "bhi"))
+            val contact = extractTargetName(userText, listOf("ek", "kam", "karo", "whatsapp", "per", "video", "voice", "normal", "call", "kol", "ko", "par", "pe", "lagao", "karo", "to", "kijiye", "bhi"))
             val target = if (contact.isNotBlank()) contact else "contact"
             val speech = if (isVideo) "Ji Sir, $target ko WhatsApp video call laga raha hoon." else "Ji Sir, $target ko WhatsApp call laga raha hoon."
             return ActionDecision(speech, "whatsapp_call", mapOf("recipient" to target, "call_type" to if (isVideo) "video" else "voice"))
         }
 
-        // 2. WhatsApp Message
-        if (lower.contains("whatsapp") && (lower.contains("message") || lower.contains("msg") || lower.contains("bhejo") || lower.contains("send"))) {
-            val contact = extractTargetName(userText, listOf("whatsapp", "message", "msg", "bhejo", "send", "ko", "par", "pe", "likho", "karo", "to"))
+        // 3. WhatsApp Message
+        if (lower.contains("whatsapp") && (lower.contains("message") || lower.contains("msg") || lower.contains("likho") || lower.contains("bhejo") || lower.contains("send"))) {
+            val contact = extractTargetName(userText, listOf("ek", "kam", "karo", "whatsapp", "per", "message", "msg", "likho", "bhejo", "send", "ko", "par", "pe", "to"))
             val target = if (contact.isNotBlank()) contact else "contact"
-            return ActionDecision("Ji Sir, $target ko WhatsApp message bhej raha hoon.", "send_whatsapp_message", mapOf("recipient" to target, "message" to "Hello"))
+            val msgText = extractQuotedOrTrailingText(userText) ?: "Hello"
+            return ActionDecision("Bilkul Sir, $target ko WhatsApp message bhej raha hoon.", "send_whatsapp_message", mapOf("recipient" to target, "message" to msgText))
         }
 
-        // 3. Normal SIM Phone Call
+        // 4. Normal SIM Phone Call
         if (lower.contains("call") || lower.contains("phone") || lower.contains("dial") || lower.contains("milao")) {
-            val contact = extractTargetName(userText, listOf("normal", "sim", "phone", "call", "kol", "dial", "lagao", "karo", "ko", "par", "pe", "milao", "to", "kijiye"))
+            val contact = extractTargetName(userText, listOf("ek", "kam", "karo", "normal", "sim", "phone", "call", "kol", "dial", "lagao", "karo", "ko", "par", "pe", "milao", "to", "kijiye"))
             val target = if (contact.isNotBlank()) contact else "contact"
-            return ActionDecision("Ji Sir, $target ko call mila raha hoon.", "make_phone_call", mapOf("recipient" to target, "phone_number" to target))
+            return ActionDecision("Ji Sir, $target ko normal call mila raha hoon.", "make_phone_call", mapOf("recipient" to target, "phone_number" to target))
         }
 
-        // 4. Do Not Disturb (DND) / Sleep / Silent
-        if (lower.contains("disturb") || lower.contains("so raha") || lower.contains("dnd") || lower.contains("silent") || lower.contains("sone ja") || lower.contains("tention mat")) {
-            return ActionDecision("Ji Sir, Do Not Disturb mode activate kar diya hai. Aaram se soiye.", "set_dnd", mapOf("enabled" to true))
+        // 5. Standalone DND / Silent Mode
+        if (lower.contains("disturb") || lower.contains("so raha") || lower.contains("dnd") || lower.contains("silent") || lower.contains("sone ja")) {
+            return ActionDecision("Do Not Disturb mode activate kar diya hai Sir. Koi disturbance nahi hoga.", "set_dnd", mapOf("enabled" to true))
         }
         if (lower.contains("wake up") || lower.contains("uth gaya") || lower.contains("dnd off") || lower.contains("general")) {
-            return ActionDecision("Ji Sir, Do Not Disturb mode deactivate kar diya hai.", "set_dnd", mapOf("enabled" to false))
+            return ActionDecision("Do Not Disturb mode deactivate kar diya hai Sir.", "set_dnd", mapOf("enabled" to false))
         }
 
-        // 5. Mood Kharab / Songs / Music / YouTube
-        if (lower.contains("mood kharab") || lower.contains("gana") || lower.contains("gaana") || lower.contains("song") || lower.contains("music") || lower.contains("youtube") || lower.contains("bajao") || lower.contains("chalao")) {
-            val query = if (lower.contains("mood kharab")) {
+        // 6. Mood Kharab / Songs / Music / YouTube
+        if (lower.contains("mood") || lower.contains("gana") || lower.contains("gaana") || lower.contains("song") || lower.contains("music") || lower.contains("youtube") || lower.contains("bajao") || lower.contains("chalao")) {
+            val query = if (lower.contains("purana")) {
+                "classic evergreen retro hindi songs hits"
+            } else if (lower.contains("mood")) {
                 "relaxing peaceful hindi songs"
             } else {
-                val clean = extractTargetName(userText, listOf("youtube", "pe", "par", "gaana", "gana", "song", "songs", "music", "play", "chalao", "bajao", "sunao", "lagao", "karo", "kuch"))
+                val clean = extractTargetName(userText, listOf("youtube", "pe", "par", "gaana", "gana", "song", "songs", "music", "play", "chalao", "bajao", "sunao", "lagao", "karo", "koi", "ek"))
                 if (clean.isNotBlank()) clean else "trending hindi songs"
             }
-            return ActionDecision("Ji Sir, aapka mood behtar karne ke liye gaana chala raha hoon.", "play_youtube", mapOf("query" to query))
+            return ActionDecision("Bilkul Sir, aapka mood theek karne ke liye gaana play kar raha hoon.", "play_youtube", mapOf("query" to query))
         }
 
-        // 6. Hardware Alarm
-        if (lower.contains("alarm")) {
-            val (hour, minute) = parseAlarmTime(lower)
-            return ActionDecision("Ji Sir, $hour:$minute ka alarm laga diya hai.", "set_alarm", mapOf("hour" to hour, "minute" to minute, "message" to "Alarm"))
-        }
-
-        // 7. System Countdown Timer
-        if (lower.contains("timer")) {
-            val seconds = parseTimerSeconds(lower)
-            return ActionDecision("Ji Sir, $seconds seconds ka timer laga diya hai.", "set_timer", mapOf("seconds" to seconds, "message" to "Timer"))
+        // 7. Open Application (Instagram, Chrome, Spotify, etc.)
+        if (lower.contains("open") || lower.contains("kholo") || lower.contains("chala do")) {
+            val app = extractTargetName(userText, listOf("ek", "kam", "karo", "mera", "open", "kholo", "chala", "do", "app", "application"))
+            if (app.isNotBlank()) {
+                return ActionDecision("Bilkul Sir, $app open kar raha hoon.", "open_app", mapOf("app_name" to app))
+            }
         }
 
         // 8. Screen Brightness
         if (lower.contains("brightness") || lower.contains("roshni")) {
             val level = when {
                 lower.contains("kam") || lower.contains("low") || lower.contains("dim") -> "low"
-                lower.contains("full") || lower.contains("zyada") || lower.contains("high") || lower.contains("max") -> "high"
+                lower.contains("full") || lower.contains("zyada") || lower.contains("high") || lower.contains("max") || lower.contains("badha") -> "high"
                 else -> "medium"
             }
-            return ActionDecision("Ji Sir, brightness $level kar di hai.", "set_brightness", mapOf("level" to level))
+            return ActionDecision("Brightness $level kar raha hoon Sir.", "set_brightness", mapOf("level" to level))
         }
 
-        // 9. Open Application
-        if (lower.startsWith("open ") || lower.contains("kholo")) {
-            val app = extractTargetName(userText, listOf("open", "kholo", "app", "application"))
-            if (app.isNotBlank()) {
-                return ActionDecision("Ji Sir, $app open kar raha hoon.", "open_app", mapOf("app_name" to app))
-            }
+        // 9. Hardware Alarm
+        if (lower.contains("alarm")) {
+            val (hour, minute) = parseAlarmTime(lower)
+            return ActionDecision("Ji Sir, $hour:$minute ka alarm laga diya hai.", "set_alarm", mapOf("hour" to hour, "minute" to minute, "message" to "Alarm"))
         }
 
-        // 10. Butler Greeting
+        // 10. System Timer
+        if (lower.contains("timer")) {
+            val seconds = parseTimerSeconds(lower)
+            return ActionDecision("Ji Sir, $seconds seconds ka timer laga diya hai.", "set_timer", mapOf("seconds" to seconds, "message" to "Timer"))
+        }
+
+        // 11. Butler Greeting
         if (lower.contains("hello") || lower.contains("hi") || lower.contains("kaise ho") || lower.contains("jarvis")) {
             return ActionDecision("Ji Sir, main bilkul taiyar hoon. Hukum kijiye.", null, null)
         }
 
         return null
+    }
+
+    private fun extractMinutes(text: String): Int {
+        val match = Regex("(\\d+)\\s*(min|minute|munt|mnt)").find(text)
+        if (match != null) {
+            return match.groupValues[1].toIntOrNull() ?: 10
+        }
+        val wordNumbers = mapOf(
+            "ek" to 1, "do" to 2, "teen" to 3, "char" to 4, "panch" to 5,
+            "dus" to 10, "pandrah" to 15, "bees" to 20, "tees" to 30
+        )
+        for ((word, num) in wordNumbers) {
+            if (text.contains(word)) return num
+        }
+        val standaloneNumber = Regex("\\b(\\d+)\\b").find(text)
+        return standaloneNumber?.groupValues?.get(1)?.toIntOrNull() ?: 10
+    }
+
+    private fun parseMinutes(text: String): Int {
+        return extractMinutes(text)
     }
 
     private fun extractTargetName(input: String, stopWords: List<String>): String {
@@ -206,6 +241,14 @@ class GeminiBrain(private val apiKey: String) {
             clean.isNotEmpty() && !stopSet.contains(clean)
         }
         return filtered.joinToString(" ")
+    }
+
+    private fun extractQuotedOrTrailingText(input: String): String? {
+        val quoteMatch = Regex("\"([^\"]+)\"").find(input)
+        if (quoteMatch != null) return quoteMatch.groupValues[1]
+
+        val match = Regex("""(?:likho|bhejo|send|message|msg)\s+([a-zA-Z0-9\s]+)""", RegexOption.IGNORE_CASE).find(input)
+        return match?.groupValues?.get(1)?.replace(Regex("""(?i)\b(whatsapp|per|par|pe|ko)\b"""), "")?.trim()
     }
 
     private fun parseAlarmTime(text: String): Pair<Int, Int> {
@@ -235,7 +278,8 @@ USER COMMAND: "$userText"
 SCREEN CONTEXT: "$screenElementsSummary"
 
 SUPPORTED TOOLS:
-- set_dnd(enabled: boolean) -> For "so raha hoon", "disturb mat karna", "silent"
+- sleep_routine(minutes: int) -> When Sir says "so raha hoon ... min baad utha dena", "disturbance nahi chahiye"
+- set_dnd(enabled: boolean) -> For standalone silent/DND on or off
 - set_brightness(level: string) -> 'low', 'medium', 'high', 'max'
 - set_alarm(hour: int, minute: int, message: string)
 - set_timer(seconds: int, message: string)
@@ -243,8 +287,8 @@ SUPPORTED TOOLS:
 - send_sms(recipient: string, message: string)
 - send_whatsapp_message(recipient: string, message: string)
 - whatsapp_call(recipient: string, call_type: "voice"|"video")
-- play_youtube(query: string) -> For "mood kharab hai", songs, music
-- open_app(app_name: string)
+- play_youtube(query: string) -> For songs, music, mood booster
+- open_app(app_name: string) -> For opening apps like Instagram, Chrome, Spotify
 - tap_tag(tag: int)
 
 RULES:
@@ -254,8 +298,9 @@ RULES:
   "tool_name": "<tool_name or null>",
   "tool_args": { ... }
 }
-2. For "mood kharab hai" / songs, ALWAYS call play_youtube.
-3. For "so raha hoon" / "disturb mat karna", ALWAYS call set_dnd(enabled=true).
+2. When Sir says he is sleeping for X minutes / wants disturbance free sleep and wake up, ALWAYS call `sleep_routine(minutes=...)`.
+3. For "mood kharab hai", purane gaane, or songs, ALWAYS call `play_youtube`.
+4. For opening Instagram or any app, ALWAYS call `open_app`.
 """.trimIndent()
     }
 }
