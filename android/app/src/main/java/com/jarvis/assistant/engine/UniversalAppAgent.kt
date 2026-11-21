@@ -96,7 +96,7 @@ OUTPUT ONLY JSON:
 """.trimIndent()
                                 val nextDecision = geminiBrain.decideUIAction(nextPrompt)
                                 val inputTag = nextDecision.tag ?: 1
-                                nodeActionEngine.typeTextByTag(inputTag, decision.text) { typed, _ ->
+                                nodeActionEngine.typeTextByTag(inputTag, decision.text ?: "") { typed, _ ->
                                     callback(typed, "$appName me '${decision.text}' add kar diya hai Sir.")
                                 }
                             }
