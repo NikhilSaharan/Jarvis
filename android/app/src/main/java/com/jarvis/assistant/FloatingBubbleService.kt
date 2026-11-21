@@ -65,10 +65,16 @@ class FloatingBubbleService : Service() {
             memoryManager = JarvisMemoryManager(this)
             scheduledTaskManager = ScheduledTaskManager(this)
 
-            // Safe API key loading (with base64 fallback)
-            val defaultKey = String(Base64.decode("QVEuQWI4Uk42SmFjdDVYX01QVm5WelNOd2prWkpRNnBrRjBLcGJ2TkcxTjFHTkpUSnBKV3c=", Base64.DEFAULT))
+            // User API key configuration
+            val defaultKey = "AIzaSyBLLZ1tU7PWUXi8SKPDv4p1z-Ocwtm7W8Y"
             val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
-            val apiKey = prefs.getString("gemini_api_key", "").takeIf { !it.isNullOrBlank() } ?: defaultKey
+            val storedKey = prefs.getString("gemini_api_key", "")
+            val apiKey = if (storedKey.isNullOrBlank() || storedKey.startsWith("AQ.Ab8RN6")) {
+                prefs.edit().putString("gemini_api_key", defaultKey).apply()
+                defaultKey
+            } else {
+                storedKey
+            }
             geminiBrain = GeminiBrain(apiKey, memoryManager)
 
             try {

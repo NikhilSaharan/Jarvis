@@ -17,11 +17,10 @@ class UniversalAppAgent(
     private val mainScope = CoroutineScope(Dispatchers.Main)
 
     /**
-     * Autonomous Vision/Tree-Based In-App Agent:
-     * 1. Launches target app.
-     * 2. Dumps live accessibility UI elements tree.
-     * 3. Uses Gemini to inspect the screen elements and decide which tag to tap/type.
-     * 4. Executes the action dynamically without ANY hardcoded button keywords!
+     * Autonomous Multi-Turn Observation-Action Loop (Human-like smartphone navigation):
+     * 1. Launches target app (Notes, Prime Video, Instagram, Amazon, etc.).
+     * 2. Loops up to 6 turns (Observe -> Reason -> Act -> Repeat).
+     * 3. Completely general & dynamic: Zero hardcoded app templates or button keywords.
      */
     fun performAppAction(
         appName: String,
@@ -36,90 +35,101 @@ class UniversalAppAgent(
         }
 
         mainScope.launch {
-            // Wait for app window to render
-            delay(1200)
+            delay(1200) // Initial wait for app window to render
             val service = JarvisAccessibilityService.instance
             if (service == null) {
                 callback(false, "Accessibility Service active nahi hai Sir.")
                 return@launch
             }
 
-            // Step 1: Dump live screen elements
-            val screenSummary = service.dumpScreenElementsSummary()
-            if (screenSummary.isBlank() || screenSummary.contains("empty")) {
-                callback(true, "$appName open kar diya hai Sir.")
-                return@launch
-            }
+            val actionHistory = mutableListOf<String>()
+            val maxTurns = 6
+            var turn = 0
+            var finalMsg = "$appName me '$instruction' execute kar diya hai Sir."
+            var isCompleted = false
 
-            // Step 2: Let Gemini inspect the live screen tree and pick the element tag
-            val prompt = """
+            while (turn < maxTurns && !isCompleted) {
+                turn++
+                delay(1000) // Allow animations, screen transitions, or search loading to settle
+
+                val screenSummary = service.dumpScreenElementsSummary()
+                if (screenSummary.isBlank() || screenSummary.contains("empty")) {
+                    delay(800)
+                    continue
+                }
+
+                val historyStr = if (actionHistory.isNotEmpty()) {
+                    "\nActions taken so far:\n" + actionHistory.joinToString("\n") { "- $it" }
+                } else ""
+
+                val prompt = """
 You are acting as an autonomous smartphone user in $appName.
 Screen UI Elements:
 $screenSummary
+$historyStr
 
-Sir's Goal: "$instruction"
+Sir's Overall Goal: "$instruction"
 
-Decide what to do:
-- If a button needs to be tapped (e.g. to create, add, compose, open menu, search, or select an item), choose its tag.
-- If text needs to be typed into an input field, specify the input field tag and the text.
-- If screen needs to be scrolled, set action to scroll_screen.
+Decide the best next single action:
+- "tap_tag": Tap a numbered element [tag] (e.g. search icon, compose/new note (+), play button, movie card, reels tab, send, save, confirm).
+- "type_tag": Type text into an input field [tag] (e.g. note body, table content, search query, message).
+- "scroll_screen": Scroll the active screen down or up (e.g. to see next reel, scroll a feed, or find an off-screen item).
+- "back": Press the hardware back button (e.g. to dismiss a popup, exit an overlay, or return).
+- "done": Goal is completely achieved (e.g. note/table written, movie playback started, reels scrolled, action finalized).
 
-OUTPUT ONLY JSON:
+OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
-  "action": "tap_tag" | "type_tag" | "scroll_screen" | "done",
+  "action": "tap_tag" | "type_tag" | "scroll_screen" | "back" | "done",
   "tag": <number or null>,
   "text": "<text to type or null>",
-  "direction": "down" | "up" | null
+  "direction": "down" | "up" | null,
+  "summary": "<short description of this action in Hinglish, e.g. 'Search icon par tap kiya'>"
 }
 """.trimIndent()
 
-            val decision = geminiBrain.decideUIAction(prompt)
-            when (decision.action) {
-                "tap_tag" -> {
-                    val targetTag = decision.tag ?: 1
-                    nodeActionEngine.tapByTag(targetTag) { tapped, msg ->
-                        if (tapped && !decision.text.isNullOrBlank()) {
-                            // If text is to be typed on the resulting screen (e.g. new note body/title)
-                            mainScope.launch {
-                                delay(800)
-                                val nextSummary = service.dumpScreenElementsSummary()
-                                val nextPrompt = """
-Screen in $appName now shows:
-$nextSummary
+                val decision = geminiBrain.decideUIAction(prompt)
+                val summary = decision.summary ?: decision.text ?: decision.action
 
-Task: Type "${decision.text}" into the appropriate note, body, or text field.
-OUTPUT ONLY JSON:
-{
-  "action": "type_tag",
-  "tag": <number of the input field>
-}
-""".trimIndent()
-                                val nextDecision = geminiBrain.decideUIAction(nextPrompt)
-                                val inputTag = nextDecision.tag ?: 1
-                                nodeActionEngine.typeTextByTag(inputTag, decision.text ?: "") { typed, _ ->
-                                    callback(typed, "$appName me '${decision.text}' add kar diya hai Sir.")
-                                }
-                            }
+                when (decision.action.lowercase().trim()) {
+                    "done" -> {
+                        isCompleted = true
+                        finalMsg = if (summary.isNotBlank() && summary != "done") {
+                            "$appName: $summary"
                         } else {
-                            callback(tapped, msg)
+                            "$appName me '$instruction' pura kar diya hai Sir."
                         }
                     }
-                }
-                "type_tag" -> {
-                    val targetTag = decision.tag ?: 1
-                    nodeActionEngine.typeTextByTag(targetTag, decision.text ?: instruction) { typed, _ ->
-                        callback(typed, "$appName me text type kar diya hai Sir.")
+                    "tap_tag" -> {
+                        val targetTag = decision.tag ?: 1
+                        nodeActionEngine.tapByTag(targetTag) { _, _ -> }
+                        actionHistory.add("Tapped element [$targetTag] ($summary)")
+                        delay(600)
+                    }
+                    "type_tag" -> {
+                        val targetTag = decision.tag ?: 1
+                        val textToType = decision.text ?: instruction
+                        nodeActionEngine.typeTextByTag(targetTag, textToType) { _, _ -> }
+                        actionHistory.add("Typed '$textToType' into element [$targetTag]")
+                        delay(600)
+                    }
+                    "scroll_screen" -> {
+                        val dir = decision.direction ?: "down"
+                        service.scroll(dir)
+                        actionHistory.add("Scrolled screen $dir")
+                        delay(800)
+                    }
+                    "back" -> {
+                        service.performBack()
+                        actionHistory.add("Pressed back button")
+                        delay(600)
+                    }
+                    else -> {
+                        isCompleted = true
                     }
                 }
-                "scroll_screen" -> {
-                    val dir = decision.direction ?: "down"
-                    val scrolled = service.scroll(dir)
-                    callback(scrolled, if (scrolled) "Screen scroll kar di hai Sir." else "Scroll nahi ho saka.")
-                }
-                else -> {
-                    callback(true, "$appName me task execute kar diya hai Sir.")
-                }
             }
+
+            callback(true, finalMsg)
         }
     }
 }

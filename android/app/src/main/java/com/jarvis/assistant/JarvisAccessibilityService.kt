@@ -255,7 +255,13 @@ class JarvisAccessibilityService : AccessibilityService() {
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        if (success && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            } catch (e: Exception) {}
+        }
+        return success
     }
 
     /**
@@ -266,14 +272,20 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (elements.isEmpty()) return "Screen is empty or no interactive elements."
         val sb = StringBuilder()
         for (el in elements) {
-            val label = if (el.text.isNotBlank()) el.text else el.contentDescription
-            if (label.isBlank() && !el.isEditable) continue
+            val resId = el.node.viewIdResourceName?.substringAfterLast('/') ?: ""
+            val rawLabel = if (el.text.isNotBlank()) el.text else el.contentDescription
+            val label = if (rawLabel.isNotBlank()) rawLabel else resId
+
+            if (label.isBlank() && !el.isEditable && !el.isClickable) continue
+
             val type = when {
                 el.isEditable -> "input_field"
                 el.isClickable -> "button"
                 else -> "text"
             }
-            sb.append("[${el.tag}] $type: \"$label\"\n")
+            val displayLabel = if (label.isNotBlank()) label else "button"
+            val idSuffix = if (resId.isNotBlank() && resId != displayLabel) " (id: $resId)" else ""
+            sb.append("[${el.tag}] $type$idSuffix: \"$displayLabel\"\n")
         }
         return sb.toString().trim()
     }

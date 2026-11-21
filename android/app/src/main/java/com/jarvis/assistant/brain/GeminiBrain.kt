@@ -22,7 +22,8 @@ data class UIActionDecision(
     val action: String,
     val tag: Int?,
     val text: String?,
-    val direction: String?
+    val direction: String?,
+    val summary: String? = null
 )
 
 class GeminiBrain(
@@ -95,23 +96,23 @@ class GeminiBrain(
                         ?.getAsJsonArray("parts")?.get(0)?.asJsonObject?.get("text")?.asString ?: ""
 
                     val parsedDecision = gson.fromJson(textContent, JsonObject::class.java)
-                    val speech = parsedDecision.get("speech")?.asString ?: "Ji Sir."
-                    val toolName = parsedDecision.get("tool_name")?.asString?.takeIf { it != "null" && it.isNotBlank() }
-                    val argsObj = parsedDecision.getAsJsonObject("tool_args")
+                    val speech = parsedDecision.get("speech")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString ?: "Ji Sir."
+                    val toolName = parsedDecision.get("tool_name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
+                    val argsObj = parsedDecision.get("tool_args")?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
 
                     val argsMap = mutableMapOf<String, Any>()
                     argsObj?.entrySet()?.forEach { (k, v) ->
-                        if (v.isJsonPrimitive) {
+                        if (!v.isJsonNull && v.isJsonPrimitive) {
                             val prim = v.asJsonPrimitive
                             when {
                                 prim.isBoolean -> argsMap[k] = prim.asBoolean
                                 prim.isNumber -> argsMap[k] = prim.asInt
                                 else -> argsMap[k] = prim.asString
                             }
-                        } else if (v.isJsonObject) {
+                        } else if (!v.isJsonNull && v.isJsonObject) {
                             val subMap = mutableMapOf<String, Any>()
                             v.asJsonObject.entrySet().forEach { (sk, sv) ->
-                                if (sv.isJsonPrimitive) subMap[sk] = sv.asString
+                                if (!sv.isJsonNull && sv.isJsonPrimitive) subMap[sk] = sv.asString
                             }
                             argsMap[k] = subMap
                         }
@@ -177,17 +178,18 @@ class GeminiBrain(
                         ?.getAsJsonArray("parts")?.get(0)?.asJsonObject?.get("text")?.asString ?: ""
 
                     val parsed = gson.fromJson(textContent, JsonObject::class.java)
-                    val action = parsed.get("action")?.asString ?: "done"
+                    val action = parsed.get("action")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString ?: "done"
                     val tag = parsed.get("tag")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asInt
                     val text = parsed.get("text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
                     val dir = parsed.get("direction")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
-                    return@withContext UIActionDecision(action, tag, text, dir)
+                    val summary = parsed.get("summary")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+                    return@withContext UIActionDecision(action, tag, text, dir, summary)
                 }
             } catch (e: Exception) {
                 Log.w("GeminiBrain", "UI action decision error on $model: ${e.message}")
             }
         }
-        UIActionDecision("done", null, null, null)
+        UIActionDecision("done", null, null, null, null)
     }
 
     private fun buildPrompt(userText: String, screenElementsSummary: String): String {
@@ -219,8 +221,8 @@ CORE OPERATING INSTRUCTIONS:
    - send_whatsapp_message(recipient: string, message: string): Sends a WhatsApp message.
    - send_sms(recipient: string, message: string): Sends a normal SMS text message.
    - play_youtube(query: string): Searches and autoplays music, songs, or videos on YouTube. Choose an intelligent search query matching Sir's exact mood or request.
-   - open_app(app_name: string): Opens any installed application on Sir's phone.
-   - universal_app_action(app_name: string, instruction: string): Opens any app and autonomously executes Sir's instruction using live UI tree inspection.
+   - open_app(app_name: string): ONLY when Sir asks to just launch or open an app with NO extra action.
+   - universal_app_action(app_name: string, instruction: string): Use whenever Sir wants ANY multi-step task, in-app action, searching, content playing, note creation, table writing, feed scrolling, or button pressing inside ANY app (e.g. "notes me table banao", "prime video par jailer 2 play karo", "instagram par reels scroll karo", "amazon par shoes search karo"). Launches the app and drives the UI autonomously step-by-step.
    - tap_tag(tag: int): Taps on a numbered element [tag] from the Live Screen Elements.
    - type_tag(tag: int, text: string): Types text into a numbered input field [tag] from Live Screen Elements.
    - scroll_screen(direction: "down"|"up"): Swipes/scrolls the active screen (for reels, feeds, long lists).
