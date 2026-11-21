@@ -1,9 +1,9 @@
 package com.jarvis.assistant.engine
 
-import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.util.Log
 import com.jarvis.assistant.JarvisAccessibilityService
+import com.jarvis.assistant.brain.GeminiBrain
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -11,18 +11,22 @@ import kotlinx.coroutines.launch
 
 class UniversalAppAgent(
     private val context: Context,
-    private val systemController: SystemController
+    private val systemController: SystemController,
+    private val nodeActionEngine: NodeActionEngine
 ) {
     private val mainScope = CoroutineScope(Dispatchers.Main)
 
     /**
-     * Autonomous Multi-Step In-App UI Agent:
-     * Opens target app, finds Add/New/Compose/Search button, clicks it, types text, and saves!
+     * Autonomous Vision/Tree-Based In-App Agent:
+     * 1. Launches target app.
+     * 2. Dumps live accessibility UI elements tree.
+     * 3. Uses Gemini to inspect the screen elements and decide which tag to tap/type.
+     * 4. Executes the action dynamically without ANY hardcoded button keywords!
      */
     fun performAppAction(
         appName: String,
-        action: String,
-        textToEnter: String = "",
+        instruction: String,
+        geminiBrain: GeminiBrain,
         callback: (Boolean, String) -> Unit
     ) {
         val openedMsg = systemController.openApp(appName)
@@ -40,64 +44,82 @@ class UniversalAppAgent(
                 return@launch
             }
 
-            // 1. Look for Add / New / Compose / Edit / Floating Action Button / Search
-            val isSearch = action.contains("search") || action.contains("find") || action.contains("dhundo")
-            val actionBtn = service.pollForNode(timeoutMs = 3500) { node ->
-                val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-                val text = node.text?.toString()?.lowercase() ?: ""
-                val resId = node.viewIdResourceName?.lowercase() ?: ""
-
-                if (isSearch) {
-                    desc.contains("search") || text.contains("search") || resId.contains("search")
-                } else {
-                    desc.contains("add") || desc.contains("new") || desc.contains("create") ||
-                            desc.contains("compose") || desc.contains("note") || desc == "+" ||
-                            text.contains("add") || text.contains("new") || text.contains("create") ||
-                            text.contains("compose") || text.contains("note") || text == "+" ||
-                            resId.contains("add") || resId.contains("fab") || resId.contains("create") ||
-                            resId.contains("new") || resId.contains("compose")
-                }
+            // Step 1: Dump live screen elements
+            val screenSummary = service.dumpScreenElementsSummary()
+            if (screenSummary.isBlank() || screenSummary.contains("empty")) {
+                callback(true, "$appName open kar diya hai Sir.")
+                return@launch
             }
 
-            if (actionBtn != null) {
-                service.tapElement(actionBtn)
-                delay(700)
-            }
+            // Step 2: Let Gemini inspect the live screen tree and pick the element tag
+            val prompt = """
+You are acting as an autonomous smartphone user in $appName.
+Screen UI Elements:
+$screenSummary
 
-            // 2. Type text if provided
-            if (textToEnter.isNotBlank()) {
-                val inputField = service.pollForNode(timeoutMs = 3500) { node ->
-                    node.isEditable || node.className?.contains("EditText") == true
-                }
+Sir's Goal: "$instruction"
 
-                if (inputField != null) {
-                    service.typeText(inputField, textToEnter)
-                    delay(500)
+Decide what to do:
+- If a button needs to be tapped (e.g. to create, add, compose, open menu, search, or select an item), choose its tag.
+- If text needs to be typed into an input field, specify the input field tag and the text.
+- If screen needs to be scrolled, set action to scroll_screen.
 
-                    // 3. Look for Done / Save / Check button
-                    val saveBtn = service.findNodeByPredicate { node ->
-                        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-                        val text = node.text?.toString()?.lowercase() ?: ""
-                        val resId = node.viewIdResourceName?.lowercase() ?: ""
+OUTPUT ONLY JSON:
+{
+  "action": "tap_tag" | "type_tag" | "scroll_screen" | "done",
+  "tag": <number or null>,
+  "text": "<text to type or null>",
+  "direction": "down" | "up" | null
+}
+""".trimIndent()
 
-                        desc.contains("save") || desc.contains("done") || desc.contains("check") || desc.contains("tick") ||
-                                text.contains("save") || text.contains("done") ||
-                                resId.contains("save") || resId.contains("done") || resId.contains("check")
+            val decision = geminiBrain.decideUIAction(prompt)
+            when (decision.action) {
+                "tap_tag" -> {
+                    val targetTag = decision.tag ?: 1
+                    nodeActionEngine.tapByTag(targetTag) { tapped, msg ->
+                        if (tapped && !decision.text.isNullOrBlank()) {
+                            // If text is to be typed on the resulting screen (e.g. new note body/title)
+                            mainScope.launch {
+                                delay(800)
+                                val nextSummary = service.dumpScreenElementsSummary()
+                                val nextPrompt = """
+Screen in $appName now shows:
+$nextSummary
+
+Task: Type "${decision.text}" into the appropriate note, body, or text field.
+OUTPUT ONLY JSON:
+{
+  "action": "type_tag",
+  "tag": <number of the input field>
+}
+""".trimIndent()
+                                val nextDecision = geminiBrain.decideUIAction(nextPrompt)
+                                val inputTag = nextDecision.tag ?: 1
+                                nodeActionEngine.typeTextByTag(inputTag, decision.text) { typed, _ ->
+                                    callback(typed, "$appName me '${decision.text}' add kar diya hai Sir.")
+                                }
+                            }
+                        } else {
+                            callback(tapped, msg)
+                        }
                     }
-                    if (saveBtn != null) {
-                        service.tapElement(saveBtn)
-                    } else {
-                        // Many Android note apps (Keep, OnePlus Notes) save automatically when pressing BACK
-                        delay(300)
-                        service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                }
+                "type_tag" -> {
+                    val targetTag = decision.tag ?: 1
+                    nodeActionEngine.typeTextByTag(targetTag, decision.text ?: instruction) { typed, _ ->
+                        callback(typed, "$appName me text type kar diya hai Sir.")
                     }
-
-                    callback(true, "$appName me '$textToEnter' save kar diya hai Sir.")
-                    return@launch
+                }
+                "scroll_screen" -> {
+                    val dir = decision.direction ?: "down"
+                    val scrolled = service.scroll(dir)
+                    callback(scrolled, if (scrolled) "Screen scroll kar di hai Sir." else "Scroll nahi ho saka.")
+                }
+                else -> {
+                    callback(true, "$appName me task execute kar diya hai Sir.")
                 }
             }
-
-            callback(true, "$appName open karke action execute kar diya hai Sir.")
         }
     }
 }

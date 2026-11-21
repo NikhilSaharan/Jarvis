@@ -26,6 +26,8 @@ import com.jarvis.assistant.engine.NodeActionEngine
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.engine.TelephonyHelper
 import com.jarvis.assistant.engine.UniversalAppAgent
+import com.jarvis.assistant.memory.JarvisMemoryManager
+import com.jarvis.assistant.scheduler.ScheduledTaskManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import com.jarvis.assistant.voice.SpeechRecognizerHelper
 import kotlinx.coroutines.CoroutineScope
@@ -40,6 +42,11 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        var instance: MainActivity? = null
+            private set
+    }
 
     private lateinit var tvTitle: TextView
     private lateinit var tvSystemStatusBadge: TextView
@@ -60,6 +67,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var speakerHelper: SpeakerHelper
     private var speechRecognizerHelper: SpeechRecognizerHelper? = null
     private lateinit var geminiBrain: GeminiBrain
+    private lateinit var memoryManager: JarvisMemoryManager
+    private lateinit var scheduledTaskManager: ScheduledTaskManager
 
     private val mainScope = CoroutineScope(Dispatchers.Main)
     private val httpClient = OkHttpClient()
@@ -73,6 +82,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        instance = this
 
         // Crash-proofing: Catch any uncaught exception and log it instead of dying
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -108,14 +118,16 @@ class MainActivity : AppCompatActivity() {
         systemController = SystemController(this)
         telephonyHelper = TelephonyHelper(this)
         nodeActionEngine = NodeActionEngine(systemController, telephonyHelper)
-        universalAppAgent = UniversalAppAgent(this, systemController)
+        universalAppAgent = UniversalAppAgent(this, systemController, nodeActionEngine)
         speakerHelper = SpeakerHelper(this)
+        memoryManager = JarvisMemoryManager(this)
+        scheduledTaskManager = ScheduledTaskManager(this)
 
         // Decoded API key fallback
         val defaultKey = String(Base64.decode("QVEuQWI4Uk42SmFjdDVYX01QVm5WelNOd2prWkpRNnBrRjBLcGJ2TkcxTjFHTkpUSnBKV3c=", Base64.DEFAULT))
         val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
         val apiKey = prefs.getString("gemini_api_key", "").takeIf { !it.isNullOrBlank() } ?: defaultKey
-        geminiBrain = GeminiBrain(apiKey)
+        geminiBrain = GeminiBrain(apiKey, memoryManager)
 
         try {
             speechRecognizerHelper = SpeechRecognizerHelper(
@@ -173,7 +185,7 @@ class MainActivity : AppCompatActivity() {
                     val newKey = input.text.toString().trim()
                     prefs.edit().putString("gemini_api_key", newKey).apply()
                     val defaultKey = String(Base64.decode("QVEuQWI4Uk42SmFjdDVYX01QVm5WelNOd2prWkpRNnBrRjBLcGJ2TkcxTjFHTkpUSnBKV3c=", Base64.DEFAULT))
-                    geminiBrain = GeminiBrain(if (newKey.isNotBlank()) newKey else defaultKey)
+                    geminiBrain = GeminiBrain(if (newKey.isNotBlank()) newKey else defaultKey, memoryManager)
                     appendLog("[Config]: API Key updated successfully.")
                     Toast.makeText(this, "API Key Saved!", Toast.LENGTH_SHORT).show()
                 }
@@ -206,6 +218,11 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updatePermissionStatus()
+        val missedNotice = memoryManager.popPendingMissedCallNotice()
+        if (!missedNotice.isNullOrBlank()) {
+            appendLog("[VIP Alert]: $missedNotice")
+            speakerHelper.speak(missedNotice)
+        }
     }
 
     private fun updatePermissionStatus() {
@@ -266,7 +283,8 @@ class MainActivity : AppCompatActivity() {
     private fun processUserCommand(userText: String) {
         mainScope.launch {
             appendLog("Brain: Analyzing with Gemini AI...")
-            val decision = geminiBrain.processCommand(userText)
+            val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
+            val decision = geminiBrain.processCommand(userText, screenContext)
 
             if (decision.speech.isNotBlank()) {
                 appendLog("Jarvis: \"${decision.speech}\"")
@@ -285,6 +303,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    fun executeToolFromScheduler(action: String, args: Map<String, Any>, summary: String = "") {
+        appendLog("[Scheduler Alarm]: Executing scheduled task '$action'...")
+        if (summary.isNotBlank()) {
+            speakerHelper.speak("Sir, aapka scheduled task: $summary")
+        }
+        executeSingleTool(action, args)
+    }
+
     private fun executeSingleTool(tool: String, args: Map<String, Any>) {
         appendLog("Executing Tool: $tool($args)...")
 
@@ -294,18 +320,45 @@ class MainActivity : AppCompatActivity() {
                 val subAction = (args["action"] as? String) ?: (args["tool_name"] as? String) ?: ""
                 @Suppress("UNCHECKED_CAST")
                 val subArgs = (args["action_args"] as? Map<String, Any>) ?: (args["tool_args"] as? Map<String, Any>) ?: emptyMap()
-                appendLog("[Scheduler]: Task '$subAction' scheduled in $delaySec seconds...")
-                Handler(Looper.getMainLooper()).postDelayed({
-                    appendLog("[Scheduler]: Executing scheduled task '$subAction' now!")
-                    executeSingleTool(subAction, subArgs)
-                }, delaySec * 1000L)
+                val summary = (args["summary"] as? String) ?: "Scheduled $subAction"
+                val taskId = scheduledTaskManager.scheduleTask(delaySec, subAction, subArgs, summary)
+                appendLog("[Scheduler]: Task '$subAction' permanently saved in AlarmManager for $delaySec seconds (ID: $taskId). It will NEVER be dropped.")
+                speakerHelper.speak("Sir, task schedule kar diya hai. Dusra kaam karne par bhi yeh apne samay par execute hoga.")
+            }
+            "manage_vip" -> {
+                val action = (args["action"] as? String)?.lowercase() ?: "add"
+                val contact = (args["contact"] as? String) ?: (args["name"] as? String) ?: ""
+                if (action == "add" && contact.isNotBlank()) {
+                    memoryManager.addVipContact(contact)
+                    val reply = "Sir, $contact ko VIP priority list me add kar diya hai. Silent aur DND mode me bhi inka call bajega."
+                    appendLog("[VIP]: $reply")
+                    speakerHelper.speak(reply)
+                } else if (action == "remove" && contact.isNotBlank()) {
+                    memoryManager.removeVipContact(contact)
+                    val reply = "Sir, $contact ko VIP priority list se hata diya gaya hai."
+                    appendLog("[VIP]: $reply")
+                    speakerHelper.speak(reply)
+                } else {
+                    val vips = memoryManager.getVipContacts()
+                    val reply = if (vips.isEmpty()) "Sir, abhi koi VIP contact set nahi hai." else "Sir, aapke VIP contacts hain: ${vips.joinToString(", ")}."
+                    appendLog("[VIP]: $reply")
+                    speakerHelper.speak(reply)
+                }
+            }
+            "learn_preference" -> {
+                val pref = (args["preference"] as? String) ?: ""
+                if (pref.isNotBlank()) {
+                    memoryManager.learnPreference(pref)
+                    val reply = "Sir, maine aapki yeh pasand note kar li hai."
+                    appendLog("[Memory]: $reply")
+                    speakerHelper.speak(reply)
+                }
             }
             "universal_app_action" -> {
                 val appName = (args["app_name"] as? String) ?: "Notes"
-                val action = (args["action"] as? String) ?: "add"
-                val text = (args["text"] as? String) ?: ""
-                appendLog("[App Agent]: Opening $appName for '$action'...")
-                universalAppAgent.performAppAction(appName, action, text) { success, reply ->
+                val instruction = (args["instruction"] as? String) ?: (args["text"] as? String) ?: (args["action"] as? String) ?: ""
+                appendLog("[App Agent]: Opening $appName for AI execution...")
+                universalAppAgent.performAppAction(appName, instruction, geminiBrain) { success, reply ->
                     appendLog("[App Agent]: $reply")
                     speakerHelper.speak(reply)
                 }
@@ -347,14 +400,20 @@ class MainActivity : AppCompatActivity() {
                 speakerHelper.speak(reply)
             }
             "make_phone_call" -> {
-                val target = (args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
                     ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: ""
+                    ?: "").trim()
                 val (resolvedNumber, resolvedName) = telephonyHelper.resolveContactNumber(target)
-                val numberToCall = resolvedNumber ?: target
-                val reply = systemController.makePhoneCall(numberToCall)
-                appendLog("[Call]: $reply ($resolvedName)")
-                speakerHelper.speak(reply)
+                if (resolvedNumber == null && target.replace(Regex("[^0-9+]"), "").length < 7) {
+                    val reply = "Sir, '$target' ka phone number contacts me nahi mila."
+                    appendLog("[Call]: $reply")
+                    speakerHelper.speak(reply)
+                } else {
+                    val numberToCall = resolvedNumber ?: target
+                    val reply = systemController.makePhoneCall(numberToCall)
+                    appendLog("[Call]: $reply ($resolvedName)")
+                    speakerHelper.speak(reply)
+                }
             }
             "send_sms" -> {
                 val rec = (args["recipient"] as? String) ?: ""
@@ -398,6 +457,22 @@ class MainActivity : AppCompatActivity() {
                 val tag = (args["tag"] as? Number)?.toInt() ?: 1
                 nodeActionEngine.tapByTag(tag) { success, reply ->
                     appendLog("[UI Agent]: $reply")
+                    speakerHelper.speak(reply)
+                }
+            }
+            "type_tag" -> {
+                val tag = (args["tag"] as? Number)?.toInt() ?: 1
+                val text = (args["text"] as? String) ?: ""
+                nodeActionEngine.typeTextByTag(tag, text) { success, reply ->
+                    appendLog("[UI Agent]: $reply")
+                    speakerHelper.speak(reply)
+                }
+            }
+            "scroll_screen" -> {
+                val dir = (args["direction"] as? String) ?: "down"
+                nodeActionEngine.scrollScreen(dir) { success, reply ->
+                    appendLog("[Scroll]: $reply")
+                    speakerHelper.speak(reply)
                 }
             }
             else -> {
@@ -447,6 +522,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (instance == this) instance = null
         speechRecognizerHelper?.destroy()
         speakerHelper.shutdown()
     }

@@ -295,6 +295,7 @@ class SystemController(private val context: Context) {
 
     /**
      * Launches ANY installed app by name, alias, or package.
+     * Uses strict ranking (exact label -> prefix -> substring -> package) so correct apps launch without accidental misfires.
      */
     fun openApp(appName: String): String {
         val rawQuery = appName.lowercase().trim()
@@ -313,8 +314,13 @@ class SystemController(private val context: Context) {
             }
         }
 
+        // Clean query of Hindi/English conversational prefixes/suffixes
+        val stopWords = setOf("ek", "kam", "karo", "mera", "meri", "mere", "open", "kholo", "chalao", "start", "pe", "par", "app", "application", "ko")
+        val cleanTokens = rawQuery.split(Regex("\\s+")).filter { it.isNotEmpty() && !stopWords.contains(it) }
+        val cleanQuery = cleanTokens.joinToString(" ").ifEmpty { rawQuery }
+
         // 2. Direct Known Package Mapping (Instant 0.001s launch)
-        val mappedPackage = knownAppPackages[rawQuery]
+        val mappedPackage = knownAppPackages[cleanQuery] ?: knownAppPackages[rawQuery]
         if (mappedPackage != null) {
             val launchIntent = pm.getLaunchIntentForPackage(mappedPackage)
             if (launchIntent != null) {
@@ -324,48 +330,65 @@ class SystemController(private val context: Context) {
             }
         }
 
-        // Clean query of Hindi/English conversational prefixes/suffixes
-        val stopWords = setOf("ek", "kam", "karo", "mera", "meri", "mere", "open", "kholo", "chalao", "start", "pe", "par", "app", "application", "ko")
-        val cleanTokens = rawQuery.split(Regex("\\s+")).filter { it.isNotEmpty() && !stopWords.contains(it) }
-        val cleanQuery = cleanTokens.joinToString(" ").ifEmpty { rawQuery }
-
-        // 3. Dynamic Discovery across all installed apps with fuzzy matching
+        // 3. Dynamic Discovery across all launchable apps with strict priority ranking
         try {
-            val packages = pm.getInstalledPackages(0)
-            // Pass 1: Exact or direct substring match
-            for (pkg in packages) {
-                val pName = pkg.packageName.lowercase()
-                val appInfo = pkg.applicationInfo ?: continue
-                val label = pm.getApplicationLabel(appInfo).toString().lowercase()
+            val launcherIntent = Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
+            val activities = pm.queryIntentActivities(launcherIntent, 0)
 
-                if (label == cleanQuery || label == rawQuery || pName.endsWith(".$cleanQuery") || label.contains(cleanQuery) || pName.contains(cleanQuery)) {
-                    val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
-                    if (launchIntent != null) {
-                        launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                        context.startActivity(launchIntent)
-                        val officialName = pm.getApplicationLabel(appInfo).toString()
-                        return "$officialName open kar diya hai Sir."
+            data class AppCandidate(val label: String, val packageName: String, val score: Int)
+            val candidates = mutableListOf<AppCandidate>()
+
+            for (ri in activities) {
+                val pName = ri.activityInfo.packageName.lowercase()
+                val label = ri.loadLabel(pm).toString()
+                val lowerLabel = label.lowercase()
+
+                val score = when {
+                    lowerLabel == cleanQuery || lowerLabel == rawQuery -> 100
+                    lowerLabel.startsWith(cleanQuery) -> 80
+                    lowerLabel.split(Regex("\\s+")).any { it == cleanQuery } -> 70
+                    lowerLabel.contains(cleanQuery) -> 60
+                    pName == cleanQuery || pName.endsWith(".$cleanQuery") -> 50
+                    pName.contains(cleanQuery) -> 40
+                    cleanTokens.any { token -> token.length >= 3 && lowerLabel.contains(token) } -> 30
+                    else -> 0
+                }
+
+                if (score > 0) {
+                    candidates.add(AppCandidate(label, ri.activityInfo.packageName, score))
+                }
+            }
+
+            // Also check installed packages if not found in launcher activities
+            if (candidates.isEmpty()) {
+                val installed = pm.getInstalledPackages(0)
+                for (pkg in installed) {
+                    val pName = pkg.packageName.lowercase()
+                    val appInfo = pkg.applicationInfo ?: continue
+                    val label = pm.getApplicationLabel(appInfo).toString()
+                    val lowerLabel = label.lowercase()
+
+                    val score = when {
+                        lowerLabel == cleanQuery || lowerLabel == rawQuery -> 90
+                        lowerLabel.startsWith(cleanQuery) -> 75
+                        lowerLabel.contains(cleanQuery) -> 55
+                        pName.contains(cleanQuery) -> 35
+                        else -> 0
+                    }
+
+                    if (score > 0 && pm.getLaunchIntentForPackage(pkg.packageName) != null) {
+                        candidates.add(AppCandidate(label, pkg.packageName, score))
                     }
                 }
             }
 
-            // Pass 2: Token-based match (e.g. "dhaba fantasy" matches "dhaba" or "fantasy")
-            for (token in cleanTokens) {
-                if (token.length < 3) continue
-                for (pkg in packages) {
-                    val pName = pkg.packageName.lowercase()
-                    val appInfo = pkg.applicationInfo ?: continue
-                    val label = pm.getApplicationLabel(appInfo).toString().lowercase()
-
-                    if (label.contains(token) || pName.contains(token)) {
-                        val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
-                        if (launchIntent != null) {
-                            launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                            context.startActivity(launchIntent)
-                            val officialName = pm.getApplicationLabel(appInfo).toString()
-                            return "$officialName open kar diya hai Sir."
-                        }
-                    }
+            val bestMatch = candidates.maxByOrNull { it.score }
+            if (bestMatch != null) {
+                val launchIntent = pm.getLaunchIntentForPackage(bestMatch.packageName)
+                if (launchIntent != null) {
+                    launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    context.startActivity(launchIntent)
+                    return "${bestMatch.label} open kar diya hai Sir."
                 }
             }
         } catch (e: Exception) {

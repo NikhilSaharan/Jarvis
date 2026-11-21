@@ -39,7 +39,21 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Real-time event receiver (0ms latency, runs in RAM)
+        if (event == null) return
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val pkg = event.packageName?.toString() ?: ""
+            if (pkg.isNotBlank() && !pkg.contains("launcher") && !pkg.contains("systemui") && pkg != packageName) {
+                try {
+                    val pm = packageManager
+                    val appInfo = pm.getApplicationInfo(pkg, 0)
+                    val appLabel = pm.getApplicationLabel(appInfo).toString()
+                    com.jarvis.assistant.memory.JarvisMemoryManager(this).recordScreenFocus(appLabel)
+                } catch (e: Exception) {
+                    val label = pkg.substringAfterLast('.')
+                    com.jarvis.assistant.memory.JarvisMemoryManager(this).recordScreenFocus(label)
+                }
+            }
+        }
     }
 
     override fun onInterrupt() {
@@ -231,6 +245,52 @@ class JarvisAccessibilityService : AccessibilityService() {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    /**
+     * Dumps all interactive screen elements into a clean numbered list for Gemini inspection.
+     */
+    fun dumpScreenElementsSummary(): String {
+        val elements = dumpScreenElements()
+        if (elements.isEmpty()) return "Screen is empty or no interactive elements."
+        val sb = StringBuilder()
+        for (el in elements) {
+            val label = if (el.text.isNotBlank()) el.text else el.contentDescription
+            if (label.isBlank() && !el.isEditable) continue
+            val type = when {
+                el.isEditable -> "input_field"
+                el.isClickable -> "button"
+                else -> "text"
+            }
+            sb.append("[${el.tag}] $type: \"$label\"\n")
+        }
+        return sb.toString().trim()
+    }
+
+    /**
+     * Swipes / scrolls the screen up or down via hardware gesture (for reels, feeds, web).
+     */
+    fun scroll(direction: String = "down"): Boolean {
+        val displayMetrics = resources.displayMetrics
+        val width = displayMetrics.widthPixels.toFloat()
+        val height = displayMetrics.heightPixels.toFloat()
+
+        val startX = width / 2f
+        val endX = width / 2f
+        val (startY, endY) = if (direction.lowercase() == "up") {
+            Pair(height * 0.3f, height * 0.75f)
+        } else {
+            Pair(height * 0.75f, height * 0.3f)
+        }
+
+        val scrollPath = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(scrollPath, 0, 300))
+            .build()
+        return dispatchGesture(gesture, null, null)
     }
 
     /**

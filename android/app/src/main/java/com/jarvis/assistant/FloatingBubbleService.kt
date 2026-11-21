@@ -26,6 +26,8 @@ import com.jarvis.assistant.engine.NodeActionEngine
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.engine.TelephonyHelper
 import com.jarvis.assistant.engine.UniversalAppAgent
+import com.jarvis.assistant.memory.JarvisMemoryManager
+import com.jarvis.assistant.scheduler.ScheduledTaskManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import com.jarvis.assistant.voice.SpeechRecognizerHelper
 import kotlinx.coroutines.CoroutineScope
@@ -44,6 +46,8 @@ class FloatingBubbleService : Service() {
     private lateinit var speakerHelper: SpeakerHelper
     private var speechRecognizerHelper: SpeechRecognizerHelper? = null
     private lateinit var geminiBrain: GeminiBrain
+    private lateinit var memoryManager: JarvisMemoryManager
+    private lateinit var scheduledTaskManager: ScheduledTaskManager
 
     private val serviceScope = CoroutineScope(Dispatchers.Main)
 
@@ -56,14 +60,16 @@ class FloatingBubbleService : Service() {
             systemController = SystemController(this)
             telephonyHelper = TelephonyHelper(this)
             nodeActionEngine = NodeActionEngine(systemController, telephonyHelper)
-            universalAppAgent = UniversalAppAgent(this, systemController)
+            universalAppAgent = UniversalAppAgent(this, systemController, nodeActionEngine)
             speakerHelper = SpeakerHelper(this)
+            memoryManager = JarvisMemoryManager(this)
+            scheduledTaskManager = ScheduledTaskManager(this)
 
             // Safe API key loading (with base64 fallback)
             val defaultKey = String(Base64.decode("QVEuQWI4Uk42SmFjdDVYX01QVm5WelNOd2prWkpRNnBrRjBLcGJ2TkcxTjFHTkpUSnBKV3c=", Base64.DEFAULT))
             val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
             val apiKey = prefs.getString("gemini_api_key", "").takeIf { !it.isNullOrBlank() } ?: defaultKey
-            geminiBrain = GeminiBrain(apiKey)
+            geminiBrain = GeminiBrain(apiKey, memoryManager)
 
             try {
                 speechRecognizerHelper = SpeechRecognizerHelper(
@@ -148,7 +154,8 @@ class FloatingBubbleService : Service() {
 
     private fun handleVoiceCommand(userText: String) {
         serviceScope.launch {
-            val decision = geminiBrain.processCommand(userText)
+            val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
+            val decision = geminiBrain.processCommand(userText, screenContext)
             if (decision.speech.isNotBlank()) {
                 speakerHelper.speak(decision.speech)
             }
@@ -166,15 +173,36 @@ class FloatingBubbleService : Service() {
                 val subAction = (args["action"] as? String) ?: (args["tool_name"] as? String) ?: ""
                 @Suppress("UNCHECKED_CAST")
                 val subArgs = (args["action_args"] as? Map<String, Any>) ?: (args["tool_args"] as? Map<String, Any>) ?: emptyMap()
-                Handler(Looper.getMainLooper()).postDelayed({
-                    executeTool(subAction, subArgs)
-                }, delaySec * 1000L)
+                val summary = (args["summary"] as? String) ?: "Scheduled $subAction"
+                scheduledTaskManager.scheduleTask(delaySec, subAction, subArgs, summary)
+                speakerHelper.speak("Sir, task schedule kar diya hai. Dusra kaam karne par bhi yeh apne samay par execute hoga.")
+            }
+            "manage_vip" -> {
+                val action = (args["action"] as? String)?.lowercase() ?: "add"
+                val contact = (args["contact"] as? String) ?: (args["name"] as? String) ?: ""
+                if (action == "add" && contact.isNotBlank()) {
+                    memoryManager.addVipContact(contact)
+                    speakerHelper.speak("Sir, $contact ko VIP priority list me add kar diya hai. Silent aur DND mode me bhi inka call bajega.")
+                } else if (action == "remove" && contact.isNotBlank()) {
+                    memoryManager.removeVipContact(contact)
+                    speakerHelper.speak("Sir, $contact ko VIP list se hata diya gaya hai.")
+                } else {
+                    val vips = memoryManager.getVipContacts()
+                    val reply = if (vips.isEmpty()) "Sir, abhi koi VIP contact set nahi hai." else "Sir, aapke VIP contacts hain: ${vips.joinToString(", ")}."
+                    speakerHelper.speak(reply)
+                }
+            }
+            "learn_preference" -> {
+                val pref = (args["preference"] as? String) ?: ""
+                if (pref.isNotBlank()) {
+                    memoryManager.learnPreference(pref)
+                    speakerHelper.speak("Sir, maine aapki yeh pasand note kar li hai.")
+                }
             }
             "universal_app_action" -> {
                 val appName = (args["app_name"] as? String) ?: "Notes"
-                val action = (args["action"] as? String) ?: "add"
-                val text = (args["text"] as? String) ?: ""
-                universalAppAgent.performAppAction(appName, action, text) { _, reply ->
+                val instruction = (args["instruction"] as? String) ?: (args["text"] as? String) ?: (args["action"] as? String) ?: ""
+                universalAppAgent.performAppAction(appName, instruction, geminiBrain) { _, reply ->
                     speakerHelper.speak(reply)
                 }
             }
@@ -205,13 +233,17 @@ class FloatingBubbleService : Service() {
                 systemController.setTimer(s, msg)
             }
             "make_phone_call" -> {
-                val target = (args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
                     ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: ""
+                    ?: "").trim()
                 val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(target)
-                val numberToCall = resolvedNumber ?: target
-                val reply = systemController.makePhoneCall(numberToCall)
-                speakerHelper.speak(reply)
+                if (resolvedNumber == null && target.replace(Regex("[^0-9+]"), "").length < 7) {
+                    speakerHelper.speak("Sir, '$target' ka phone number contacts me nahi mila.")
+                } else {
+                    val numberToCall = resolvedNumber ?: target
+                    val reply = systemController.makePhoneCall(numberToCall)
+                    speakerHelper.speak(reply)
+                }
             }
             "send_sms" -> {
                 val rec = (args["recipient"] as? String) ?: ""
@@ -242,7 +274,22 @@ class FloatingBubbleService : Service() {
             }
             "tap_tag" -> {
                 val tag = (args["tag"] as? Number)?.toInt() ?: 1
-                nodeActionEngine.tapByTag(tag) { _, _ -> }
+                nodeActionEngine.tapByTag(tag) { _, reply ->
+                    speakerHelper.speak(reply)
+                }
+            }
+            "type_tag" -> {
+                val tag = (args["tag"] as? Number)?.toInt() ?: 1
+                val text = (args["text"] as? String) ?: ""
+                nodeActionEngine.typeTextByTag(tag, text) { _, reply ->
+                    speakerHelper.speak(reply)
+                }
+            }
+            "scroll_screen" -> {
+                val dir = (args["direction"] as? String) ?: "down"
+                nodeActionEngine.scrollScreen(dir) { _, reply ->
+                    speakerHelper.speak(reply)
+                }
             }
         }
     }

@@ -44,45 +44,62 @@ class NodeActionEngine(
             }
 
             // Dismiss any modal/privacy bottom-sheet if shown
-            delay(400)
+            delay(500)
             val closeBtn = service.findClickableNode("Close") ?: service.findClickableNode("close")
             if (closeBtn != null) {
                 service.clickNode(closeBtn)
                 delay(200)
             }
 
-            val targetIdKeyword = if (isVideo) "video" else "voice"
-            val targetDesc = if (isVideo) "video call" else "voice call"
-
-            // Poll for call button by Resource ID, Content Description, or Text (up to 4.0 seconds)
-            val callBtn = service.pollForNode(timeoutMs = 4000) { node ->
+            // In WhatsApp chat toolbar:
+            // Video Call button: id has "video_call", cd is "Video call"
+            // Voice/Audio Call button: id has "voice_call", cd is "Voice call"
+            val callBtn = service.pollForNode(timeoutMs = 4500) { node ->
                 val resId = node.viewIdResourceName?.lowercase() ?: ""
                 val cd = node.contentDescription?.toString()?.lowercase() ?: ""
                 val text = node.text?.toString()?.lowercase() ?: ""
 
-                resId.contains(targetIdKeyword) ||
-                        cd.contains(targetDesc) ||
-                        (cd.contains("call") && !cd.contains("history")) ||
-                        (text.contains("call") && !text.contains("history"))
+                if (isVideo) {
+                    // MUST be a video call button
+                    resId.contains("video_call") || cd.contains("video call") || cd == "video" || text.contains("video call")
+                } else {
+                    // MUST be an audio/voice call button, and strictly NOT video!
+                    val isVoice = resId.contains("voice_call") || cd.contains("voice call") || cd.contains("audio call") ||
+                            resId.endsWith(":id/voice_call") || cd == "voice call" || text.contains("voice call")
+                    val isGenericCall = (cd == "call" || text == "call" || resId.endsWith(":id/call"))
+                    val isNotVideo = !resId.contains("video") && !cd.contains("video") && !text.contains("video")
+                    (isVoice || isGenericCall) && isNotVideo
+                }
             }
 
             if (callBtn != null) {
                 val clicked = service.tapElement(callBtn)
                 if (clicked) {
-                    delay(600)
-                    // Auto-confirm if WhatsApp shows confirmation dialog ("Start voice call? -> Call")
-                    val confirmBtn = service.findClickableNode("Call") ?: service.findClickableNode("CALL")
+                    delay(700)
+                    // Auto-confirm if WhatsApp shows confirmation dialog:
+                    // Dialog can say "Start voice call? -> Call" or "Start video call? -> Video call"
+                    val confirmBtn = service.findNodeById("android:id/button1")
+                        ?: service.findClickableNode(if (isVideo) "Video call" else "Call")
+                        ?: service.findClickableNode("CALL")
+                        ?: service.findClickableNode("Call")
+                        ?: service.findNodeByPredicate { n ->
+                            val nText = n.text?.toString()?.lowercase() ?: ""
+                            val nCd = n.contentDescription?.toString()?.lowercase() ?: ""
+                            n.isClickable && n != callBtn && (nText.contains("call") || nCd.contains("call") || nText.contains("start"))
+                        }
+
                     if (confirmBtn != null && confirmBtn != callBtn) {
                         service.tapElement(confirmBtn)
                     }
 
-                    val callTypeStr = if (isVideo) "video" else "voice"
+                    val callTypeStr = if (isVideo) "video" else "audio"
                     callback(true, "WhatsApp par $displayName ko $callTypeStr call laga di hai Sir.")
                     return@launch
                 }
             }
 
-            callback(false, "WhatsApp par Call button nahi mil saka Sir.")
+            val callTypeStr = if (isVideo) "video" else "audio"
+            callback(false, "WhatsApp par $callTypeStr call button nahi mil saka Sir.")
         }
     }
 
@@ -197,5 +214,18 @@ class NodeActionEngine(
             }
         }
         callback(false, "Tag [${tag}] me text nahi likh saka Sir.")
+    }
+
+    /**
+     * Swipes / scrolls the active screen up or down.
+     */
+    fun scrollScreen(direction: String = "down", callback: (Boolean, String) -> Unit) {
+        val service = JarvisAccessibilityService.instance
+        if (service == null) {
+            callback(false, "Accessibility Service active nahi hai Sir.")
+            return
+        }
+        val scrolled = service.scroll(direction)
+        callback(scrolled, if (scrolled) "Screen scroll kar di hai Sir." else "Scroll execute nahi ho saka.")
     }
 }
