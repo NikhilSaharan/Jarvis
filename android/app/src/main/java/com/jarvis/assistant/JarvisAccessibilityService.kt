@@ -172,6 +172,31 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Direct node action: Dual-Action Tap (Click Action + Hardware Gesture Tap).
+     * Bypasses OEM click suppression and guarantees button activation on OnePlus/OxygenOS!
+     */
+    fun tapElement(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            val cx = bounds.centerX().toFloat()
+            val cy = bounds.centerY().toFloat()
+            val clickPath = Path().apply {
+                moveTo(cx, cy)
+                lineTo(cx + 1f, cy + 1f)
+            }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(clickPath, 0, 50))
+                .build()
+            dispatchGesture(gesture, null, null)
+        }
+        return true
+    }
+
+    /**
      * Direct node action: Click with Gesture Tap Fallback (100% reliable on all OEMs).
      */
     fun clickNode(node: AccessibilityNodeInfo?): Boolean {
@@ -183,8 +208,11 @@ class JarvisAccessibilityService : AccessibilityService() {
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
         if (bounds.width() > 0 && bounds.height() > 0) {
+            val cx = bounds.centerX().toFloat()
+            val cy = bounds.centerY().toFloat()
             val clickPath = Path().apply {
-                moveTo(bounds.centerX().toFloat(), bounds.centerY().toFloat())
+                moveTo(cx, cy)
+                lineTo(cx + 1f, cy + 1f)
             }
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(clickPath, 0, 50))

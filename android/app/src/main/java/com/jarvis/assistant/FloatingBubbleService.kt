@@ -9,7 +9,9 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.view.Gravity
@@ -23,6 +25,7 @@ import com.jarvis.assistant.brain.GeminiBrain
 import com.jarvis.assistant.engine.NodeActionEngine
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.engine.TelephonyHelper
+import com.jarvis.assistant.engine.UniversalAppAgent
 import com.jarvis.assistant.voice.SpeakerHelper
 import com.jarvis.assistant.voice.SpeechRecognizerHelper
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +40,7 @@ class FloatingBubbleService : Service() {
     private lateinit var systemController: SystemController
     private lateinit var telephonyHelper: TelephonyHelper
     private lateinit var nodeActionEngine: NodeActionEngine
+    private lateinit var universalAppAgent: UniversalAppAgent
     private lateinit var speakerHelper: SpeakerHelper
     private var speechRecognizerHelper: SpeechRecognizerHelper? = null
     private lateinit var geminiBrain: GeminiBrain
@@ -52,10 +56,11 @@ class FloatingBubbleService : Service() {
             systemController = SystemController(this)
             telephonyHelper = TelephonyHelper(this)
             nodeActionEngine = NodeActionEngine(systemController, telephonyHelper)
+            universalAppAgent = UniversalAppAgent(this, systemController)
             speakerHelper = SpeakerHelper(this)
 
             // Safe API key loading (with base64 fallback)
-            val defaultKey = String(Base64.decode("QVEuQWI4Uk42SllvV1RDdE5aUzNhMktXcU80NUNoYzdrWmtzb3VJb0tiWWhvVDUtZTgxbVE=", Base64.DEFAULT))
+            val defaultKey = String(Base64.decode("QVEuQWI4Uk42SmFjdDVYX01QVm5WelNOd2prWkpRNnBrRjBLcGJ2TkcxTjFHTkpUSnBKV3c=", Base64.DEFAULT))
             val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
             val apiKey = prefs.getString("gemini_api_key", "").takeIf { !it.isNullOrBlank() } ?: defaultKey
             geminiBrain = GeminiBrain(apiKey)
@@ -150,72 +155,94 @@ class FloatingBubbleService : Service() {
 
             val tool = decision.toolName ?: return@launch
             val args = decision.toolArgs ?: emptyMap()
+            executeTool(tool, args)
+        }
+    }
 
-            when (tool) {
-                "sleep_routine" -> {
-                    val mins = (args["minutes"] as? Number)?.toInt() ?: 10
-                    val reply = systemController.sleepAndWakeUp(mins) { msg ->
-                        speakerHelper.speak(msg)
-                    }
+    private fun executeTool(tool: String, args: Map<String, Any>) {
+        when (tool) {
+            "schedule_action" -> {
+                val delaySec = (args["delay_seconds"] as? Number)?.toInt() ?: 10
+                val subAction = (args["action"] as? String) ?: (args["tool_name"] as? String) ?: ""
+                @Suppress("UNCHECKED_CAST")
+                val subArgs = (args["action_args"] as? Map<String, Any>) ?: (args["tool_args"] as? Map<String, Any>) ?: emptyMap()
+                Handler(Looper.getMainLooper()).postDelayed({
+                    executeTool(subAction, subArgs)
+                }, delaySec * 1000L)
+            }
+            "universal_app_action" -> {
+                val appName = (args["app_name"] as? String) ?: "Notes"
+                val action = (args["action"] as? String) ?: "add"
+                val text = (args["text"] as? String) ?: ""
+                universalAppAgent.performAppAction(appName, action, text) { _, reply ->
                     speakerHelper.speak(reply)
                 }
-                "set_dnd" -> {
-                    val enabled = (args["enabled"] as? Boolean) ?: true
-                    systemController.setDnd(enabled)
+            }
+            "sleep_routine" -> {
+                val mins = (args["minutes"] as? Number)?.toInt() ?: 10
+                val reply = systemController.sleepAndWakeUp(mins) { msg ->
+                    speakerHelper.speak(msg)
                 }
-                "set_brightness" -> {
-                    val level = (args["level"] as? String) ?: "medium"
-                    systemController.setBrightness(level)
+                speakerHelper.speak(reply)
+            }
+            "set_dnd" -> {
+                val enabled = (args["enabled"] as? Boolean) ?: true
+                systemController.setDnd(enabled)
+            }
+            "set_brightness" -> {
+                val level = (args["level"] as? String) ?: "medium"
+                systemController.setBrightness(level)
+            }
+            "set_alarm" -> {
+                val h = (args["hour"] as? Number)?.toInt() ?: 7
+                val m = (args["minute"] as? Number)?.toInt() ?: 0
+                val msg = (args["message"] as? String) ?: "Alarm"
+                systemController.setAlarm(h, m, msg)
+            }
+            "set_timer" -> {
+                val s = (args["seconds"] as? Number)?.toInt() ?: 60
+                val msg = (args["message"] as? String) ?: "Timer"
+                systemController.setTimer(s, msg)
+            }
+            "make_phone_call" -> {
+                val target = (args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: ""
+                val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(target)
+                val numberToCall = resolvedNumber ?: target
+                val reply = systemController.makePhoneCall(numberToCall)
+                speakerHelper.speak(reply)
+            }
+            "send_sms" -> {
+                val rec = (args["recipient"] as? String) ?: ""
+                val msg = (args["message"] as? String) ?: ""
+                systemController.sendSms(rec, msg)
+            }
+            "play_youtube" -> {
+                val q = (args["query"] as? String) ?: "trending songs"
+                systemController.playYoutube(q)
+            }
+            "open_app" -> {
+                val app = (args["app_name"] as? String) ?: ""
+                systemController.openApp(app)
+            }
+            "send_whatsapp_message" -> {
+                val rec = (args["recipient"] as? String) ?: ""
+                val msg = (args["message"] as? String) ?: ""
+                nodeActionEngine.sendWhatsAppMessage(rec, msg) { success, reply ->
+                    if (success) speakerHelper.speak(reply)
                 }
-                "set_alarm" -> {
-                    val h = (args["hour"] as? Number)?.toInt() ?: 7
-                    val m = (args["minute"] as? Number)?.toInt() ?: 0
-                    val msg = (args["message"] as? String) ?: "Alarm"
-                    systemController.setAlarm(h, m, msg)
+            }
+            "whatsapp_call" -> {
+                val rec = (args["recipient"] as? String) ?: ""
+                val isVideo = (args["call_type"] as? String)?.lowercase() == "video"
+                nodeActionEngine.callWhatsApp(rec, isVideo) { success, reply ->
+                    if (success) speakerHelper.speak(reply)
                 }
-                "set_timer" -> {
-                    val s = (args["seconds"] as? Number)?.toInt() ?: 60
-                    val msg = (args["message"] as? String) ?: "Timer"
-                    systemController.setTimer(s, msg)
-                }
-                "make_phone_call" -> {
-                    val target = (args["phone_number"] as? String) ?: (args["recipient"] as? String) ?: ""
-                    val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(target)
-                    val numberToCall = resolvedNumber ?: target
-                    val reply = systemController.makePhoneCall(numberToCall)
-                    speakerHelper.speak(reply)
-                }
-                "send_sms" -> {
-                    val rec = (args["recipient"] as? String) ?: ""
-                    val msg = (args["message"] as? String) ?: ""
-                    systemController.sendSms(rec, msg)
-                }
-                "play_youtube" -> {
-                    val q = (args["query"] as? String) ?: "trending songs"
-                    systemController.playYoutube(q)
-                }
-                "open_app" -> {
-                    val app = (args["app_name"] as? String) ?: ""
-                    systemController.openApp(app)
-                }
-                "send_whatsapp_message" -> {
-                    val rec = (args["recipient"] as? String) ?: ""
-                    val msg = (args["message"] as? String) ?: ""
-                    nodeActionEngine.sendWhatsAppMessage(rec, msg) { success, reply ->
-                        if (success) speakerHelper.speak(reply)
-                    }
-                }
-                "whatsapp_call" -> {
-                    val rec = (args["recipient"] as? String) ?: ""
-                    val isVideo = (args["call_type"] as? String)?.lowercase() == "video"
-                    nodeActionEngine.callWhatsApp(rec, isVideo) { success, reply ->
-                        if (success) speakerHelper.speak(reply)
-                    }
-                }
-                "tap_tag" -> {
-                    val tag = (args["tag"] as? Number)?.toInt() ?: 1
-                    nodeActionEngine.tapByTag(tag) { _, _ -> }
-                }
+            }
+            "tap_tag" -> {
+                val tag = (args["tag"] as? Number)?.toInt() ?: 1
+                nodeActionEngine.tapByTag(tag) { _, _ -> }
             }
         }
     }

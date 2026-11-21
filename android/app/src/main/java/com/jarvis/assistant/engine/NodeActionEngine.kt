@@ -67,13 +67,13 @@ class NodeActionEngine(
             }
 
             if (callBtn != null) {
-                val clicked = service.clickNode(callBtn)
+                val clicked = service.tapElement(callBtn)
                 if (clicked) {
-                    delay(500)
+                    delay(600)
                     // Auto-confirm if WhatsApp shows confirmation dialog ("Start voice call? -> Call")
                     val confirmBtn = service.findClickableNode("Call") ?: service.findClickableNode("CALL")
                     if (confirmBtn != null && confirmBtn != callBtn) {
-                        service.clickNode(confirmBtn)
+                        service.tapElement(confirmBtn)
                     }
 
                     val callTypeStr = if (isVideo) "video" else "voice"
@@ -111,39 +111,41 @@ class NodeActionEngine(
                 return@launch
             }
 
-            // Poll for Send button by Resource ID or Description (up to 4.0 seconds)
-            val sendBtn = service.pollForNode(timeoutMs = 4000) { node ->
+            delay(800)
+            // Poll for Send button by Resource ID or Description (up to 5.0 seconds)
+            val sendBtn = service.pollForNode(timeoutMs = 5000) { node ->
                 val resId = node.viewIdResourceName?.lowercase() ?: ""
                 val cd = node.contentDescription?.toString()?.lowercase() ?: ""
                 val text = node.text?.toString()?.lowercase() ?: ""
 
-                resId.contains("send") || cd == "send" || text == "send"
+                resId.contains("send") || cd == "send" || cd == "भेजें" || cd.contains("bhej") || text == "send"
             }
 
             if (sendBtn != null) {
-                val clicked = service.clickNode(sendBtn)
-                if (clicked) {
-                    callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
-                    return@launch
-                }
+                service.tapElement(sendBtn)
+                delay(300)
+                service.tapElement(sendBtn)
+                callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
+                return@launch
             }
 
             // Fallback: If not sent via pre-fill, type into input field and click Send
-            val inputField = service.findNodeByPredicate { node ->
+            val inputField = service.pollForNode(timeoutMs = 2500) { node ->
                 val resId = node.viewIdResourceName?.lowercase() ?: ""
-                node.isEditable || resId.contains("entry") || node.text?.contains("Message") == true
+                val text = node.text?.toString() ?: ""
+                node.isEditable || resId.contains("entry") || text.contains("Message", ignoreCase = true)
             }
 
             if (inputField != null) {
                 service.typeText(inputField, message)
-                delay(300)
-                val retrySend = service.findNodeByPredicate { node ->
+                delay(400)
+                val retrySend = service.pollForNode(timeoutMs = 2500) { node ->
                     val resId = node.viewIdResourceName?.lowercase() ?: ""
                     val cd = node.contentDescription?.toString()?.lowercase() ?: ""
-                    resId.contains("send") || cd.contains("send")
+                    resId.contains("send") || cd.contains("send") || cd.contains("भेजें")
                 }
                 if (retrySend != null) {
-                    service.clickNode(retrySend)
+                    service.tapElement(retrySend)
                     callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
                     return@launch
                 }

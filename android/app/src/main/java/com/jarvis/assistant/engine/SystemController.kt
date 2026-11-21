@@ -47,7 +47,10 @@ class SystemController(private val context: Context) {
         "clock" to "com.oneplus.deskclock",
         "calculator" to "com.oneplus.calculator",
         "gallery" to "com.oneplus.gallery",
-        "photos" to "com.google.android.apps.photos"
+        "photos" to "com.google.android.apps.photos",
+        "cricbuzz" to "com.cricbuzz.android",
+        "notes" to "com.oneplus.note",
+        "keep" to "com.google.android.keep"
     )
 
     // ═════════════════════════════════════════════════════════════════
@@ -267,21 +270,8 @@ class SystemController(private val context: Context) {
     }
 
     private fun cleanYoutubeQuery(query: String): String {
-        var q = query.lowercase().trim()
-        val stopWords = listOf(
-            "youtube", "pe", "par", "chalao", "chaalo", "chalo", "chlaa", "chla",
-            "kardo", "karo", "kro", "please", "search", "play", "suno", "sunao",
-            "lagao", "laga", "lgao", "bajao", "baja", "start", "ek", "koi", "mera", "mood", "kharab"
-        )
-        if (q.contains("mood") || q.contains("purana")) {
-            if (q.contains("purana")) return "classic evergreen retro hindi songs hits"
-            return "relaxing peaceful hindi songs"
-        }
-        for (w in stopWords) {
-            q = q.replace(Regex("\\b$w\\b"), " ")
-        }
-        val res = q.replace(Regex("\\s+"), " ").trim()
-        return if (res.isNotEmpty()) res else "trending hindi songs"
+        val q = query.trim()
+        return if (q.isNotEmpty()) q else "trending songs"
     }
 
     private fun fetchYoutubeVideoId(query: String): String? {
@@ -307,11 +297,24 @@ class SystemController(private val context: Context) {
      * Launches ANY installed app by name, alias, or package.
      */
     fun openApp(appName: String): String {
-        val query = appName.lowercase().trim()
+        val rawQuery = appName.lowercase().trim()
         val pm = context.packageManager
 
-        // 1. Direct Known Package Mapping (Instant 0.001s launch)
-        val mappedPackage = knownAppPackages[query]
+        // 1. Dedicated Notes Handler (OnePlus Notes, ColorOS Notes, Google Keep)
+        if (rawQuery.contains("note") || rawQuery.contains("keep")) {
+            val notePackages = listOf("com.oneplus.note", "com.coloros.note", "com.google.android.keep", "com.google.android.apps.keep")
+            for (np in notePackages) {
+                val launchIntent = pm.getLaunchIntentForPackage(np)
+                if (launchIntent != null) {
+                    launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    context.startActivity(launchIntent)
+                    return "Notes open kar diya hai Sir."
+                }
+            }
+        }
+
+        // 2. Direct Known Package Mapping (Instant 0.001s launch)
+        val mappedPackage = knownAppPackages[rawQuery]
         if (mappedPackage != null) {
             val launchIntent = pm.getLaunchIntentForPackage(mappedPackage)
             if (launchIntent != null) {
@@ -321,21 +324,47 @@ class SystemController(private val context: Context) {
             }
         }
 
-        // 2. Dynamic Discovery across all installed apps
+        // Clean query of Hindi/English conversational prefixes/suffixes
+        val stopWords = setOf("ek", "kam", "karo", "mera", "meri", "mere", "open", "kholo", "chalao", "start", "pe", "par", "app", "application", "ko")
+        val cleanTokens = rawQuery.split(Regex("\\s+")).filter { it.isNotEmpty() && !stopWords.contains(it) }
+        val cleanQuery = cleanTokens.joinToString(" ").ifEmpty { rawQuery }
+
+        // 3. Dynamic Discovery across all installed apps with fuzzy matching
         try {
             val packages = pm.getInstalledPackages(0)
+            // Pass 1: Exact or direct substring match
             for (pkg in packages) {
                 val pName = pkg.packageName.lowercase()
                 val appInfo = pkg.applicationInfo ?: continue
                 val label = pm.getApplicationLabel(appInfo).toString().lowercase()
 
-                if (label == query || pName.endsWith(".$query") || label.contains(query) || pName.contains(query)) {
+                if (label == cleanQuery || label == rawQuery || pName.endsWith(".$cleanQuery") || label.contains(cleanQuery) || pName.contains(cleanQuery)) {
                     val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
                     if (launchIntent != null) {
                         launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
                         context.startActivity(launchIntent)
                         val officialName = pm.getApplicationLabel(appInfo).toString()
                         return "$officialName open kar diya hai Sir."
+                    }
+                }
+            }
+
+            // Pass 2: Token-based match (e.g. "dhaba fantasy" matches "dhaba" or "fantasy")
+            for (token in cleanTokens) {
+                if (token.length < 3) continue
+                for (pkg in packages) {
+                    val pName = pkg.packageName.lowercase()
+                    val appInfo = pkg.applicationInfo ?: continue
+                    val label = pm.getApplicationLabel(appInfo).toString().lowercase()
+
+                    if (label.contains(token) || pName.contains(token)) {
+                        val launchIntent = pm.getLaunchIntentForPackage(pkg.packageName)
+                        if (launchIntent != null) {
+                            launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            context.startActivity(launchIntent)
+                            val officialName = pm.getApplicationLabel(appInfo).toString()
+                            return "$officialName open kar diya hai Sir."
+                        }
                     }
                 }
             }
