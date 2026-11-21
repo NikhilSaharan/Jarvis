@@ -82,7 +82,7 @@ class SystemController(private val context: Context) {
      * 2. Sets hardware alarm for (current time + minutes).
      * 3. Schedules DND to automatically turn OFF when waking up!
      */
-    fun sleepAndWakeUp(minutes: Int, onWakeupAnnounce: (String) -> Unit): String {
+    fun sleepAndWakeUp(minutes: Int, onWakeupAnnounce: ((String) -> Unit)? = null): String {
         val safeMinutes = if (minutes <= 0) 10 else minutes
 
         // 1. Activate DND
@@ -100,7 +100,7 @@ class SystemController(private val context: Context) {
         Handler(Looper.getMainLooper()).postDelayed({
             setDnd(false)
             val wakeupMsg = "Good morning Sir! $safeMinutes minute poore ho gaye hain, Do Not Disturb off kar diya hai."
-            onWakeupAnnounce(wakeupMsg)
+            onWakeupAnnounce?.invoke(wakeupMsg)
         }, safeMinutes * 60 * 1000L)
 
         val mStr = if (targetMinute < 10) "0$targetMinute" else "$targetMinute"
@@ -230,7 +230,7 @@ class SystemController(private val context: Context) {
      * Resolves the top video ID via background scrape and launches `watch?v=VIDEO_ID`.
      * Autoplays directly without leaving the user on a search list!
      */
-    fun playYoutube(query: String, callback: (String) -> Unit) {
+    fun playYoutube(query: String, callback: ((String) -> Unit)? = null) {
         val cleanQuery = cleanYoutubeQuery(query)
         CoroutineScope(Dispatchers.IO).launch {
             val videoId = fetchYoutubeVideoId(cleanQuery)
@@ -242,11 +242,11 @@ class SystemController(private val context: Context) {
                     }
                     try {
                         context.startActivity(intent)
-                        callback("YouTube par '$cleanQuery' direct play kar diya hai Sir.")
+                        callback?.invoke("YouTube par '$cleanQuery' direct play kar diya hai Sir.")
                     } catch (e: Exception) {
                         intent.setPackage(null)
                         context.startActivity(intent)
-                        callback("YouTube par '$cleanQuery' play kar diya hai Sir.")
+                        callback?.invoke("YouTube par '$cleanQuery' play kar diya hai Sir.")
                     }
                 } else {
                     val encoded = Uri.encode(cleanQuery)
@@ -260,7 +260,7 @@ class SystemController(private val context: Context) {
                         intent.setPackage(null)
                         context.startActivity(intent)
                     }
-                    callback("YouTube par '$cleanQuery' open kar diya hai Sir.")
+                    callback?.invoke("YouTube par '$cleanQuery' open kar diya hai Sir.")
                 }
             }
         }

@@ -152,6 +152,13 @@ class FloatingBubbleService : Service() {
             val args = decision.toolArgs ?: emptyMap()
 
             when (tool) {
+                "sleep_routine" -> {
+                    val mins = (args["minutes"] as? Number)?.toInt() ?: 10
+                    val reply = systemController.sleepAndWakeUp(mins) { msg ->
+                        speakerHelper.speak(msg)
+                    }
+                    speakerHelper.speak(reply)
+                }
                 "set_dnd" -> {
                     val enabled = (args["enabled"] as? Boolean) ?: true
                     systemController.setDnd(enabled)
@@ -172,8 +179,11 @@ class FloatingBubbleService : Service() {
                     systemController.setTimer(s, msg)
                 }
                 "make_phone_call" -> {
-                    val num = (args["phone_number"] as? String) ?: ""
-                    systemController.makePhoneCall(num)
+                    val target = (args["phone_number"] as? String) ?: (args["recipient"] as? String) ?: ""
+                    val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(target)
+                    val numberToCall = resolvedNumber ?: target
+                    val reply = systemController.makePhoneCall(numberToCall)
+                    speakerHelper.speak(reply)
                 }
                 "send_sms" -> {
                     val rec = (args["recipient"] as? String) ?: ""
