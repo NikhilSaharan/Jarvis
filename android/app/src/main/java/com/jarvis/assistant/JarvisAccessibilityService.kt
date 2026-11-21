@@ -159,6 +159,16 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Finds a node by view ID resource name (e.g. android:id/button1).
+     */
+    fun findNodeById(id: String): AccessibilityNodeInfo? {
+        val lowerId = id.lowercase().trim()
+        return findNodeByPredicate { node ->
+            node.viewIdResourceName?.lowercase()?.contains(lowerId) == true
+        }
+    }
+
+    /**
      * Finds the first editable text field (EditText) on screen.
      */
     fun findFirstInputField(): AccessibilityNodeInfo? {
