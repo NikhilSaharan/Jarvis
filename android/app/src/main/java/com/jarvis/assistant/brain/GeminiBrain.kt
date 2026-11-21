@@ -27,14 +27,11 @@ class GeminiBrain(private val apiKey: String) {
     private val gson = Gson()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-    // Strict model priority: Starts with gemini-3.5-flash-lite as requested by Sir,
-    // with automatic fallback to active flash models if Google REST API returns 404!
+    // Strict rule: Strictly gemini-3.5-flash-lite primary, with fallback to gemini-3.1-flash-lite only.
+    // Absolutely no other model is used.
     private val models = listOf(
         "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash"
+        "gemini-3.1-flash-lite"
     )
 
     suspend fun processCommand(userText: String, screenElementsSummary: String = ""): ActionDecision = withContext(Dispatchers.IO) {
