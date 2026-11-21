@@ -20,7 +20,7 @@ import okhttp3.Request
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
-private data class AppCandidate(val label: String, val packageName: String, val score: Int)
+data class AppCandidate(val label: String, val packageName: String, val score: Int)
 
 class SystemController(private val context: Context) {
 

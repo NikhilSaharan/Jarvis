@@ -3,6 +3,7 @@ package com.jarvis.assistant.brain
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import com.jarvis.assistant.memory.JarvisMemoryManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,7 +27,7 @@ data class UIActionDecision(
 
 class GeminiBrain(
     private val apiKey: String,
-    private val memoryManager: com.jarvis.assistant.memory.JarvisMemoryManager? = null
+    private val memoryManager: JarvisMemoryManager? = null
 ) {
 
     private val client = OkHttpClient.Builder()

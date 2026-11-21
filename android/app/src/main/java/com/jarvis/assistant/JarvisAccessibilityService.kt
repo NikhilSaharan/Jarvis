@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.jarvis.assistant.memory.JarvisMemoryManager
 import kotlinx.coroutines.delay
 
 data class ScreenElement(
@@ -47,10 +48,10 @@ class JarvisAccessibilityService : AccessibilityService() {
                     val pm = packageManager
                     val appInfo = pm.getApplicationInfo(pkg, 0)
                     val appLabel = pm.getApplicationLabel(appInfo).toString()
-                    com.jarvis.assistant.memory.JarvisMemoryManager(this).recordScreenFocus(appLabel)
+                    JarvisMemoryManager(this).recordScreenFocus(appLabel)
                 } catch (e: Exception) {
                     val label = pkg.substringAfterLast('.')
-                    com.jarvis.assistant.memory.JarvisMemoryManager(this).recordScreenFocus(label)
+                    JarvisMemoryManager(this).recordScreenFocus(label)
                 }
             }
         }
