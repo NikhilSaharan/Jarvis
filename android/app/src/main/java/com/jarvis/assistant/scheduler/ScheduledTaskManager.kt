@@ -62,7 +62,7 @@ class ScheduledTaskManager(private val context: Context) {
         saveTasks(currentTasks)
 
         val intent = Intent(context, TaskAlarmReceiver::class.java).apply {
-            action = "com.jarvis.assistant.EXECUTE_SCHEDULED_TASK"
+            setAction("com.jarvis.assistant.EXECUTE_SCHEDULED_TASK")
             putExtra("task_id", taskId)
             putExtra("action", action)
             putExtra("action_args_json", argsJson)
