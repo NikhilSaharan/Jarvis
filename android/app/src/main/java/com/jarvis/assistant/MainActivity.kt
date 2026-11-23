@@ -424,7 +424,8 @@ class MainActivity : AppCompatActivity() {
                 if (!alreadySpoken) speakerHelper.speak(reply)
             }
             "close_app" -> {
-                val reply = systemController.closeApp()
+                val appName = (args["app_name"] as? String) ?: (args["name"] as? String) ?: ""
+                val reply = systemController.closeApp(appName)
                 appendLog("[App Control]: $reply")
                 if (!alreadySpoken) speakerHelper.speak(reply)
             }

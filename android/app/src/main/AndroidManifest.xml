@@ -17,6 +17,7 @@
 
     <!-- App Discovery & Launching across device -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
 
     <!-- Telephony & Contacts -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />

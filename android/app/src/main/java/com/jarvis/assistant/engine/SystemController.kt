@@ -1,9 +1,11 @@
 package com.jarvis.assistant.engine
 
+import android.app.ActivityManager
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -11,6 +13,7 @@ import android.os.Looper
 import android.provider.AlarmClock
 import android.provider.Settings
 import android.util.Log
+import android.view.KeyEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -444,10 +447,70 @@ class SystemController(private val context: Context) {
     }
 
     /**
-     * Closes the active app by performing Home action.
+     * Closes, stops, or kills the specified app or active app.
      */
-    fun closeApp(): String {
-        val success = com.jarvis.assistant.JarvisAccessibilityService.instance?.closeApp() ?: false
-        return if (success) "App band kar diya hai Sir." else "App band nahi ho saka Sir."
+    fun closeApp(appName: String? = null): String {
+        val targetApp = appName?.lowercase()?.trim()
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val pm = context.packageManager
+
+        // 1. If target is YouTube or media/music (or playing in PiP/background):
+        if (targetApp.isNullOrBlank() || targetApp.contains("youtube") || targetApp.contains("song") || targetApp.contains("music") || targetApp.contains("video")) {
+            try {
+                // Send hardware media pause & stop to immediately halt playback and dismiss PiP audio
+                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE))
+                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE))
+                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_STOP))
+                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_STOP))
+            } catch (e: Exception) {
+                Log.w("SystemController", "Media stop key event error: ${e.message}")
+            }
+
+            // Kill YouTube background processes
+            try {
+                activityManager.killBackgroundProcesses("com.google.android.youtube")
+            } catch (e: Exception) {}
+        }
+
+        // 2. Resolve package name for target app if specified
+        var targetPackage: String? = null
+        if (!targetApp.isNullOrBlank()) {
+            targetPackage = knownAppPackages[targetApp]
+            if (targetPackage == null) {
+                try {
+                    val launcherIntent = Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
+                    val activities = pm.queryIntentActivities(launcherIntent, 0)
+                    for (ri in activities) {
+                        val label = ri.loadLabel(pm).toString().lowercase()
+                        if (label.contains(targetApp) || targetApp.contains(label)) {
+                            targetPackage = ri.activityInfo.packageName
+                            break
+                        }
+                    }
+                } catch (e: Exception) {}
+            }
+        }
+
+        // 3. Kill background processes of target app if known
+        if (targetPackage != null && targetPackage != context.packageName) {
+            try {
+                activityManager.killBackgroundProcesses(targetPackage)
+            } catch (e: Exception) {}
+        }
+
+        // 4. Handle navigation / closing:
+        // Only perform Home if:
+        // - No specific app was named, OR
+        // - The target app is currently in foreground (NOT Jarvis!)
+        val isJarvisInForeground = (context as? android.app.Activity) != null
+        val shouldGoHome = targetApp.isNullOrBlank() || (!isJarvisInForeground)
+
+        if (shouldGoHome) {
+            com.jarvis.assistant.JarvisAccessibilityService.instance?.performHome()
+        }
+
+        val nameToSpeak = if (!appName.isNullOrBlank()) appName else "App"
+        return "$nameToSpeak band kar diya hai Sir."
     }
 }
