@@ -45,7 +45,7 @@ class UniversalAppAgent(
             val actionHistory = mutableListOf<String>()
             val maxTurns = 6
             var turn = 0
-            var finalMsg = "$appName me '$instruction' execute kar diya hai Sir."
+            var finalMsg = ""
             var isCompleted = false
 
             while (turn < maxTurns && !isCompleted) {
@@ -70,12 +70,19 @@ $historyStr
 
 Sir's Overall Goal: "$instruction"
 
+SEARCH & NAVIGATION RULES:
+1. PREFER SEARCH OVER SCROLLING: When looking for a specific contact, person, chat, show, video, or item, ALWAYS tap the Search bar or Search icon and type the name directly instead of scrolling endlessly through lists.
+2. FINALIZE GOAL:
+   - For chat/messaging: Open the person's chat, type the message into the text box, and tap the Send button.
+   - For media/shows/video: Tap on the show/movie card or play/resume button to start playback.
+3. WHEN NOT FOUND: If the target contact or show is not found after searching, choose "done" with an honest summary in natural Hinglish (e.g. "Anuj nahi mila Sir").
+
 Decide the best next single action:
-- "tap_tag": Tap a numbered element [tag] (e.g. search icon, compose/new note (+), play button, movie card, reels tab, send, save, confirm).
-- "type_tag": Type text into an input field [tag] (e.g. note body, table content, search query, message).
-- "scroll_screen": Scroll the active screen down or up (e.g. to see next reel, scroll a feed, or find an off-screen item).
+- "tap_tag": Tap a numbered element [tag] (e.g. search icon / search bar, contact/chat name, send button, play button).
+- "type_tag": Type text into an input field [tag] (e.g. search query, chat message).
+- "scroll_screen": Scroll the active screen down or up (use only if search is unavailable).
 - "back": Press the hardware back button (e.g. to dismiss a popup, exit an overlay, or return).
-- "done": Goal is completely achieved (e.g. note/table written, movie playback started, reels scrolled, action finalized).
+- "done": Goal is completely achieved on screen, or target was not found.
 
 OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
@@ -83,7 +90,7 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
   "tag": <number or null>,
   "text": "<text to type or null>",
   "direction": "down" | "up" | null,
-  "summary": "<short description of this action in Hinglish, e.g. 'Search icon par tap kiya'>"
+  "summary": "<When continuing: short step log. When done: a single, natural, clean sentence in spoken Hinglish to Sir confirming what happened, e.g. 'Anuj ko hello bhej diya hai Sir' or 'Campus Diaries play ho gaya hai Sir' or 'Anuj nahi mila Sir'. NEVER include robotic words like 'goal complete', 'execute', or app prefixes.>"
 }
 """.trimIndent()
 
@@ -93,10 +100,14 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                 when (decision.action.lowercase().trim()) {
                     "done" -> {
                         isCompleted = true
-                        finalMsg = if (summary.isNotBlank() && summary != "done") {
-                            "$appName: $summary"
+                        val cleanSummary = (decision.summary ?: decision.text ?: "")
+                            .replace(Regex("(?i)\\b(and )?goal complete(d)?( ho gaya hai)?\\b"), "")
+                            .replace(Regex("(?i)^$appName:\\s*"), "")
+                            .trim()
+                        finalMsg = if (cleanSummary.isNotBlank() && cleanSummary.lowercase() != "done") {
+                            cleanSummary
                         } else {
-                            "$appName me '$instruction' pura kar diya hai Sir."
+                            ""
                         }
                     }
                     "tap_tag" -> {
@@ -129,7 +140,15 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                 }
             }
 
-            callback(true, finalMsg)
+            if (finalMsg.isBlank()) {
+                finalMsg = if (isCompleted) {
+                    geminiBrain.generateCompletionConfirmation(appName, instruction)
+                } else {
+                    "Sir, task pura nahi ho saka."
+                }
+            }
+
+            callback(isCompleted, finalMsg)
         }
     }
 }

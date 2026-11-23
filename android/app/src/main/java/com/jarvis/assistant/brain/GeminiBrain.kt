@@ -13,7 +13,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
 data class ActionDecision(
-    val speech: String,
+    val speech: String?,
     val toolName: String?,
     val toolArgs: Map<String, Any>?
 )
@@ -96,8 +96,9 @@ class GeminiBrain(
                         ?.getAsJsonArray("parts")?.get(0)?.asJsonObject?.get("text")?.asString ?: ""
 
                     val parsedDecision = gson.fromJson(textContent, JsonObject::class.java)
-                    val speech = parsedDecision.get("speech")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString ?: "Ji Sir."
                     val toolName = parsedDecision.get("tool_name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
+                    val rawSpeech = parsedDecision.get("speech")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
+                    val speech = if (toolName == null && rawSpeech == null) "Ji Sir?" else rawSpeech
                     val argsObj = parsedDecision.get("tool_args")?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
 
                     val argsMap = mutableMapOf<String, Any>()
@@ -192,6 +193,51 @@ class GeminiBrain(
         UIActionDecision("done", null, null, null, null)
     }
 
+    /**
+     * Generates a dynamic 1-sentence completion confirmation in natural spoken Hinglish.
+     * Ensures zero hardcoded or static fallback messages in Kotlin.
+     */
+    suspend fun generateCompletionConfirmation(appName: String, instruction: String): String = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank() || apiKey.startsWith("your_")) return@withContext ""
+        val prompt = "Sir gave the command: '$instruction' in $appName. The task has just finished successfully. Respond as J.A.R.V.I.S. in 1 short, natural sentence in conversational everyday Hinglish confirming it is done (e.g. what was completed). Do NOT include robotic phrases like 'goal complete', 'execute', or app tags. Return only raw text without quotes."
+
+        for (model in models) {
+            try {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+                val requestPayload = JsonObject().apply {
+                    val contents = com.google.gson.JsonArray().apply {
+                        add(JsonObject().apply {
+                            val parts = com.google.gson.JsonArray().apply {
+                                add(JsonObject().apply { addProperty("text", prompt) })
+                            }
+                            add("parts", parts)
+                        })
+                    }
+                    add("contents", contents)
+                }
+
+                val request = Request.Builder()
+                    .url(url)
+                    .post(requestPayload.toString().toRequestBody(jsonMediaType))
+                    .build()
+
+                val response = client.newCall(request).execute()
+                val body = response.body?.string() ?: ""
+
+                if (response.isSuccessful) {
+                    val jsonResponse = gson.fromJson(body, JsonObject::class.java)
+                    val candidates = jsonResponse.getAsJsonArray("candidates")
+                    val text = candidates?.get(0)?.asJsonObject?.getAsJsonObject("content")
+                        ?.getAsJsonArray("parts")?.get(0)?.asJsonObject?.get("text")?.asString?.trim() ?: ""
+                    if (text.isNotBlank()) return@withContext text
+                }
+            } catch (e: Exception) {
+                Log.w("GeminiBrain", "Confirmation generation failed on $model: ${e.message}")
+            }
+        }
+        ""
+    }
+
     private fun buildPrompt(userText: String, screenElementsSummary: String): String {
         val cleanInput = userText.replace("\"", "'")
         val livingMemory = memoryManager?.getLivingMemoryContext() ?: ""
@@ -220,7 +266,10 @@ CORE OPERATING PRINCIPLES:
 
 2. CLEAN ACTION EXECUTION (NO ROBOTIC CLICHÉS OR STEP NARRATION):
    - Invoke an action tool ONLY when Sir explicitly gives a direct command to do something.
-   - In `speech`, give a very short, natural, dynamic acknowledgment in casual everyday Hinglish.
+   - For multi-step in-app tasks (universal_app_action):
+     - Set `speech`: null. Jarvis will execute the in-app actions silently in the background and confirm once completed.
+   - For direct single-action system tools (e.g. set_dnd, set_alarm, make_phone_call):
+     - Provide a short, natural confirmation in `speech` in everyday Hinglish.
    - STRICTLY AVOID robotic English clichés (never say "Right away, Sir", "Opening X for you", "Playing X for you", "Executing X", "At your service").
    - NEVER narrate internal steps, screens, or UI buttons (do not say what screen was opened, what was typed, or what button was tapped). Let the tool execute cleanly.
 
@@ -247,7 +296,7 @@ CORE OPERATING PRINCIPLES:
 OUTPUT FORMAT:
 Respond with ONLY a raw JSON object (no markdown, no backticks, no extra text):
 {
-  "speech": "<Short, natural, dynamic reply in everyday spoken Hinglish>",
+  "speech": "<Natural, short reply in everyday Hinglish, or null if executing universal_app_action>",
   "tool_name": "<tool_name or null>",
   "tool_args": { ... or null }
 }

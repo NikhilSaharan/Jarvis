@@ -166,17 +166,20 @@ class FloatingBubbleService : Service() {
         serviceScope.launch {
             val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
             val decision = geminiBrain.processCommand(userText, screenContext)
-            if (decision.speech.isNotBlank()) {
-                speakerHelper.speak(decision.speech)
+            val speech = decision.speech?.takeIf { it.isNotBlank() && it != "null" }
+            val alreadySpoken = speech != null
+
+            if (speech != null) {
+                speakerHelper.speak(speech)
             }
 
-            val tool = decision.toolName ?: return@launch
+            val tool = decision.toolName?.takeIf { it.isNotBlank() && it != "null" } ?: return@launch
             val args = decision.toolArgs ?: emptyMap()
-            executeTool(tool, args)
+            executeTool(tool, args, alreadySpoken)
         }
     }
 
-    private fun executeTool(tool: String, args: Map<String, Any>) {
+    private fun executeTool(tool: String, args: Map<String, Any>, alreadySpoken: Boolean = false) {
         when (tool) {
             "schedule_action" -> {
                 val delaySec = (args["delay_seconds"] as? Number)?.toInt() ?: 10
@@ -213,7 +216,9 @@ class FloatingBubbleService : Service() {
                 val appName = (args["app_name"] as? String) ?: "Notes"
                 val instruction = (args["instruction"] as? String) ?: (args["text"] as? String) ?: (args["action"] as? String) ?: ""
                 universalAppAgent.performAppAction(appName, instruction, geminiBrain) { _, reply ->
-                    speakerHelper.speak(reply)
+                    if (!alreadySpoken && reply.isNotBlank()) {
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "sleep_routine" -> {

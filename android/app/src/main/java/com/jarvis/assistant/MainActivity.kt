@@ -296,20 +296,22 @@ class MainActivity : AppCompatActivity() {
             val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
             val decision = geminiBrain.processCommand(userText, screenContext)
 
-            if (decision.speech.isNotBlank()) {
-                appendLog("Jarvis: \"${decision.speech}\"")
-                speakerHelper.speak(decision.speech)
-            }
-
-            val tool = decision.toolName
+            val tool = decision.toolName?.takeIf { it.isNotBlank() && it != "null" }
             val args = decision.toolArgs ?: emptyMap()
+            val speech = decision.speech?.takeIf { it.isNotBlank() && it != "null" }
+            val alreadySpoken = speech != null
+
+            if (speech != null) {
+                appendLog("Jarvis: \"$speech\"")
+                speakerHelper.speak(speech)
+            }
 
             if (tool == null) {
                 appendLog("[Result]: Done (Conversational)")
                 return@launch
             }
 
-            executeSingleTool(tool, args)
+            executeSingleTool(tool, args, alreadySpoken)
         }
     }
 
@@ -318,10 +320,10 @@ class MainActivity : AppCompatActivity() {
         if (summary.isNotBlank()) {
             speakerHelper.speak("Sir, aapka scheduled task: $summary")
         }
-        executeSingleTool(action, args)
+        executeSingleTool(action, args, false)
     }
 
-    private fun executeSingleTool(tool: String, args: Map<String, Any>) {
+    private fun executeSingleTool(tool: String, args: Map<String, Any>, alreadySpoken: Boolean = false) {
         appendLog("Executing Tool: $tool($args)...")
 
         when (tool) {
@@ -370,7 +372,9 @@ class MainActivity : AppCompatActivity() {
                 appendLog("[App Agent]: Opening $appName for AI execution...")
                 universalAppAgent.performAppAction(appName, instruction, geminiBrain) { success, reply ->
                     appendLog("[App Agent]: $reply")
-                    speakerHelper.speak(reply)
+                    if (!alreadySpoken && reply.isNotBlank()) {
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "sleep_routine" -> {
