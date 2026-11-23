@@ -43,9 +43,9 @@ class UniversalAppAgent(
             }
 
             val actionHistory = mutableListOf<String>()
-            val maxTurns = 8
+            val maxTurns = 6
             var turn = 0
-            var finalMsg = "Ho gaya hai Sir."
+            var finalMsg = "$appName me '$instruction' execute kar diya hai Sir."
             var isCompleted = false
 
             while (turn < maxTurns && !isCompleted) {
@@ -70,21 +70,12 @@ $historyStr
 
 Sir's Overall Goal: "$instruction"
 
-OPERATING PRINCIPLES:
-1. CONTINUOUS EXECUTION TO GOAL:
-   - Intermediate screens (such as search bars, search result lists, navigation menus, or category feeds) are NOT the final goal.
-   - Actively interact with the relevant item, button, card, or content on screen to completely fulfill Sir's requested goal.
-   - Return "done" ONLY when Sir's requested goal has actually been fulfilled on screen.
-2. DYNAMIC CONFIRMATION:
-   - When the goal is completed on screen, return "done" and provide a short, natural confirmation in casual Hinglish in `summary`.
-   - Never recite technical instruction strings or app names.
-
 Decide the best next single action:
-- "tap_tag": Tap a numbered element [tag] (to select an item, button, card, or tab).
-- "type_tag": Type text into an input field [tag] (to enter a search, note, or text).
-- "scroll_screen": Scroll screen down or up (to reveal more items, browse, or scroll).
-- "back": Press hardware back button (to dismiss overlay or popup).
-- "done": Goal is completely achieved on screen.
+- "tap_tag": Tap a numbered element [tag] (e.g. search icon, compose/new note (+), play button, movie card, reels tab, send, save, confirm).
+- "type_tag": Type text into an input field [tag] (e.g. note body, table content, search query, message).
+- "scroll_screen": Scroll the active screen down or up (e.g. to see next reel, scroll a feed, or find an off-screen item).
+- "back": Press the hardware back button (e.g. to dismiss a popup, exit an overlay, or return).
+- "done": Goal is completely achieved (e.g. note/table written, movie playback started, reels scrolled, action finalized).
 
 OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
@@ -92,7 +83,7 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
   "tag": <number or null>,
   "text": "<text to type or null>",
   "direction": "down" | "up" | null,
-  "summary": "<short description in casual Hinglish>"
+  "summary": "<short description of this action in Hinglish, e.g. 'Search icon par tap kiya'>"
 }
 """.trimIndent()
 
@@ -103,9 +94,9 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     "done" -> {
                         isCompleted = true
                         finalMsg = if (summary.isNotBlank() && summary != "done") {
-                            summary
+                            "$appName: $summary"
                         } else {
-                            "Ho gaya hai Sir."
+                            "$appName me '$instruction' pura kar diya hai Sir."
                         }
                     }
                     "tap_tag" -> {
