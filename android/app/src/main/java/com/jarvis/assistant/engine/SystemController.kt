@@ -14,6 +14,7 @@ import android.provider.AlarmClock
 import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
+import com.jarvis.assistant.JarvisAccessibilityService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
