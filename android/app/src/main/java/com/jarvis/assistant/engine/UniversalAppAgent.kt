@@ -45,7 +45,7 @@ class UniversalAppAgent(
             val actionHistory = mutableListOf<String>()
             val maxTurns = 6
             var turn = 0
-            var finalMsg = "$appName me '$instruction' execute kar diya hai Sir."
+            var finalMsg = ""
             var isCompleted = false
 
             while (turn < maxTurns && !isCompleted) {
@@ -71,11 +71,15 @@ $historyStr
 Sir's Overall Goal: "$instruction"
 
 Decide the best next single action:
-- "tap_tag": Tap a numbered element [tag] (e.g. search icon, compose/new note (+), play button, movie card, reels tab, send, save, confirm).
+- "tap_tag": Tap a numbered element [tag] (e.g. search icon, compose/new note (+), play button, movie/show card, reels tab, send, save, confirm).
 - "type_tag": Type text into an input field [tag] (e.g. note body, table content, search query, message).
 - "scroll_screen": Scroll the active screen down or up (e.g. to see next reel, scroll a feed, or find an off-screen item).
 - "back": Press the hardware back button (e.g. to dismiss a popup, exit an overlay, or return).
-- "done": Goal is completely achieved (e.g. note/table written, movie playback started, reels scrolled, action finalized).
+- "done": Goal is completely achieved on screen (e.g. playback has started, message has been sent, note has been saved).
+
+CRITICAL GUIDELINES:
+1. NEVER STOP AT SEARCH RESULTS: If Sir wants to play, view, or send something, reaching a search results list is NOT done. Tap the target item, card, or play/resume button to open or play it before marking "done".
+2. FINALIZE ACTION: In messaging, type text and tap send. In media/streaming, tap play or the target item to start playback.
 
 OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
@@ -83,7 +87,7 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
   "tag": <number or null>,
   "text": "<text to type or null>",
   "direction": "down" | "up" | null,
-  "summary": "<short description of this action in Hinglish, e.g. 'Search icon par tap kiya'>"
+  "summary": "<When action is 'done': A short, natural completion sentence in everyday Hinglish spoken to Sir (e.g. 'Bigg Boss play kar diya hai Sir', 'Anuj ko message bhej diya hai'). When continuing: short description of this step in Hinglish>"
 }
 """.trimIndent()
 
@@ -94,9 +98,9 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     "done" -> {
                         isCompleted = true
                         finalMsg = if (summary.isNotBlank() && summary != "done") {
-                            "$appName: $summary"
+                            summary
                         } else {
-                            "$appName me '$instruction' pura kar diya hai Sir."
+                            ""
                         }
                     }
                     "tap_tag" -> {
@@ -127,6 +131,10 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                         isCompleted = true
                     }
                 }
+            }
+
+            if (finalMsg.isBlank()) {
+                finalMsg = geminiBrain.generateCompletionConfirmation(appName, instruction)
             }
 
             callback(true, finalMsg)
