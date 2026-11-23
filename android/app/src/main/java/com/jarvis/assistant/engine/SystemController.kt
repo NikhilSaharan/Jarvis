@@ -426,4 +426,28 @@ class SystemController(private val context: Context) {
             false
         }
     }
+
+    /**
+     * Answers an incoming phone or VoIP/WhatsApp call.
+     */
+    fun answerCall(): String {
+        val success = com.jarvis.assistant.JarvisAccessibilityService.instance?.answerCall() ?: false
+        return if (success) "Call pick kar diya hai Sir." else "Call pick nahi ho saka Sir."
+    }
+
+    /**
+     * Cuts/ends an active ongoing call or declines an incoming call.
+     */
+    fun endCall(): String {
+        val success = com.jarvis.assistant.JarvisAccessibilityService.instance?.endCall() ?: false
+        return if (success) "Call cut kar diya hai Sir." else "Call cut nahi ho saka Sir."
+    }
+
+    /**
+     * Closes the active app by performing Home action.
+     */
+    fun closeApp(): String {
+        val success = com.jarvis.assistant.JarvisAccessibilityService.instance?.closeApp() ?: false
+        return if (success) "App band kar diya hai Sir." else "App band nahi ho saka Sir."
+    }
 }

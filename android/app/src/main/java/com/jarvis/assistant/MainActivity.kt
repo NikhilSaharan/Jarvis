@@ -413,6 +413,21 @@ class MainActivity : AppCompatActivity() {
                 appendLog("[Result]: $reply")
                 speakerHelper.speak(reply)
             }
+            "answer_call" -> {
+                val reply = systemController.answerCall()
+                appendLog("[Call]: $reply")
+                if (!alreadySpoken) speakerHelper.speak(reply)
+            }
+            "end_call" -> {
+                val reply = systemController.endCall()
+                appendLog("[Call]: $reply")
+                if (!alreadySpoken) speakerHelper.speak(reply)
+            }
+            "close_app" -> {
+                val reply = systemController.closeApp()
+                appendLog("[App Control]: $reply")
+                if (!alreadySpoken) speakerHelper.speak(reply)
+            }
             "make_phone_call" -> {
                 val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
                     ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }

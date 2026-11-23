@@ -2,14 +2,19 @@ package com.jarvis.assistant
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Context
 import android.graphics.Path
 import android.graphics.Rect
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.telecom.TelecomManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.memory.JarvisMemoryManager
+import com.jarvis.assistant.voice.SpeakerHelper
 import kotlinx.coroutines.delay
 
 data class ScreenElement(
@@ -34,6 +39,10 @@ class JarvisAccessibilityService : AccessibilityService() {
             get() = instance != null
     }
 
+    private var lastIncomingCallAnnounceTime = 0L
+    private var lastNotificationTime = 0L
+    private var lastNotificationText = ""
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -42,8 +51,10 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        val pkg = event.packageName?.toString() ?: ""
+
+        // 1. 24/7 Screen Focus Recording
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val pkg = event.packageName?.toString() ?: ""
             if (pkg.isNotBlank() && !pkg.contains("launcher") && !pkg.contains("systemui") && pkg != packageName) {
                 try {
                     val pm = packageManager
@@ -56,6 +67,118 @@ class JarvisAccessibilityService : AccessibilityService() {
                 }
             }
         }
+
+        // 2. 24/7 Real-Time Screen Observation for Incoming Calls (Phone / WhatsApp / Any App)
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            checkIncomingCallScreen(pkg)
+        }
+
+        // 3. WhatsApp & Call Notification Butler
+        if (event.eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
+            handleCallOrWhatsAppNotification(event, pkg)
+        }
+    }
+
+    private fun checkIncomingCallScreen(pkg: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastIncomingCallAnnounceTime < 7000) return
+
+        val isCallingApp = pkg.contains("dialer", ignoreCase = true) ||
+                pkg.contains("incall", ignoreCase = true) ||
+                pkg.contains("phone", ignoreCase = true) ||
+                pkg.contains("telecom", ignoreCase = true) ||
+                pkg.contains("whatsapp", ignoreCase = true)
+
+        if (!isCallingApp) return
+
+        val hasAnswer = findClickableNode("answer") != null ||
+                findClickableNode("accept") != null ||
+                findClickableNode("swipe up to answer") != null
+        val hasDecline = findClickableNode("decline") != null ||
+                findClickableNode("reject") != null ||
+                findClickableNode("dismiss") != null
+
+        if (hasAnswer && hasDecline) {
+            var callerName = "Someone"
+            val elements = dumpScreenElements()
+            for (el in elements) {
+                val t = el.text.trim()
+                if (t.isNotBlank() &&
+                    !t.equals("answer", ignoreCase = true) &&
+                    !t.equals("decline", ignoreCase = true) &&
+                    !t.equals("reject", ignoreCase = true) &&
+                    !t.equals("incoming call", ignoreCase = true) &&
+                    !t.contains("swipe", ignoreCase = true) &&
+                    !t.contains("voice call", ignoreCase = true) &&
+                    !t.contains("video call", ignoreCase = true) &&
+                    t.length > 1
+                ) {
+                    callerName = t
+                    break
+                }
+            }
+
+            lastIncomingCallAnnounceTime = now
+            val memoryManager = JarvisMemoryManager(this)
+            val isVip = memoryManager.isVip(callerName)
+
+            if (isVip) {
+                bypassSilentAndDnd()
+            }
+
+            val speaker = SpeakerHelper(this)
+            speaker.speak("Sir, $callerName ka call aa raha hai. Pick karna hai ya reject?")
+        }
+    }
+
+    private fun handleCallOrWhatsAppNotification(event: AccessibilityEvent, pkg: String) {
+        val isWhatsApp = pkg.contains("whatsapp", ignoreCase = true)
+        val isPhoneCall = pkg.contains("dialer", ignoreCase = true) ||
+                pkg.contains("incall", ignoreCase = true) ||
+                pkg.contains("telecom", ignoreCase = true) ||
+                pkg.contains("phone", ignoreCase = true)
+
+        if (!isWhatsApp && !isPhoneCall) return
+
+        val texts = event.text.map { it.toString().trim() }.filter { it.isNotBlank() }
+        val fullText = texts.joinToString(" - ")
+        val now = System.currentTimeMillis()
+
+        if (fullText.isNotBlank() && (now - lastNotificationTime > 6000 || fullText != lastNotificationText)) {
+            lastNotificationTime = now
+            lastNotificationText = fullText
+
+            val memoryManager = JarvisMemoryManager(this)
+            val isVip = memoryManager.isVip(fullText)
+
+            if (isVip) {
+                bypassSilentAndDnd()
+            }
+
+            val speaker = SpeakerHelper(this)
+            val isMissed = fullText.lowercase().contains("missed") || fullText.lowercase().contains("miss")
+            if (isPhoneCall || isMissed) {
+                speaker.speak("Sir, ${if (isVip) "VIP " else ""}$fullText")
+            } else if (isWhatsApp) {
+                speaker.speak("Sir, WhatsApp par message aaya hai: $fullText")
+            }
+        }
+    }
+
+    fun bypassSilentAndDnd() {
+        try {
+            SystemController(this).setDnd(false)
+        } catch (e: Exception) {}
+
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (audioManager.ringerMode != AudioManager.RINGER_MODE_NORMAL) {
+                audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
+            }
+            val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_RING)
+            audioManager.setStreamVolume(AudioManager.STREAM_RING, maxVol, 0)
+        } catch (e: Exception) {}
     }
 
     override fun onInterrupt() {
@@ -329,5 +452,60 @@ class JarvisAccessibilityService : AccessibilityService() {
      */
     fun performHome(): Boolean {
         return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    /**
+     * Answers an incoming phone or VoIP/WhatsApp call.
+     */
+    fun answerCall(): Boolean {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                telecomManager?.acceptRingingCall()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "TelecomManager acceptRingingCall exception: ${e.message}")
+        }
+
+        val answerKeywords = listOf("answer", "accept", "pick up", "swipe up to answer", "incoming call")
+        for (kw in answerKeywords) {
+            val node = findClickableNode(kw)
+            if (node != null) {
+                tapElement(node)
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Ends an ongoing phone/WhatsApp call or rejects an incoming call.
+     */
+    fun endCall(): Boolean {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                if (telecomManager?.endCall() == true) return true
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "TelecomManager endCall exception: ${e.message}")
+        }
+
+        val endKeywords = listOf("end call", "disconnect", "decline", "reject", "hang up", "cut", "dismiss")
+        for (kw in endKeywords) {
+            val node = findClickableNode(kw)
+            if (node != null) {
+                tapElement(node)
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Closes the currently active app / returns to home screen.
+     */
+    fun closeApp(): Boolean {
+        return performHome()
     }
 }

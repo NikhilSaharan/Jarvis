@@ -274,6 +274,9 @@ CORE OPERATING PRINCIPLES:
    - NEVER narrate internal steps, screens, or UI buttons (do not say what screen was opened, what was typed, or what button was tapped). Let the tool execute cleanly.
 
 3. HARDWARE & APPLICATION TOOLS:
+   - answer_call(): Answers, accepts, or picks up an incoming call (phone or WhatsApp).
+   - end_call(): Cuts, ends, or disconnects an ongoing call, or declines/rejects an incoming call.
+   - close_app(): Closes the currently active app and returns to the home screen.
    - make_phone_call(recipient: string): Dials a normal phone call.
    - whatsapp_call(recipient: string, call_type: "voice"|"video"): Starts a WhatsApp audio/voice or video call.
    - send_whatsapp_message(recipient: string, message: string): Sends a WhatsApp message.

@@ -247,6 +247,18 @@ class FloatingBubbleService : Service() {
                 val msg = (args["message"] as? String) ?: "Timer"
                 systemController.setTimer(s, msg)
             }
+            "answer_call" -> {
+                val reply = systemController.answerCall()
+                if (!alreadySpoken) speakerHelper.speak(reply)
+            }
+            "end_call" -> {
+                val reply = systemController.endCall()
+                if (!alreadySpoken) speakerHelper.speak(reply)
+            }
+            "close_app" -> {
+                val reply = systemController.closeApp()
+                if (!alreadySpoken) speakerHelper.speak(reply)
+            }
             "make_phone_call" -> {
                 val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
                     ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
