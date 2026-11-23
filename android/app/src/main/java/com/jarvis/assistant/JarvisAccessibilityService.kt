@@ -508,4 +508,52 @@ class JarvisAccessibilityService : AccessibilityService() {
     fun closeApp(): Boolean {
         return performHome()
     }
+
+    /**
+     * Dismisses any active Picture-in-Picture (PiP) window (e.g. YouTube, media players).
+     */
+    fun dismissPipWindow(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                for (window in windows) {
+                    if (window.isInPictureInPictureMode) {
+                        val bounds = Rect()
+                        window.getBoundsInScreen(bounds)
+
+                        // 1. Check if window tree has a clickable close/dismiss node
+                        val root = window.root
+                        if (root != null) {
+                            val closeButtons = root.findAccessibilityNodeInfosByText("close")
+                                .ifEmpty { root.findAccessibilityNodeInfosByText("Close") }
+                                .ifEmpty { root.findAccessibilityNodeInfosByText("dismiss") }
+                            for (btn in closeButtons) {
+                                if (btn.isClickable && btn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                                    return true
+                                }
+                            }
+                        }
+
+                        // 2. Drag PiP window to bottom dismiss target zone
+                        val displayMetrics = resources.displayMetrics
+                        val startX = bounds.centerX().toFloat()
+                        val startY = bounds.centerY().toFloat()
+                        val endX = displayMetrics.widthPixels / 2f
+                        val endY = displayMetrics.heightPixels * 0.95f
+
+                        val dragPath = Path().apply {
+                            moveTo(startX, startY)
+                            lineTo(endX, endY)
+                        }
+                        val gesture = GestureDescription.Builder()
+                            .addStroke(GestureDescription.StrokeDescription(dragPath, 0, 350))
+                            .build()
+                        return dispatchGesture(gesture, null, null)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "dismissPipWindow error: ${e.message}")
+            }
+        }
+        return false
+    }
 }

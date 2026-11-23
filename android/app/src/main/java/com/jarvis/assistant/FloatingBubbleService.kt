@@ -316,7 +316,7 @@ class FloatingBubbleService : Service() {
             "scroll_screen" -> {
                 val dir = (args["direction"] as? String) ?: "down"
                 nodeActionEngine.scrollScreen(dir) { _, reply ->
-                    speakerHelper.speak(reply)
+                    if (!alreadySpoken) speakerHelper.speak(reply)
                 }
             }
         }

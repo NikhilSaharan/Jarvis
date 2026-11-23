@@ -455,59 +455,57 @@ class SystemController(private val context: Context) {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val pm = context.packageManager
 
-        // 1. If target is YouTube or media/music (or playing in PiP/background):
-        if (targetApp.isNullOrBlank() || targetApp.contains("youtube") || targetApp.contains("song") || targetApp.contains("music") || targetApp.contains("video")) {
-            try {
-                // Send hardware media pause & stop to immediately halt playback and dismiss PiP audio
-                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE))
-                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE))
-                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_STOP))
-                audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_STOP))
-            } catch (e: Exception) {
-                Log.w("SystemController", "Media stop key event error: ${e.message}")
-            }
+        // 1. Dismiss any active PiP overlay
+        JarvisAccessibilityService.instance?.dismissPipWindow()
 
-            // Kill YouTube background processes
+        // 2. Halt media playback via hardware media keys
+        try {
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE))
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE))
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_STOP))
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_STOP))
+        } catch (e: Exception) {
+            Log.w("SystemController", "Media stop key event error: ${e.message}")
+        }
+
+        // 3. Resolve package name for target app if specified
+        var targetPackage: String? = null
+        if (!targetApp.isNullOrBlank()) {
+            if (targetApp.contains("youtube") || targetApp.contains("song") || targetApp.contains("music") || targetApp.contains("video")) {
+                targetPackage = "com.google.android.youtube"
+            } else {
+                targetPackage = knownAppPackages[targetApp]
+                if (targetPackage == null) {
+                    try {
+                        val launcherIntent = Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
+                        val activities = pm.queryIntentActivities(launcherIntent, 0)
+                        for (ri in activities) {
+                            val label = ri.loadLabel(pm).toString().lowercase()
+                            if (label.contains(targetApp) || targetApp.contains(label)) {
+                                targetPackage = ri.activityInfo.packageName
+                                break
+                            }
+                        }
+                    } catch (e: Exception) {}
+                }
+            }
+        }
+
+        // 4. Kill background processes of target app if known
+        if (targetPackage != null && targetPackage != context.packageName) {
+            try {
+                activityManager.killBackgroundProcesses(targetPackage)
+            } catch (e: Exception) {}
+        } else if (targetApp.isNullOrBlank() || targetApp.contains("youtube")) {
             try {
                 activityManager.killBackgroundProcesses("com.google.android.youtube")
             } catch (e: Exception) {}
         }
 
-        // 2. Resolve package name for target app if specified
-        var targetPackage: String? = null
-        if (!targetApp.isNullOrBlank()) {
-            targetPackage = knownAppPackages[targetApp]
-            if (targetPackage == null) {
-                try {
-                    val launcherIntent = Intent(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
-                    val activities = pm.queryIntentActivities(launcherIntent, 0)
-                    for (ri in activities) {
-                        val label = ri.loadLabel(pm).toString().lowercase()
-                        if (label.contains(targetApp) || targetApp.contains(label)) {
-                            targetPackage = ri.activityInfo.packageName
-                            break
-                        }
-                    }
-                } catch (e: Exception) {}
-            }
-        }
-
-        // 3. Kill background processes of target app if known
-        if (targetPackage != null && targetPackage != context.packageName) {
-            try {
-                activityManager.killBackgroundProcesses(targetPackage)
-            } catch (e: Exception) {}
-        }
-
-        // 4. Handle navigation / closing:
-        // Only perform Home if:
-        // - No specific app was named, OR
-        // - The target app is currently in foreground (NOT Jarvis!)
+        // 5. Navigation: NEVER minimize Jarvis if Jarvis is currently in foreground!
         val isJarvisInForeground = (context as? android.app.Activity) != null
-        val shouldGoHome = targetApp.isNullOrBlank() || (!isJarvisInForeground)
-
-        if (shouldGoHome) {
-            com.jarvis.assistant.JarvisAccessibilityService.instance?.performHome()
+        if (!isJarvisInForeground) {
+            JarvisAccessibilityService.instance?.performHome()
         }
 
         val nameToSpeak = if (!appName.isNullOrBlank()) appName else "App"

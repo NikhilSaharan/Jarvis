@@ -502,7 +502,7 @@ class MainActivity : AppCompatActivity() {
                 val dir = (args["direction"] as? String) ?: "down"
                 nodeActionEngine.scrollScreen(dir) { success, reply ->
                     appendLog("[Scroll]: $reply")
-                    speakerHelper.speak(reply)
+                    if (!alreadySpoken) speakerHelper.speak(reply)
                 }
             }
             else -> {
