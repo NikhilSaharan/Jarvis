@@ -10,3 +10,8 @@ phone_logs.txt
 android/.gradle
 android/build
 android/app/build
+.env
+*.env
+local.properties
+android/local.properties
+

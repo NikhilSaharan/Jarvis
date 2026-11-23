@@ -65,13 +65,17 @@ class FloatingBubbleService : Service() {
             memoryManager = JarvisMemoryManager(this)
             scheduledTaskManager = ScheduledTaskManager(this)
 
-            // User API key configuration
-            val defaultKey = "AIzaSyBLLZ1tU7PWUXi8SKPDv4p1z-Ocwtm7W8Y"
+            // User API key configuration from BuildConfig (injected via ENV/Secrets) or SharedPreferences
+            val defaultKey = BuildConfig.GEMINI_API_KEY
             val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
             val storedKey = prefs.getString("gemini_api_key", "")
-            val apiKey = if (storedKey.isNullOrBlank() || storedKey.startsWith("AQ.Ab8RN6")) {
-                prefs.edit().putString("gemini_api_key", defaultKey).apply()
-                defaultKey
+            val apiKey = if (storedKey.isNullOrBlank() || storedKey.startsWith("AIzaSy")) {
+                if (defaultKey.isNotBlank()) {
+                    prefs.edit().putString("gemini_api_key", defaultKey).apply()
+                    defaultKey
+                } else {
+                    ""
+                }
             } else {
                 storedKey
             }

@@ -1,6 +1,41 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+fun getGeminiApiKey(): String {
+    // 1. Try Environment Variable (GitHub Actions Secret / System env)
+    val envKey = System.getenv("GEMINI_API_KEY")
+    if (!envKey.isNullOrBlank()) return envKey
+
+    // 2. Try local.properties in android directory
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        try {
+            val properties = Properties()
+            properties.load(FileInputStream(localPropertiesFile))
+            val key = properties.getProperty("GEMINI_API_KEY")
+            if (!key.isNullOrBlank()) return key
+        } catch (_: Exception) {}
+    }
+
+    // 3. Try .env in root directory
+    val rootEnvFile = rootProject.file("../.env")
+    if (rootEnvFile.exists()) {
+        try {
+            for (line in rootEnvFile.readLines()) {
+                val trimmed = line.trim()
+                if (trimmed.startsWith("GEMINI_API_KEY=")) {
+                    val key = trimmed.substringAfter("GEMINI_API_KEY=").trim().trim('"', '\'')
+                    if (key.isNotBlank()) return key
+                }
+            }
+        } catch (_: Exception) {}
+    }
+    return ""
 }
 
 android {
@@ -15,6 +50,9 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        val apiKey = getGeminiApiKey()
+        buildConfigField("String", "GEMINI_API_KEY", "\"$apiKey\"")
     }
 
     buildTypes {
@@ -41,6 +79,7 @@ android {
 
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
 
     lint {
