@@ -296,20 +296,22 @@ class MainActivity : AppCompatActivity() {
             val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
             val decision = geminiBrain.processCommand(userText, screenContext)
 
-            if (decision.speech.isNotBlank()) {
-                appendLog("Jarvis: \"${decision.speech}\"")
-                speakerHelper.speak(decision.speech)
-            }
-
-            val tool = decision.toolName
+            val tool = decision.toolName?.takeIf { it.isNotBlank() && it != "null" }
             val args = decision.toolArgs ?: emptyMap()
+            val speech = decision.speech?.takeIf { it.isNotBlank() && it != "null" }
+            val alreadySpoken = speech != null
+
+            if (speech != null) {
+                appendLog("Jarvis: \"$speech\"")
+                speakerHelper.speak(speech)
+            }
 
             if (tool == null) {
                 appendLog("[Result]: Done (Conversational)")
                 return@launch
             }
 
-            executeSingleTool(tool, args)
+            executeSingleTool(tool, args, alreadySpoken)
         }
     }
 
@@ -318,10 +320,10 @@ class MainActivity : AppCompatActivity() {
         if (summary.isNotBlank()) {
             speakerHelper.speak("Sir, aapka scheduled task: $summary")
         }
-        executeSingleTool(action, args)
+        executeSingleTool(action, args, false)
     }
 
-    private fun executeSingleTool(tool: String, args: Map<String, Any>) {
+    private fun executeSingleTool(tool: String, args: Map<String, Any>, alreadySpoken: Boolean = false) {
         appendLog("Executing Tool: $tool($args)...")
 
         when (tool) {
@@ -332,67 +334,64 @@ class MainActivity : AppCompatActivity() {
                 val subArgs = (args["action_args"] as? Map<String, Any>) ?: (args["tool_args"] as? Map<String, Any>) ?: emptyMap()
                 val summary = (args["summary"] as? String) ?: "Scheduled $subAction"
                 val taskId = scheduledTaskManager.scheduleTask(delaySec, subAction, subArgs, summary)
-                appendLog("[Scheduler]: Task '$subAction' permanently saved in AlarmManager for $delaySec seconds (ID: $taskId). It will NEVER be dropped.")
-                speakerHelper.speak("Sir, task schedule kar diya hai. Dusra kaam karne par bhi yeh apne samay par execute hoga.")
+                appendLog("[Scheduler]: Task '$subAction' saved for $delaySec seconds (ID: $taskId).")
+                if (!alreadySpoken) speakerHelper.speak("Task schedule kar diya hai Sir.")
             }
             "manage_vip" -> {
                 val action = (args["action"] as? String)?.lowercase() ?: "add"
                 val contact = (args["contact"] as? String) ?: (args["name"] as? String) ?: ""
                 if (action == "add" && contact.isNotBlank()) {
                     memoryManager.addVipContact(contact)
-                    val reply = "Sir, $contact ko VIP priority list me add kar diya hai. Silent aur DND mode me bhi inka call bajega."
-                    appendLog("[VIP]: $reply")
-                    speakerHelper.speak(reply)
+                    appendLog("[VIP]: $contact added to VIP list.")
+                    if (!alreadySpoken) speakerHelper.speak("$contact ko VIP list me add kar diya hai Sir.")
                 } else if (action == "remove" && contact.isNotBlank()) {
                     memoryManager.removeVipContact(contact)
-                    val reply = "Sir, $contact ko VIP priority list se hata diya gaya hai."
-                    appendLog("[VIP]: $reply")
-                    speakerHelper.speak(reply)
+                    appendLog("[VIP]: $contact removed from VIP list.")
+                    if (!alreadySpoken) speakerHelper.speak("$contact ko VIP list se hata diya hai Sir.")
                 } else {
                     val vips = memoryManager.getVipContacts()
-                    val reply = if (vips.isEmpty()) "Sir, abhi koi VIP contact set nahi hai." else "Sir, aapke VIP contacts hain: ${vips.joinToString(", ")}."
+                    val reply = if (vips.isEmpty()) "Sir, abhi koi VIP contact nahi hai." else "Sir, aapke VIP contacts hain: ${vips.joinToString(", ")}."
                     appendLog("[VIP]: $reply")
-                    speakerHelper.speak(reply)
+                    if (!alreadySpoken) speakerHelper.speak(reply)
                 }
             }
             "learn_preference" -> {
                 val pref = (args["preference"] as? String) ?: ""
                 if (pref.isNotBlank()) {
                     memoryManager.learnPreference(pref)
-                    val reply = "Sir, maine aapki yeh pasand note kar li hai."
-                    appendLog("[Memory]: $reply")
-                    speakerHelper.speak(reply)
+                    appendLog("[Memory]: Learned preference: $pref")
+                    if (!alreadySpoken) speakerHelper.speak("Maine yaad rakh liya hai Sir.")
                 }
             }
             "universal_app_action" -> {
                 val appName = (args["app_name"] as? String) ?: "Notes"
                 val instruction = (args["instruction"] as? String) ?: (args["text"] as? String) ?: (args["action"] as? String) ?: ""
-                appendLog("[App Agent]: Opening $appName for AI execution...")
+                appendLog("[App Agent]: Navigating $appName...")
                 universalAppAgent.performAppAction(appName, instruction, geminiBrain) { success, reply ->
                     appendLog("[App Agent]: $reply")
-                    speakerHelper.speak(reply)
+                    if (!alreadySpoken && reply.isNotBlank()) {
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "sleep_routine" -> {
                 val mins = (args["minutes"] as? Number)?.toInt() ?: 10
-                val reply = systemController.sleepAndWakeUp(mins) { wakeupMsg ->
+                systemController.sleepAndWakeUp(mins) { wakeupMsg ->
                     appendLog("[Sleep Wakeup]: $wakeupMsg")
                     speakerHelper.speak(wakeupMsg)
                 }
-                appendLog("[Sleep Butler]: $reply")
-                speakerHelper.speak(reply)
+                appendLog("[Sleep Butler]: Sleeping for $mins minutes.")
+                if (!alreadySpoken) speakerHelper.speak("Aap aaram kijiye Sir, main DND on kar raha hoon.")
             }
             "set_dnd" -> {
                 val enabled = (args["enabled"] as? Boolean) ?: true
                 val reply = systemController.setDnd(enabled)
                 appendLog("[Result]: $reply")
-                speakerHelper.speak(reply)
             }
             "set_brightness" -> {
                 val level = (args["level"] as? String) ?: "medium"
                 val reply = systemController.setBrightness(level)
                 appendLog("[Result]: $reply")
-                speakerHelper.speak(reply)
             }
             "set_alarm" -> {
                 val h = (args["hour"] as? Number)?.toInt() ?: 7
@@ -400,14 +399,14 @@ class MainActivity : AppCompatActivity() {
                 val msg = (args["message"] as? String) ?: "Alarm"
                 val reply = systemController.setAlarm(h, m, msg)
                 appendLog("[Result]: $reply")
-                speakerHelper.speak(reply)
+                if (!alreadySpoken) speakerHelper.speak("Alarm set ho gaya hai Sir.")
             }
             "set_timer" -> {
                 val s = (args["seconds"] as? Number)?.toInt() ?: 60
                 val msg = (args["message"] as? String) ?: "Timer"
                 val reply = systemController.setTimer(s, msg)
                 appendLog("[Result]: $reply")
-                speakerHelper.speak(reply)
+                if (!alreadySpoken) speakerHelper.speak("Timer set ho gaya hai Sir.")
             }
             "make_phone_call" -> {
                 val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
@@ -420,9 +419,9 @@ class MainActivity : AppCompatActivity() {
                     speakerHelper.speak(reply)
                 } else {
                     val numberToCall = resolvedNumber ?: target
-                    val reply = systemController.makePhoneCall(numberToCall)
-                    appendLog("[Call]: $reply ($resolvedName)")
-                    speakerHelper.speak(reply)
+                    systemController.makePhoneCall(numberToCall)
+                    appendLog("[Call]: Calling $resolvedName ($numberToCall)")
+                    if (!alreadySpoken) speakerHelper.speak("Call laga raha hoon Sir.")
                 }
             }
             "send_sms" -> {
@@ -432,27 +431,27 @@ class MainActivity : AppCompatActivity() {
                 val numberToSend = resolvedNumber ?: rec
                 val reply = systemController.sendSms(numberToSend, msg)
                 appendLog("[Result]: $reply")
-                speakerHelper.speak(reply)
+                if (!alreadySpoken) speakerHelper.speak("Message bhej diya hai Sir.")
             }
             "play_youtube" -> {
                 val q = (args["query"] as? String) ?: "trending songs"
                 systemController.playYoutube(q) { reply ->
                     appendLog("[YouTube]: $reply")
-                    speakerHelper.speak(reply)
                 }
+                if (!alreadySpoken) speakerHelper.speak("YouTube par play kar raha hoon Sir.")
             }
             "open_app" -> {
                 val app = (args["app_name"] as? String) ?: ""
                 val reply = systemController.openApp(app)
                 appendLog("[App Launcher]: $reply")
-                speakerHelper.speak(reply)
+                if (!alreadySpoken) speakerHelper.speak("$app open kar raha hoon Sir.")
             }
             "send_whatsapp_message" -> {
                 val rec = (args["recipient"] as? String) ?: ""
                 val msg = (args["message"] as? String) ?: ""
                 nodeActionEngine.sendWhatsAppMessage(rec, msg) { success, reply ->
                     appendLog("[WhatsApp]: $reply")
-                    speakerHelper.speak(reply)
+                    if (!alreadySpoken) speakerHelper.speak(if (success) "WhatsApp message bhej diya hai Sir." else "Message nahi bhej paya Sir.")
                 }
             }
             "whatsapp_call" -> {
@@ -460,14 +459,13 @@ class MainActivity : AppCompatActivity() {
                 val isVideo = (args["call_type"] as? String)?.lowercase() == "video"
                 nodeActionEngine.callWhatsApp(rec, isVideo) { success, reply ->
                     appendLog("[WhatsApp Call]: $reply")
-                    speakerHelper.speak(reply)
+                    if (!alreadySpoken) speakerHelper.speak(if (success) "WhatsApp call laga diya hai Sir." else "Call connect nahi hua Sir.")
                 }
             }
             "tap_tag" -> {
                 val tag = (args["tag"] as? Number)?.toInt() ?: 1
                 nodeActionEngine.tapByTag(tag) { success, reply ->
                     appendLog("[UI Agent]: $reply")
-                    speakerHelper.speak(reply)
                 }
             }
             "type_tag" -> {
@@ -475,14 +473,12 @@ class MainActivity : AppCompatActivity() {
                 val text = (args["text"] as? String) ?: ""
                 nodeActionEngine.typeTextByTag(tag, text) { success, reply ->
                     appendLog("[UI Agent]: $reply")
-                    speakerHelper.speak(reply)
                 }
             }
             "scroll_screen" -> {
                 val dir = (args["direction"] as? String) ?: "down"
                 nodeActionEngine.scrollScreen(dir) { success, reply ->
                     appendLog("[Scroll]: $reply")
-                    speakerHelper.speak(reply)
                 }
             }
             else -> {
