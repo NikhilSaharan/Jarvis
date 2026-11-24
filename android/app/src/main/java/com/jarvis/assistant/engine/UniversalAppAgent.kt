@@ -43,7 +43,7 @@ class UniversalAppAgent(
             }
 
             val actionHistory = mutableListOf<String>()
-            val maxTurns = 8
+            val maxTurns = 6
             var turn = 0
             var finalMsg = ""
             var isCompleted = false
@@ -63,33 +63,26 @@ class UniversalAppAgent(
                 } else ""
 
                 val prompt = """
-You are an autonomous smartphone agent navigating $appName based purely on the Live Screen UI Elements tree.
+You are acting as an autonomous smartphone user in $appName.
 Screen UI Elements:
 $screenSummary
 $historyStr
 
-Sir's Goal: "$instruction"
+Sir's Overall Goal: "$instruction"
 
-TREE-BASED NAVIGATION & EXECUTION RULES:
-1. SCREEN & SECTION NAVIGATION:
-   - Inspect the current Screen UI Elements tree carefully.
-   - If the controls or items needed for the goal are not present on the current screen, look at the visible navigation elements (tabs, navigation buttons, search icons, back button) in the tree to navigate to the relevant section of the app.
-2. MULTI-STEP ACTIONS & COMPLETION:
-   - Typing into a search or text input is only an intermediate step. NEVER choose "done" immediately after typing.
-   - After typing, inspect the resulting elements in the next turn, tap the matching target item from the list/tree to open it, and then tap the final required action button (e.g. follow, send, play, add).
-   - Choose "done" ONLY when the final action has actually been executed on screen.
-3. SCROLLING:
-   - Use "scroll_screen" with direction "down" to reveal next content/items/reels.
-   - Use "scroll_screen" with direction "up" to reveal previous content/items/reels.
-4. TARGET NOT FOUND:
-   - If after searching or inspecting the tree the target does not exist, choose "done" with an honest, natural sentence (e.g. target nahi mila Sir).
+SEARCH & NAVIGATION RULES:
+1. PREFER SEARCH OVER SCROLLING: When looking for a specific contact, person, chat, show, video, or item, ALWAYS tap the Search bar or Search icon and type the name directly instead of scrolling endlessly through lists.
+2. FINALIZE GOAL:
+   - For chat/messaging: Open the person's chat, type the message into the text box, and tap the Send button.
+   - For media/shows/video: Tap on the show/movie card or play/resume button to start playback.
+3. WHEN NOT FOUND: If the target contact or show is not found after searching, choose "done" with an honest summary in natural Hinglish (e.g. "Anuj nahi mila Sir").
 
 Decide the best next single action:
-- "tap_tag": Tap a numbered element [tag] from the Screen UI Elements tree.
-- "type_tag": Type text into a numbered input field [tag] from the Screen UI Elements tree.
-- "scroll_screen": Scroll the active screen ("down" for next content, "up" for previous content).
-- "back": Press the hardware back button.
-- "done": Goal is fully completed on screen, or target was not found.
+- "tap_tag": Tap a numbered element [tag] (e.g. search icon / search bar, contact/chat name, send button, play button).
+- "type_tag": Type text into an input field [tag] (e.g. search query, chat message).
+- "scroll_screen": Scroll the active screen down or up (use only if search is unavailable).
+- "back": Press the hardware back button (e.g. to dismiss a popup, exit an overlay, or return).
+- "done": Goal is completely achieved on screen, or target was not found.
 
 OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
@@ -97,7 +90,7 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
   "tag": <number or null>,
   "text": "<text to type or null>",
   "direction": "down" | "up" | null,
-  "summary": "<When continuing: brief step log. When done: a single, natural sentence in conversational spoken Hinglish to Sir confirming what was done. NEVER use robotic words like 'goal complete' or 'execute'.>"
+  "summary": "<When continuing: short step log. When done: a single, natural, clean sentence in spoken Hinglish to Sir confirming what happened, e.g. 'Anuj ko hello bhej diya hai Sir' or 'Campus Diaries play ho gaya hai Sir' or 'Anuj nahi mila Sir'. NEVER include robotic words like 'goal complete', 'execute', or app prefixes.>"
 }
 """.trimIndent()
 
