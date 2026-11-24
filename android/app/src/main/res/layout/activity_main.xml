@@ -101,6 +101,17 @@
         android:textSize="11sp"
         android:textColor="@color/white"
         android:backgroundTint="@color/jarvis_card_bg"
+        android:layout_marginBottom="6dp" />
+
+    <!-- App Auto-Update Row/Button -->
+    <Button
+        android:id="@+id/btnCheckUpdate"
+        android:layout_width="match_parent"
+        android:layout_height="38dp"
+        android:text="🔄 Check for App Updates"
+        android:textSize="11sp"
+        android:textColor="@color/white"
+        android:backgroundTint="@color/jarvis_card_bg"
         android:layout_marginBottom="8dp" />
 
     <!-- Action Bar: Tap To Talk & Text Command -->

@@ -31,6 +31,7 @@ import com.jarvis.assistant.engine.UniversalAppAgent
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.scheduler.ScheduledTaskManager
 import com.jarvis.assistant.security.BankingProtectionManager
+import com.jarvis.assistant.update.AppUpdateManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import com.jarvis.assistant.voice.SpeechRecognizerHelper
 import kotlinx.coroutines.CoroutineScope
@@ -58,6 +59,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnWriteSettings: Button
     private lateinit var btnApiKey: Button
     private lateinit var btnShield: Button
+    private lateinit var btnCheckUpdate: Button
     private lateinit var btnTalk: Button
     private lateinit var etCommandInput: EditText
     private lateinit var btnSendCommand: Button
@@ -102,6 +104,9 @@ class MainActivity : AppCompatActivity() {
         initServices()
         setupListeners()
         requestAppPermissions()
+
+        // Automatic In-App Update check on launch
+        AppUpdateManager.checkForUpdates(this, isManual = false)
     }
 
     private fun initViews() {
@@ -112,6 +117,7 @@ class MainActivity : AppCompatActivity() {
         btnWriteSettings = findViewById(R.id.btnWriteSettings)
         btnApiKey = findViewById(R.id.btnApiKey)
         btnShield = findViewById(R.id.btnShield)
+        btnCheckUpdate = findViewById(R.id.btnCheckUpdate)
         btnTalk = findViewById(R.id.btnTalk)
         etCommandInput = findViewById(R.id.etCommandInput)
         btnSendCommand = findViewById(R.id.btnSendCommand)
@@ -210,6 +216,10 @@ class MainActivity : AppCompatActivity() {
 
         btnShield.setOnClickListener {
             showBankingShieldDialog()
+        }
+
+        btnCheckUpdate.setOnClickListener {
+            AppUpdateManager.checkForUpdates(this, isManual = true)
         }
 
         // Voice button: Tap to talk

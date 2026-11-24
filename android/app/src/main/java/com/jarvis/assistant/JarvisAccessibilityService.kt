@@ -2,6 +2,8 @@ package com.jarvis.assistant
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Path
 import android.graphics.Rect
@@ -380,15 +382,35 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Direct node action: Set Text (types string directly into field in 1ms).
+     * Direct node action: Set Text with Clipboard Fallback & Smart Multi-Line Handling.
+     * Prevents broken UI wizards by supporting direct multi-line insertion into custom rich text editors.
      */
     fun typeText(node: AccessibilityNodeInfo?, text: String): Boolean {
         if (node == null) return false
+
+        // 1. Keep clipboard synced as reliable backup for custom rich editors
+        try {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clip = ClipData.newPlainText("jarvis_input", text)
+            clipboard?.setPrimaryClip(clip)
+        } catch (e: Exception) {
+            Log.w(TAG, "Clipboard copy error: ${e.message}")
+        }
+
+        // 2. Try direct ACTION_SET_TEXT
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        if (success && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        var success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+
+        // 3. Fallback to ACTION_PASTE if SET_TEXT is not accepted (e.g. rich canvas or custom text editors)
+        if (!success) {
+            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            success = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        }
+
+        // 4. Only trigger IME ENTER for single-line search queries (never for multi-line notes, tables or documents)
+        if (success && !text.contains("\n") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
             } catch (e: Exception) {}

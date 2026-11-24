@@ -43,7 +43,7 @@ class UniversalAppAgent(
             }
 
             val actionHistory = mutableListOf<String>()
-            val maxTurns = 6
+            val maxTurns = 8
             var turn = 0
             var finalMsg = ""
             var isCompleted = false
@@ -70,16 +70,23 @@ $historyStr
 
 Sir's Overall Goal: "$instruction"
 
-SEARCH & NAVIGATION RULES:
-1. PREFER SEARCH OVER SCROLLING: When looking for a specific contact, person, chat, show, video, or item, ALWAYS tap the Search bar or Search icon and type the name directly instead of scrolling endlessly through lists.
+SEARCH, NAVIGATION & EXECUTION RULES:
+1. PREFER SEARCH OVER SCROLLING: When looking for a specific contact, person, chat, show, video, profile, or item, ALWAYS tap the Search bar or Search icon and type the name directly instead of scrolling endlessly through lists.
 2. FINALIZE GOAL:
    - For chat/messaging: Open the person's chat, type the message into the text box, and tap the Send button.
    - For media/shows/video: Tap on the show/movie card or play/resume button to start playback.
-3. WHEN NOT FOUND: If the target contact or show is not found after searching, choose "done" with an honest summary in natural Hinglish (e.g. "Anuj nahi mila Sir").
+   - For social/following: Tap on the target profile or Follow/Subscribe button.
+3. CONTENT CREATION & NOTES (TABLES, LISTS, MEMOS):
+   - When Sir's goal is to create or write content (e.g. a table, list, notes, checklist, memo):
+   - DO NOT get trapped clicking proprietary formatting buttons, table grid wizards, or column add dialogs.
+   - As an intelligent AI, CONSTRUCT the entire, beautifully structured content (using clean Markdown or aligned text table, bullet list, or formatted notes) directly inside the "text" field of "type_tag".
+   - Tap the note/document editor field and type the complete generated content in ONE clean action!
+   - Once content is typed, if there is a save/tick/done button tap it, or choose "done".
+4. WHEN NOT FOUND: If the target contact, item, or show is not found after searching, choose "done" with an honest summary in natural Hinglish (e.g. "Anuj nahi mila Sir").
 
 Decide the best next single action:
-- "tap_tag": Tap a numbered element [tag] (e.g. search icon / search bar, contact/chat name, send button, play button).
-- "type_tag": Type text into an input field [tag] (e.g. search query, chat message).
+- "tap_tag": Tap a numbered element [tag] (e.g. search icon / search bar, create note button, contact/chat name, send button, play button).
+- "type_tag": Type text into an input field [tag] (e.g. search query, chat message, or full generated note/table content).
 - "scroll_screen": Scroll the active screen down or up (use only if search is unavailable).
 - "back": Press the hardware back button (e.g. to dismiss a popup, exit an overlay, or return).
 - "done": Goal is completely achieved on screen, or target was not found.
@@ -88,9 +95,9 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
   "action": "tap_tag" | "type_tag" | "scroll_screen" | "back" | "done",
   "tag": <number or null>,
-  "text": "<text to type or null>",
+  "text": "<text to type, or full generated table/list/note content, or null>",
   "direction": "down" | "up" | null,
-  "summary": "<When continuing: short step log. When done: a single, natural, clean sentence in spoken Hinglish to Sir confirming what happened, e.g. 'Anuj ko hello bhej diya hai Sir' or 'Campus Diaries play ho gaya hai Sir' or 'Anuj nahi mila Sir'. NEVER include robotic words like 'goal complete', 'execute', or app prefixes.>"
+  "summary": "<When continuing: short step log. When done: a single, natural, clean sentence in spoken Hinglish to Sir confirming what happened, e.g. 'Notes me Prashant, Nikhil aur Akhil ka table bana diya hai Sir' or 'Anuj ko hello bhej diya hai Sir'. NEVER include robotic words like 'goal complete', 'execute', or app prefixes.>"
 }
 """.trimIndent()
 
@@ -120,7 +127,8 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                         val targetTag = decision.tag ?: 1
                         val textToType = decision.text ?: instruction
                         nodeActionEngine.typeTextByTag(targetTag, textToType) { _, _ -> }
-                        actionHistory.add("Typed '$textToType' into element [$targetTag]")
+                        val preview = if (textToType.length > 40) textToType.take(40).replace("\n", " ") + "..." else textToType
+                        actionHistory.add("Typed '$preview' into element [$targetTag]")
                         delay(600)
                     }
                     "scroll_screen" -> {
