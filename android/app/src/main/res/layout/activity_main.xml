@@ -92,6 +92,17 @@
             android:backgroundTint="@color/jarvis_card_bg" />
     </LinearLayout>
 
+    <!-- Banking Shield Button -->
+    <Button
+        android:id="@+id/btnShield"
+        android:layout_width="match_parent"
+        android:layout_height="38dp"
+        android:text="🛡️ Banking Shield: SETUP (Click for PC command)"
+        android:textSize="11sp"
+        android:textColor="@color/white"
+        android:backgroundTint="@color/jarvis_card_bg"
+        android:layout_marginBottom="8dp" />
+
     <!-- Action Bar: Tap To Talk & Text Command -->
     <Button
         android:id="@+id/btnTalk"

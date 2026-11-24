@@ -2,6 +2,8 @@ package com.jarvis.assistant
 
 import android.Manifest
 import android.app.NotificationManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -28,6 +30,7 @@ import com.jarvis.assistant.engine.TelephonyHelper
 import com.jarvis.assistant.engine.UniversalAppAgent
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.scheduler.ScheduledTaskManager
+import com.jarvis.assistant.security.BankingProtectionManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import com.jarvis.assistant.voice.SpeechRecognizerHelper
 import kotlinx.coroutines.CoroutineScope
@@ -54,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnDnd: Button
     private lateinit var btnWriteSettings: Button
     private lateinit var btnApiKey: Button
+    private lateinit var btnShield: Button
     private lateinit var btnTalk: Button
     private lateinit var etCommandInput: EditText
     private lateinit var btnSendCommand: Button
@@ -107,6 +111,7 @@ class MainActivity : AppCompatActivity() {
         btnDnd = findViewById(R.id.btnDnd)
         btnWriteSettings = findViewById(R.id.btnWriteSettings)
         btnApiKey = findViewById(R.id.btnApiKey)
+        btnShield = findViewById(R.id.btnShield)
         btnTalk = findViewById(R.id.btnTalk)
         etCommandInput = findViewById(R.id.etCommandInput)
         btnSendCommand = findViewById(R.id.btnSendCommand)
@@ -203,6 +208,10 @@ class MainActivity : AppCompatActivity() {
                 .show()
         }
 
+        btnShield.setOnClickListener {
+            showBankingShieldDialog()
+        }
+
         // Voice button: Tap to talk
         btnTalk.setOnClickListener {
             speakerHelper.speak("Ji Sir?")
@@ -227,6 +236,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (BankingProtectionManager.isShieldActive) {
+            BankingProtectionManager.reattachAccessibility(this)
+        }
         updatePermissionStatus()
         val missedNotice = memoryManager.popPendingMissedCallNotice()
         if (!missedNotice.isNullOrBlank()) {
@@ -244,6 +256,7 @@ class MainActivity : AppCompatActivity() {
         val isWriteSettingsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Settings.System.canWrite(this)
         } else true
+        val isShieldGranted = BankingProtectionManager.hasSecureSettingsPermission(this)
 
         btnAccessibility.text = if (isAccRunning) "Access: ON" else "Access"
         btnAccessibility.backgroundTintList = ContextCompat.getColorStateList(
@@ -263,6 +276,13 @@ class MainActivity : AppCompatActivity() {
             if (isWriteSettingsGranted) R.color.green_active else R.color.jarvis_card_bg
         )
 
+        btnShield.text = if (isShieldGranted) "🛡️ Banking Shield: ON (UPI Protected)" else "🛡️ Banking Shield: SETUP (Click for PC command)"
+        btnShield.backgroundTintList = ContextCompat.getColorStateList(
+            this,
+            if (isShieldGranted) R.color.green_active else R.color.jarvis_card_bg
+        )
+        btnShield.setTextColor(ContextCompat.getColor(this, if (isShieldGranted) R.color.jarvis_dark_bg else R.color.jarvis_gold))
+
         if (isAccRunning) {
             tvSystemStatusBadge.text = "ONLINE"
             tvSystemStatusBadge.setTextColor(ContextCompat.getColor(this, R.color.green_active))
@@ -270,6 +290,44 @@ class MainActivity : AppCompatActivity() {
             tvSystemStatusBadge.text = "AWAITING ACCESS"
             tvSystemStatusBadge.setTextColor(ContextCompat.getColor(this, R.color.jarvis_gold))
         }
+    }
+
+    private fun showBankingShieldDialog() {
+        val isGranted = BankingProtectionManager.hasSecureSettingsPermission(this)
+        val hasUsage = BankingProtectionManager.hasUsageStatsPermission(this)
+        val adbCmd = "adb shell pm grant com.jarvis.assistant android.permission.WRITE_SECURE_SETTINGS\nadb shell pm grant com.jarvis.assistant android.permission.PACKAGE_USAGE_STATS"
+
+        val msg = if (isGranted) {
+            "✅ Banking Shield is ACTIVE!\n\n" +
+            "PhonePe, Paytm, Google Pay, BHIM wagera open hone par Jarvis automatically unregister ho jayega taaki koi 'Dangerous app' warning na aaye.\n\n" +
+            "Payment complete hone ke baad Jarvis bina puche khud wapas connect ho jayega."
+        } else {
+            "🛡️ Automated Banking App Shield\n\n" +
+            "PhonePe, Paytm, Google Pay ko 'Dangerous app' warning se bachane ke liye phone ko laptop se connect karke ye command run karein (Lifetime One-Time):\n\n" +
+            "$adbCmd"
+        }
+
+        val builder = AlertDialog.Builder(this)
+            .setTitle("Banking Protection Shield")
+            .setMessage(msg)
+            .setPositiveButton(if (isGranted) "Theek Hai" else "Copy Command") { _, _ ->
+                if (!isGranted) {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("ADB Command", adbCmd)
+                    clipboard.setPrimaryClip(clip)
+                    Toast.makeText(this, "ADB Command Copied!", Toast.LENGTH_SHORT).show()
+                    appendLog("[Shield]: ADB command copied to clipboard.")
+                }
+            }
+
+        if (!hasUsage) {
+            builder.setNeutralButton("Usage Access") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                } catch (e: Exception) {}
+            }
+        }
+        builder.setNegativeButton("Close", null).show()
     }
 
     private fun showAccessibilityGuidanceDialog() {

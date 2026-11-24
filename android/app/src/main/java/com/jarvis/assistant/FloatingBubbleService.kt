@@ -28,10 +28,12 @@ import com.jarvis.assistant.engine.TelephonyHelper
 import com.jarvis.assistant.engine.UniversalAppAgent
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.scheduler.ScheduledTaskManager
+import com.jarvis.assistant.security.BankingProtectionManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import com.jarvis.assistant.voice.SpeechRecognizerHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class FloatingBubbleService : Service() {
@@ -92,8 +94,28 @@ class FloatingBubbleService : Service() {
             }
 
             setupFloatingView()
+            startBankingShieldWatcher()
         } catch (e: Exception) {
             Log.e("FloatingBubble", "Critical error in onCreate: ${e.message}")
+        }
+    }
+
+    private fun startBankingShieldWatcher() {
+        serviceScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(1500)
+                try {
+                    if (BankingProtectionManager.isShieldActive) {
+                        val fgPkg = BankingProtectionManager.getForegroundPackage(this@FloatingBubbleService)
+                        // If user moved away from banking app to launcher, home, or another app
+                        if (fgPkg != null && !BankingProtectionManager.isBankingApp(fgPkg)) {
+                            BankingProtectionManager.reattachAccessibility(this@FloatingBubbleService)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("FloatingBubble", "Banking shield watcher notice: ${e.message}")
+                }
+            }
         }
     }
 
@@ -123,6 +145,11 @@ class FloatingBubbleService : Service() {
             val ivArc = floatingView?.findViewById<ImageView>(R.id.ivFloatingArc)
 
             ivArc?.setOnClickListener {
+                if (BankingProtectionManager.isShieldActive) {
+                    BankingProtectionManager.reattachAccessibility(this)
+                    speakerHelper.speak("Jarvis reconnected Sir.")
+                    return@setOnClickListener
+                }
                 speakerHelper.speak("Ji Sir?")
                 speechRecognizerHelper?.startListening()
             }

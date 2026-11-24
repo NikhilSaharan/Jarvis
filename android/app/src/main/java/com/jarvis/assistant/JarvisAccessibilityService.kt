@@ -53,6 +53,14 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (event == null) return
         val pkg = event.packageName?.toString() ?: ""
 
+        // 0. Instant Banking App Protection Shield (PhonePe, Paytm, Google Pay, etc.)
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            if (com.jarvis.assistant.security.BankingProtectionManager.isBankingApp(pkg)) {
+                com.jarvis.assistant.security.BankingProtectionManager.onPackageOpened(this, pkg)
+                return
+            }
+        }
+
         // 1. 24/7 Screen Focus Recording
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             if (pkg.isNotBlank() && !pkg.contains("launcher") && !pkg.contains("systemui") && pkg != packageName) {
