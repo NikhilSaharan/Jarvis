@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.jarvis.assistant.JarvisAccessibilityService
 import com.jarvis.assistant.brain.GeminiBrain
+import com.jarvis.assistant.security.AutoUnlockManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -35,11 +36,21 @@ class UniversalAppAgent(
         }
 
         mainScope.launch {
-            delay(1200) // Initial wait for app window to render
             val service = JarvisAccessibilityService.instance
             if (service == null) {
                 callback(false, "Accessibility Service active nahi hai Sir.")
                 return@launch
+            }
+
+            // Auto-unlock screen if locked before opening app
+            AutoUnlockManager.unlockScreenIfLocked(context, service) { _ -> }
+
+            delay(1200) // Initial wait for app window to render
+
+            // Auto-unlock App Lock if target app is protected (WhatsApp, Instagram, OnePlus safecenter)
+            if (AutoUnlockManager.isAppLockScreen(service)) {
+                AutoUnlockManager.unlockAppLockIfPresent(context, service) { _ -> }
+                delay(1000)
             }
 
             val actionHistory = mutableListOf<String>()
@@ -51,6 +62,14 @@ class UniversalAppAgent(
             while (turn < maxTurns && !isCompleted) {
                 turn++
                 delay(1000) // Allow animations, screen transitions, or search loading to settle
+
+                // Auto-unlock App Lock if it appeared midway
+                if (AutoUnlockManager.isAppLockScreen(service)) {
+                    AutoUnlockManager.unlockAppLockIfPresent(context, service) { _ -> }
+                    actionHistory.add("Auto-unlocked App Lock")
+                    delay(1000)
+                    continue
+                }
 
                 val screenSummary = service.dumpScreenElementsSummary()
                 if (screenSummary.isBlank() || screenSummary.contains("empty")) {

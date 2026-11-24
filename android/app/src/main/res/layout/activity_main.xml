@@ -103,6 +103,17 @@
         android:backgroundTint="@color/jarvis_card_bg"
         android:layout_marginBottom="6dp" />
 
+    <!-- Auto-Unlock Screen & App Lock Passwords Setup -->
+    <Button
+        android:id="@+id/btnLockSetup"
+        android:layout_width="match_parent"
+        android:layout_height="38dp"
+        android:text="🔐 Auto-Unlock & Passwords Setup"
+        android:textSize="11sp"
+        android:textColor="@color/white"
+        android:backgroundTint="@color/jarvis_card_bg"
+        android:layout_marginBottom="6dp" />
+
     <!-- App Auto-Update Row/Button -->
     <Button
         android:id="@+id/btnCheckUpdate"

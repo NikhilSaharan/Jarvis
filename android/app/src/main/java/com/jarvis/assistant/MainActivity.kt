@@ -6,6 +6,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -14,8 +16,13 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
+import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -30,6 +37,7 @@ import com.jarvis.assistant.engine.TelephonyHelper
 import com.jarvis.assistant.engine.UniversalAppAgent
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.scheduler.ScheduledTaskManager
+import com.jarvis.assistant.security.AutoUnlockManager
 import com.jarvis.assistant.security.BankingProtectionManager
 import com.jarvis.assistant.update.AppUpdateManager
 import com.jarvis.assistant.voice.SpeakerHelper
@@ -59,6 +67,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnWriteSettings: Button
     private lateinit var btnApiKey: Button
     private lateinit var btnShield: Button
+    private lateinit var btnLockSetup: Button
     private lateinit var btnCheckUpdate: Button
     private lateinit var btnTalk: Button
     private lateinit var etCommandInput: EditText
@@ -117,6 +126,7 @@ class MainActivity : AppCompatActivity() {
         btnWriteSettings = findViewById(R.id.btnWriteSettings)
         btnApiKey = findViewById(R.id.btnApiKey)
         btnShield = findViewById(R.id.btnShield)
+        btnLockSetup = findViewById(R.id.btnLockSetup)
         btnCheckUpdate = findViewById(R.id.btnCheckUpdate)
         btnTalk = findViewById(R.id.btnTalk)
         etCommandInput = findViewById(R.id.etCommandInput)
@@ -216,6 +226,10 @@ class MainActivity : AppCompatActivity() {
 
         btnShield.setOnClickListener {
             showBankingShieldDialog()
+        }
+
+        btnLockSetup.setOnClickListener {
+            showAutoUnlockSetupDialog()
         }
 
         btnCheckUpdate.setOnClickListener {
@@ -338,6 +352,122 @@ class MainActivity : AppCompatActivity() {
             }
         }
         builder.setNegativeButton("Close", null).show()
+    }
+
+    private fun showAutoUnlockSetupDialog() {
+        val currentScreenType = AutoUnlockManager.getScreenLockType(this)
+        val currentScreenVal = AutoUnlockManager.getScreenLockValue(this)
+        val currentAppType = AutoUnlockManager.getAppLockType(this)
+        val currentAppVal = AutoUnlockManager.getAppLockValue(this)
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 24)
+        }
+
+        val tvInfo = TextView(this).apply {
+            text = "J.A.R.V.I.S. phone screen aur WhatsApp/Instagram app lock ko automatically unlock kar sakta hai Sir.\n"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+        }
+        container.addView(tvInfo)
+
+        val tvScreenLabel = TextView(this).apply {
+            text = "1. Phone Lock Screen Type:"
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ContextCompat.getColor(context, R.color.jarvis_cyan))
+            textSize = 14f
+        }
+        container.addView(tvScreenLabel)
+
+        val rgScreenType = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+        }
+        val rbNone = RadioButton(this).apply { text = "None"; id = View.generateViewId(); setTextColor(Color.WHITE) }
+        val rbPin = RadioButton(this).apply { text = "PIN"; id = View.generateViewId(); setTextColor(Color.WHITE) }
+        val rbPattern = RadioButton(this).apply { text = "Pattern"; id = View.generateViewId(); setTextColor(Color.WHITE) }
+        rgScreenType.addView(rbNone)
+        rgScreenType.addView(rbPin)
+        rgScreenType.addView(rbPattern)
+        container.addView(rgScreenType)
+
+        when (currentScreenType) {
+            AutoUnlockManager.TYPE_PIN -> rbPin.isChecked = true
+            AutoUnlockManager.TYPE_PATTERN -> rbPattern.isChecked = true
+            else -> rbNone.isChecked = true
+        }
+
+        val etScreenVal = EditText(this).apply {
+            hint = "Screen PIN ya Pattern (e.g. 1234 ya 1-2-3-6)"
+            setText(currentScreenVal)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            textSize = 14f
+        }
+        container.addView(etScreenVal)
+
+        val tvPatternHint = TextView(this).apply {
+            text = "Pattern Dots: 1 2 3 (top), 4 5 6 (mid), 7 8 9 (bot). Example: 1-2-3-6-9\n"
+            textSize = 11f
+            setTextColor(Color.LTGRAY)
+        }
+        container.addView(tvPatternHint)
+
+        val tvAppLabel = TextView(this).apply {
+            text = "2. App Lock (WhatsApp, Insta, etc.):"
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ContextCompat.getColor(context, R.color.jarvis_cyan))
+            textSize = 14f
+        }
+        container.addView(tvAppLabel)
+
+        val cbSameAsScreen = CheckBox(this).apply {
+            text = "Screen lock wala password hi use karein"
+            isChecked = (currentAppType == AutoUnlockManager.TYPE_SAME_AS_SCREEN)
+            setTextColor(Color.WHITE)
+            textSize = 13f
+        }
+        container.addView(cbSameAsScreen)
+
+        val etAppVal = EditText(this).apply {
+            hint = "Alag App Lock PIN/Pattern"
+            setText(if (currentAppType != AutoUnlockManager.TYPE_SAME_AS_SCREEN) currentAppVal else "")
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            textSize = 14f
+            visibility = if (cbSameAsScreen.isChecked) View.GONE else View.VISIBLE
+        }
+        container.addView(etAppVal)
+
+        cbSameAsScreen.setOnCheckedChangeListener { _, isChecked ->
+            etAppVal.visibility = if (isChecked) View.GONE else View.VISIBLE
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("🔐 Auto-Unlock & Passwords")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val selectedScreenType = when {
+                    rbPin.isChecked -> AutoUnlockManager.TYPE_PIN
+                    rbPattern.isChecked -> AutoUnlockManager.TYPE_PATTERN
+                    else -> AutoUnlockManager.TYPE_NONE
+                }
+                val screenVal = etScreenVal.text.toString().trim()
+                val selectedAppType = if (cbSameAsScreen.isChecked) {
+                    AutoUnlockManager.TYPE_SAME_AS_SCREEN
+                } else if (etAppVal.text.toString().contains("-") || etAppVal.text.toString().contains(",")) {
+                    AutoUnlockManager.TYPE_PATTERN
+                } else {
+                    AutoUnlockManager.TYPE_PIN
+                }
+                val appVal = if (cbSameAsScreen.isChecked) screenVal else etAppVal.text.toString().trim()
+
+                AutoUnlockManager.saveCredentials(this, selectedScreenType, screenVal, selectedAppType, appVal)
+                Toast.makeText(this, "Lock credentials saved safely!", Toast.LENGTH_SHORT).show()
+                appendLog("[Security]: Auto-Unlock credentials configured ($selectedScreenType).")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun showAccessibilityGuidanceDialog() {

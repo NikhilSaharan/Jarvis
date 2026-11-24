@@ -10,6 +10,7 @@ import android.graphics.Rect
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.telecom.TelecomManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -537,5 +538,177 @@ class JarvisAccessibilityService : AccessibilityService() {
      */
     fun closeApp(): Boolean {
         return performHome()
+    }
+
+    /**
+     * Wakes the screen and swipes up to reveal lockscreen PIN keypad / pattern grid.
+     */
+    fun wakeAndSwipeUp(): Boolean {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            val wakeLock = pm?.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "Jarvis:ScreenUnlockWakeLock"
+            )
+            wakeLock?.acquire(3000L)
+        } catch (e: Exception) {
+            Log.w(TAG, "WakeLock error: ${e.message}")
+        }
+
+        // Swipe up from bottom 82% to 22% height
+        val displayMetrics = resources.displayMetrics
+        val w = displayMetrics.widthPixels.toFloat()
+        val h = displayMetrics.heightPixels.toFloat()
+
+        val path = Path().apply {
+            moveTo(w / 2f, h * 0.82f)
+            lineTo(w / 2f, h * 0.22f)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
+            .build()
+        return dispatchGesture(gesture, null, null)
+    }
+
+    /**
+     * Taps a specific physical point on screen via single hardware gesture.
+     */
+    fun tapCoordinates(x: Float, y: Float, durationMs: Long = 50): Boolean {
+        val path = Path().apply {
+            moveTo(x, y)
+            lineTo(x + 1f, y + 1f)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        return dispatchGesture(gesture, null, null)
+    }
+
+    /**
+     * Draws an unlock pattern across a 3x3 grid connecting the specified sequence of dots (1..9).
+     * Dots are numbered:
+     * 1 2 3
+     * 4 5 6
+     * 7 8 9
+     */
+    fun drawPattern(dots: List<Int>): Boolean {
+        if (dots.size < 2) return false
+        val displayMetrics = resources.displayMetrics
+        val w = displayMetrics.widthPixels.toFloat()
+        val h = displayMetrics.heightPixels.toFloat()
+
+        // Standard Android / OnePlus 3x3 lock pattern placement
+        // Grid is centered horizontally, located vertically between 45% and 75% screen height
+        val gridCenterX = w / 2f
+        val gridCenterY = h * 0.60f
+        val step = w * 0.28f // Distance between adjacent dots
+
+        val colMap = mapOf(
+            0 to (gridCenterX - step),
+            1 to gridCenterX,
+            2 to (gridCenterX + step)
+        )
+        val rowMap = mapOf(
+            0 to (gridCenterY - step),
+            1 to gridCenterY,
+            2 to (gridCenterY + step)
+        )
+
+        fun getDotCoord(dot: Int): Pair<Float, Float> {
+            val d = (dot - 1).coerceIn(0, 8)
+            val r = d / 3
+            val c = d % 3
+            return Pair(colMap[c] ?: gridCenterX, rowMap[r] ?: gridCenterY)
+        }
+
+        val path = Path()
+        val first = getDotCoord(dots[0])
+        path.moveTo(first.first, first.second)
+
+        for (i in 1 until dots.size) {
+            val pt = getDotCoord(dots[i])
+            path.lineTo(pt.first, pt.second)
+        }
+
+        val duration = (dots.size * 120L).coerceIn(350L, 1200L)
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+            .build()
+
+        return dispatchGesture(gesture, null, null)
+    }
+
+    /**
+     * Taps PIN digits (0-9) sequentially on the lock screen / app lock keypad.
+     */
+    suspend fun tapPinDigits(pin: String): Boolean {
+        if (pin.isBlank()) return false
+
+        // Check if an editable input field exists first (some app locks allow direct text input)
+        val inputField = findFirstInputField()
+        if (inputField != null && inputField.isEditable) {
+            val typed = typeText(inputField, pin)
+            if (typed) {
+                delay(300)
+                val submitBtn = findClickableNode("OK") ?: findClickableNode("Enter") ?: findClickableNode("done")
+                submitBtn?.let { tapElement(it) }
+                return true
+            }
+        }
+
+        val displayMetrics = resources.displayMetrics
+        val w = displayMetrics.widthPixels.toFloat()
+        val h = displayMetrics.heightPixels.toFloat()
+
+        // Standard 3x4 Keypad layout:
+        // 1 2 3
+        // 4 5 6
+        // 7 8 9
+        // [X] 0 [OK]
+        val colW = w / 3f
+        val startY = h * 0.55f
+        val rowH = h * 0.09f
+
+        val keyCoords = mapOf(
+            '1' to Pair(colW * 0.5f, startY),
+            '2' to Pair(colW * 1.5f, startY),
+            '3' to Pair(colW * 2.5f, startY),
+            '4' to Pair(colW * 0.5f, startY + rowH),
+            '5' to Pair(colW * 1.5f, startY + rowH),
+            '6' to Pair(colW * 2.5f, startY + rowH),
+            '7' to Pair(colW * 0.5f, startY + rowH * 2),
+            '8' to Pair(colW * 1.5f, startY + rowH * 2),
+            '9' to Pair(colW * 2.5f, startY + rowH * 2),
+            '0' to Pair(colW * 1.5f, startY + rowH * 3)
+        )
+
+        for (ch in pin) {
+            val digitNode = findClickableNode(ch.toString()) ?: findNodeByPredicate { n ->
+                val text = n.text?.toString() ?: ""
+                val cd = n.contentDescription?.toString() ?: ""
+                val res = n.viewIdResourceName?.lowercase() ?: ""
+                (text == ch.toString() || cd == ch.toString() || res.endsWith("digit_$ch") || res.endsWith("key_$ch"))
+            }
+
+            if (digitNode != null) {
+                clickNode(digitNode)
+            } else {
+                val pt = keyCoords[ch]
+                if (pt != null) {
+                    tapCoordinates(pt.first, pt.second)
+                }
+            }
+            delay(120)
+        }
+
+        delay(200)
+        val enterNode = findClickableNode("enter") ?: findClickableNode("ok") ?: findClickableNode("done")
+        if (enterNode != null) {
+            clickNode(enterNode)
+        } else {
+            tapCoordinates(colW * 2.5f, startY + rowH * 3)
+        }
+
+        return true
     }
 }
