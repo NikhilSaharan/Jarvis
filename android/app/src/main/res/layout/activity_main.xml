@@ -108,7 +108,7 @@
         android:id="@+id/btnLockSetup"
         android:layout_width="match_parent"
         android:layout_height="38dp"
-        android:text="🔐 Auto-Unlock & Passwords Setup"
+        android:text="🔐 Auto-Unlock &amp; Passwords Setup"
         android:textSize="11sp"
         android:textColor="@color/white"
         android:backgroundTint="@color/jarvis_card_bg"
