@@ -50,6 +50,9 @@ class JarvisAccessibilityService : AccessibilityService() {
     private var lastNotificationTime = 0L
     private var lastNotificationText = ""
 
+    @Volatile
+    private var cachedScreenElements: List<ScreenElement> = emptyList()
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -211,33 +214,71 @@ class JarvisAccessibilityService : AccessibilityService() {
     // ═════════════════════════════════════════════════════════════════
 
     /**
-     * Dumps all interactive elements on the current active screen into a tagged list in <2ms.
+     * Dumps all visible, on-screen interactive elements into a crisp tagged list in <3ms.
+     * Aggregates child labels into clickable rows, hides off-screen ViewPager/feed noise,
+     * and caches the exact snapshot so tap_tag/type_tag always act on the inspected UI nodes.
      */
     fun dumpScreenElements(): List<ScreenElement> {
         val root = rootInActiveWindow ?: return emptyList()
+        val dm = resources.displayMetrics
+        val screenRect = Rect(0, 0, dm.widthPixels, dm.heightPixels)
+        val screenArea = dm.widthPixels.toLong() * dm.heightPixels.toLong()
         val elements = mutableListOf<ScreenElement>()
         var counter = 1
 
-        fun traverse(node: AccessibilityNodeInfo?) {
-            if (node == null) return
+        fun collectDescendantLabels(container: AccessibilityNodeInfo): String {
+            val parts = mutableListOf<String>()
+            fun walk(n: AccessibilityNodeInfo?, depth: Int) {
+                if (n == null || depth > 6 || parts.size >= 4) return
+                // Stop descending into separately clickable/editable child controls (e.g. Follow button inside a user row)
+                if (depth > 0 && (n.isClickable || n.isEditable || n.isCheckable)) return
+
+                val t = n.text?.toString()?.trim() ?: ""
+                val c = n.contentDescription?.toString()?.trim() ?: ""
+                val chosen = if (t.isNotBlank()) t else c
+                if (chosen.isNotBlank() && parts.none { it.equals(chosen, ignoreCase = true) }) {
+                    parts.add(chosen)
+                }
+                for (i in 0 until n.childCount) {
+                    walk(n.getChild(i), depth + 1)
+                }
+            }
+            walk(container, 0)
+            return parts.joinToString(" | ").take(100)
+        }
+
+        fun traverse(node: AccessibilityNodeInfo?, insideClickableParent: Boolean) {
+            if (node == null || elements.size >= 85) return
+
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            val isOnScreen = bounds.width() > 4 && bounds.height() > 4 && Rect.intersects(bounds, screenRect)
+            if (!isOnScreen || !node.isVisibleToUser) return
 
             val text = node.text?.toString()?.trim() ?: ""
             val cd = node.contentDescription?.toString()?.trim() ?: ""
             val cls = node.className?.toString()?.substringAfterLast('.') ?: ""
+            val resId = node.viewIdResourceName?.substringAfterLast('/') ?: ""
             val isClickable = node.isClickable
             val isEditable = node.isEditable
+            val isInteractive = isClickable || isEditable || node.isCheckable
 
-            val bounds = Rect()
-            node.getBoundsInScreen(bounds)
+            val nodeArea = bounds.width().toLong() * bounds.height().toLong()
+            val isHugeWrapper = !isEditable && nodeArea > (screenArea * 0.72) && text.isBlank() && cd.isBlank()
 
-            // Filter meaningful interactive components
-            val isInteractive = isClickable || isEditable || node.isCheckable || node.isFocusable
-            if (isInteractive || text.isNotEmpty() || cd.isNotEmpty()) {
-                if (bounds.width() > 0 && bounds.height() > 0) {
+            var emittedThisNode = false
+            if (isInteractive && !isHugeWrapper) {
+                val aggregatedLabel = when {
+                    text.isNotBlank() -> text
+                    cd.isNotBlank() -> cd
+                    isClickable -> collectDescendantLabels(node)
+                    else -> ""
+                }
+                if (aggregatedLabel.isNotBlank() || resId.isNotBlank() || isEditable) {
                     elements.add(
                         ScreenElement(
                             tag = counter++,
-                            text = text,
+                            text = if (text.isNotBlank()) text else aggregatedLabel,
                             contentDescription = cd,
                             className = cls,
                             isClickable = isClickable,
@@ -246,16 +287,54 @@ class JarvisAccessibilityService : AccessibilityService() {
                             node = node
                         )
                     )
+                    emittedThisNode = true
                 }
+            } else if (!insideClickableParent && !isHugeWrapper && (text.isNotBlank() || cd.isNotBlank())) {
+                elements.add(
+                    ScreenElement(
+                        tag = counter++,
+                        text = text,
+                        contentDescription = cd,
+                        className = cls,
+                        isClickable = false,
+                        isEditable = false,
+                        bounds = bounds,
+                        node = node
+                    )
+                )
             }
 
+            val nextInsideClickable = insideClickableParent || (emittedThisNode && isClickable && !isHugeWrapper)
             for (i in 0 until node.childCount) {
-                traverse(node.getChild(i))
+                traverse(node.getChild(i), nextInsideClickable)
             }
         }
 
-        traverse(root)
+        traverse(root, false)
+        cachedScreenElements = elements
         return elements
+    }
+
+    /**
+     * Resolves a tagged element from the last inspected UI snapshot and verifies/refreshes it live.
+     * Prevents mis-tapping shifted indices if the app UI animated while Gemini reasoned.
+     */
+    fun findTaggedElement(tag: Int): ScreenElement? {
+        val snapshot = cachedScreenElements
+        if (snapshot.isNotEmpty()) {
+            val cached = snapshot.find { it.tag == tag } ?: return null
+            if (!cached.node.refresh()) {
+                return null
+            }
+            val freshBounds = Rect()
+            cached.node.getBoundsInScreen(freshBounds)
+            return cached.copy(
+                bounds = freshBounds,
+                isClickable = cached.node.isClickable,
+                isEditable = cached.node.isEditable
+            )
+        }
+        return dumpScreenElements().find { it.tag == tag }
     }
 
     /**
@@ -361,17 +440,33 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Direct node action: Click with Gesture Tap Fallback (100% reliable on all OEMs).
+     * Direct node action: Refresh node, search clickable ancestor up to 4 levels,
+     * with visible-screen bounds gesture tap fallback.
      */
     fun clickNode(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
-        if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-        if (node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return true
+        node.refresh()
 
-        // Gesture Tap fallback
+        var clickableTarget: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (clickableTarget != null && !clickableTarget.isClickable && depth < 4) {
+            clickableTarget = clickableTarget.parent
+            depth++
+        }
+
+        if (clickableTarget != null && clickableTarget.isClickable) {
+            if (clickableTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        } else if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            return true
+        }
+
+        // Gesture Tap fallback ONLY inside visible screen bounds
         val bounds = Rect()
-        node.getBoundsInScreen(bounds)
-        if (bounds.width() > 0 && bounds.height() > 0) {
+        val targetForBounds = clickableTarget?.takeIf { it.isClickable } ?: node
+        targetForBounds.getBoundsInScreen(bounds)
+        val dm = resources.displayMetrics
+        val screenRect = Rect(0, 0, dm.widthPixels, dm.heightPixels)
+        if (bounds.width() > 0 && bounds.height() > 0 && Rect.intersects(bounds, screenRect)) {
             val cx = bounds.centerX().toFloat()
             val cy = bounds.centerY().toFloat()
             val clickPath = Path().apply {
@@ -388,10 +483,11 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     /**
      * Direct node action: Set Text with Clipboard Fallback & Smart Multi-Line Handling.
-     * Prevents broken UI wizards by supporting direct multi-line insertion into custom rich text editors.
+     * Prevents accidental Enter submission on multi-line chat/note inputs while preserving single-line Search submit.
      */
     fun typeText(node: AccessibilityNodeInfo?, text: String): Boolean {
         if (node == null) return false
+        node.refresh()
 
         // 1. Keep clipboard synced as reliable backup for custom rich editors
         try {
@@ -402,7 +498,8 @@ class JarvisAccessibilityService : AccessibilityService() {
             Log.w(TAG, "Clipboard copy error: ${e.message}")
         }
 
-        // 2. Try direct ACTION_SET_TEXT
+        // 2. Ensure focus and try direct ACTION_SET_TEXT
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
@@ -410,12 +507,11 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         // 3. Fallback to ACTION_PASTE if SET_TEXT is not accepted (e.g. rich canvas or custom text editors)
         if (!success) {
-            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
             success = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
         }
 
-        // 4. Only trigger IME ENTER for single-line search queries (never for multi-line notes, tables or documents)
-        if (success && !text.contains("\n") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        // 4. Only trigger IME ENTER for single-line fields (never for multi-line notes, tables, or chat boxes)
+        if (success && !text.contains("\n") && !node.isMultiLine && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
             } catch (e: Exception) {}
@@ -424,7 +520,7 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Dumps all interactive screen elements into a clean numbered list for Gemini inspection.
+     * Dumps all visible screen elements into a crisp numbered list with ID and state flags for Gemini inspection.
      */
     fun dumpScreenElementsSummary(): String {
         val elements = dumpScreenElements()
@@ -443,8 +539,15 @@ class JarvisAccessibilityService : AccessibilityService() {
                 else -> "text"
             }
             val displayLabel = if (label.isNotBlank()) label else "button"
-            val idSuffix = if (resId.isNotBlank() && resId != displayLabel) " (id: $resId)" else ""
-            sb.append("[${el.tag}] $type$idSuffix: \"$displayLabel\"\n")
+
+            val metaParts = mutableListOf<String>()
+            if (resId.isNotBlank() && resId != displayLabel) metaParts.add("id: $resId")
+            if (el.node.isSelected) metaParts.add("selected")
+            if (el.node.isCheckable && el.node.isChecked) metaParts.add("checked")
+            if (!el.node.isEnabled) metaParts.add("disabled")
+
+            val metaSuffix = if (metaParts.isNotEmpty()) " (${metaParts.joinToString(", ")})" else ""
+            sb.append("[${el.tag}] $type$metaSuffix: \"$displayLabel\"\n")
         }
         return sb.toString().trim()
     }

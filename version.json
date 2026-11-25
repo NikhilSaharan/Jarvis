@@ -1,6 +1,6 @@
 {
-  "versionCode": 6,
-  "versionName": "1.0.5",
+  "versionCode": 7,
+  "versionName": "1.0.6",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Fixed WhatsApp voice recording button accidental tap after sending a message."
+  "changelog": "Upgraded dynamic UI tree engine for accurate Instagram DMs, Stories, Follow, and Reels navigation without static coordinates."
 }

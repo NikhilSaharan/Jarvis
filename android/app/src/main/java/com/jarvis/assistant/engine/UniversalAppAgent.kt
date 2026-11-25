@@ -58,7 +58,7 @@ class UniversalAppAgent(
             }
 
             val actionHistory = mutableListOf<String>()
-            val maxTurns = 8
+            val maxTurns = 10
             var turn = 0
             var finalMsg = ""
             var isCompleted = false
@@ -86,33 +86,53 @@ class UniversalAppAgent(
                 } else ""
 
                 val prompt = """
-You are acting as an autonomous smartphone user in $appName.
-Screen UI Elements:
+You are acting as an autonomous smartphone user inside $appName.
+Live Screen UI Tree Elements:
 $screenSummary
 $historyStr
 
 Sir's Overall Goal: "$instruction"
 
-SEARCH, NAVIGATION & EXECUTION RULES:
-1. PREFER SEARCH OVER SCROLLING: When looking for a specific contact, person, chat, show, video, profile, or item, ALWAYS tap the Search bar or Search icon and type the name directly instead of scrolling endlessly through lists.
-2. FINALIZE GOAL:
-   - For chat/messaging: Open the person's chat, type the message into the text box, and tap the Send button.
-   - For media/shows/video: Tap on the show/movie card or play/resume button to start playback.
-   - For social/following: Tap on the target profile or Follow/Subscribe button.
+TREE-BASED NAVIGATION & EXECUTION RULES (FOLLOW LIVE UI TREE STRICTLY — ZERO RANDOM CLICKS):
+1. ROUTE TO THE RIGHT APP SECTION BASED ON SIR'S INTENT:
+   - DIRECT MESSAGE / CHAT / DM GOAL (e.g. "msg bhejo", "DM karo", "reply karo"):
+     * Do NOT use the public Explore/Account Search tab first!
+     * Look in the live tree for the Messages / Direct / Inbox / Chat button or icon and tap it FIRST.
+     * Inside Messages, tap the chat Search bar/button (tap it first if it shows as 'button' instead of 'input_field'), type the recipient's name, tap the matching chat row, tap the message 'input_field', type the message, and tap Send.
+   - STORY / STATUS WATCHING GOAL (e.g. "story dikhao", "story dekho"):
+     * First check the live tree on the current screen for a visible story item matching the person's name (e.g. "<name>'s story") — if visible, tap it directly.
+     * If not visible in the current story tray, go to Messages / Inbox (or normal Search) -> search the person -> open their chat/profile -> tap their story avatar/ring/View Story element in the tree. NEVER tap unrelated feed posts or ads.
+   - FOLLOW / OPEN A NEW ACCOUNT OR PROFILE GOAL (e.g. "follow karo", "account kholo"):
+     * Tap the normal Search / Explore tab or icon from the navigation bar (NOT Messages).
+     * Tap the Search bar first if it is labeled 'button', wait for an 'input_field' to appear, then type the account/username.
+     * Tap the matching account row in results (switch to an "Accounts" tab/filter if only posts grid appears), open their profile, and tap "Follow" (or "Follow Back"). If it already says "Following" or "Requested", do NOT tap again — choose "done".
+   - REELS / SHORTS / VIDEO TAB GOAL (e.g. "reel chalao", "reels dekho", "next reel"):
+     * First check the live tree to see if the Reels / Videos tab is already active (marked 'selected') or already showing a Reels player.
+     * If NOT on the Reels tab yet, tap the "Reels" (or Video/Shorts) tab/button FIRST instead of scrolling Home photos. Once on Reels, scroll if asked or choose "done".
+   - GENERAL MEDIA / MOVIES / SHOWS / ITEMS:
+     * Prefer Search over endless scrolling; tap the matching item/show card and tap Play / Resume to start playback.
+
+2. INPUT FIELDS & SCREEN NAVIGATION SAFETY:
+   - ONLY call "type_tag" on an element labeled 'input_field'. If a search box or text box shows as 'button', call "tap_tag" FIRST so the editable 'input_field' opens on the next turn.
+   - NEVER tap random feed posts, comments, or generic empty wrappers. If an unintended post/popup covers the screen and main navigation tabs/buttons are missing, use "back" to return.
+   - Never repeat the exact same failed action consecutively — adapt directly from the updated UI tree.
+
 3. CONTENT CREATION & NOTES (TABLES, LISTS, MEMOS):
-   - When Sir's goal is to create or write content (e.g. a table, list, notes, checklist, memo):
-   - DO NOT get trapped clicking proprietary formatting buttons, table grid wizards, or column add dialogs.
-   - As an intelligent AI, CONSTRUCT the entire, beautifully structured content (using clean Markdown or aligned text table, bullet list, or formatted notes) directly inside the "text" field of "type_tag".
-   - Tap the note/document editor field and type the complete generated content in ONE clean action!
-   - Once content is typed, if there is a save/tick/done button tap it, or choose "done".
-4. WHEN NOT FOUND: If the target contact, item, or show is not found after searching, choose "done" with an honest summary in natural Hinglish (e.g. "Anuj nahi mila Sir").
+   - When Sir's goal is to create or write structured content (e.g. a table, list, notes, checklist, memo):
+   - Do NOT get trapped clicking proprietary formatting buttons, table grid wizards, or column add dialogs.
+   - Construct the COMPLETE, cleanly formatted content (Markdown or aligned text table, bullet list, etc.) directly inside the "text" field of "type_tag" and inject it into the note's main 'input_field' in one clean action!
+   - Once typed, tap a Save/Done/Tick button if needed, or choose "done".
+
+4. VERIFY COMPLETION OR NOT FOUND:
+   - Confirm from the latest Live Screen UI Tree Elements that the message sent, story opened, follow button changed to Following/Requested, or reel is active before choosing "done".
+   - If the target contact, account, story, or show is genuinely not found after searching, choose "done" with an honest spoken Hinglish summary (e.g. "Anuj nahi mila Sir").
 
 Decide the best next single action:
-- "tap_tag": Tap a numbered element [tag] (e.g. search icon / search bar, create note button, contact/chat name, send button, play button).
-- "type_tag": Type text into an input field [tag] (e.g. search query, chat message, or full generated note/table content).
-- "scroll_screen": Scroll the active screen down or up (use only if search is unavailable).
-- "back": Press the hardware back button (e.g. to dismiss a popup, exit an overlay, or return).
-- "done": Goal is completely achieved on screen, or target was not found.
+- "tap_tag": Tap a numbered element [tag] from the Live Screen UI Tree.
+- "type_tag": Type text into an 'input_field' [tag].
+- "scroll_screen": Scroll active screen down or up.
+- "back": Press hardware Back button (to dismiss a modal or exit an unintended post).
+- "done": Goal completely achieved on screen, or target genuinely not found.
 
 OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
@@ -120,7 +140,7 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
   "tag": <number or null>,
   "text": "<text to type, or full generated table/list/note content, or null>",
   "direction": "down" | "up" | null,
-  "summary": "<When continuing: short step log. When done: a single, natural, clean sentence in spoken Hinglish to Sir confirming what happened, e.g. 'Notes me Prashant, Nikhil aur Akhil ka table bana diya hai Sir' or 'Anuj ko hello bhej diya hai Sir'. NEVER include robotic words like 'goal complete', 'execute', or app prefixes.>"
+  "summary": "<When continuing: short step log. When done: a single, natural, clean sentence in spoken Hinglish to Sir confirming what happened, e.g. 'Instagram par Anuj ko hello bhej diya hai Sir' or 'Reels chala di hain Sir'. NEVER include robotic words like 'goal complete', 'execute', or app prefixes.>"
 }
 """.trimIndent()
 
@@ -142,17 +162,35 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     }
                     "tap_tag" -> {
                         val targetTag = decision.tag ?: 1
-                        nodeActionEngine.tapByTag(targetTag) { _, _ -> }
-                        actionHistory.add("Tapped element [$targetTag] ($summary)")
-                        delay(600)
+                        var tapOk = false
+                        var tapReply = ""
+                        nodeActionEngine.tapByTag(targetTag) { ok, reply ->
+                            tapOk = ok
+                            tapReply = reply
+                        }
+                        if (tapOk) {
+                            actionHistory.add("Tapped element [$targetTag] ($summary)")
+                        } else {
+                            actionHistory.add("FAILED to tap [$targetTag] ($tapReply) — inspect updated UI tree")
+                        }
+                        delay(700)
                     }
                     "type_tag" -> {
                         val targetTag = decision.tag ?: 1
                         val textToType = decision.text ?: instruction
-                        nodeActionEngine.typeTextByTag(targetTag, textToType) { _, _ -> }
+                        var typeOk = false
+                        var typeReply = ""
+                        nodeActionEngine.typeTextByTag(targetTag, textToType) { ok, reply ->
+                            typeOk = ok
+                            typeReply = reply
+                        }
                         val preview = if (textToType.length > 40) textToType.take(40).replace("\n", " ") + "..." else textToType
-                        actionHistory.add("Typed '$preview' into element [$targetTag]")
-                        delay(600)
+                        if (typeOk) {
+                            actionHistory.add("Typed '$preview' into element [$targetTag]")
+                        } else {
+                            actionHistory.add("FAILED to type '$preview' into [$targetTag] ($typeReply)")
+                        }
+                        delay(700)
                     }
                     "scroll_screen" -> {
                         val dir = decision.direction ?: "down"

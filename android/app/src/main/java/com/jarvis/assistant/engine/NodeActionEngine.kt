@@ -226,6 +226,7 @@ class NodeActionEngine(
 
     /**
      * Universal Tap by Set-of-Marks tag number ([1], [2], [3]...).
+     * Uses the live-refreshed cached snapshot element so shifting animations never cause wrong clicks.
      */
     fun tapByTag(tag: Int, callback: (Boolean, String) -> Unit) {
         val service = JarvisAccessibilityService.instance
@@ -234,8 +235,7 @@ class NodeActionEngine(
             return
         }
 
-        val elements = service.dumpScreenElements()
-        val targetElement = elements.find { it.tag == tag }
+        val targetElement = service.findTaggedElement(tag)
         if (targetElement != null) {
             val clicked = service.clickNode(targetElement.node)
             if (clicked) {
@@ -243,11 +243,12 @@ class NodeActionEngine(
                 return
             }
         }
-        callback(false, "Tag [${tag}] par click nahi ho saka Sir.")
+        callback(false, "Tag [${tag}] par click nahi ho saka (element invalid ya screen badal gayi).")
     }
 
     /**
      * Universal Text Typing into tagged input field.
+     * Verifies element is actually an active editable field before typing.
      */
     fun typeTextByTag(tag: Int, text: String, callback: (Boolean, String) -> Unit) {
         val service = JarvisAccessibilityService.instance
@@ -256,10 +257,15 @@ class NodeActionEngine(
             return
         }
 
-        val elements = service.dumpScreenElements()
-        val targetElement = elements.find { it.tag == tag }
+        val targetElement = service.findTaggedElement(tag)
         if (targetElement != null) {
-            val typed = service.typeText(targetElement.node, text)
+            val node = targetElement.node
+            val canEdit = node.isEditable || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }
+            if (!canEdit) {
+                callback(false, "Tag [${tag}] abhi editable input_field nahi hai — pehle is par tap karein.")
+                return
+            }
+            val typed = service.typeText(node, text)
             if (typed) {
                 callback(true, "Element [${tag}] me text likh diya hai Sir.")
                 return
