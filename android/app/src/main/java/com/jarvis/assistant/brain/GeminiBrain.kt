@@ -26,6 +26,12 @@ data class UIActionDecision(
     val summary: String? = null
 )
 
+data class SocialIntent(
+    val actionType: String, // "dm", "story", "follow", "reels", "other"
+    val target: String,
+    val message: String
+)
+
 class GeminiBrain(
     private val apiKey: String,
     private val memoryManager: JarvisMemoryManager? = null
@@ -191,6 +197,75 @@ class GeminiBrain(
             }
         }
         UIActionDecision("done", null, null, null, null)
+    }
+
+    /**
+     * Parses a Hinglish/English social app goal (e.g. "Anuj ko hello bhejo") into structured intent
+     * in a single fast request (run in parallel with app launch).
+     */
+    suspend fun extractSocialIntent(instruction: String): SocialIntent = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank() || apiKey.startsWith("your_")) {
+            return@withContext SocialIntent("other", "", "")
+        }
+
+        val clean = instruction.replace("\"", "'").trim()
+        val prompt = """
+Extract the exact social app intent from Sir's command: "$clean"
+
+Classify "actionType":
+- "dm": sending a direct message/reply to a person (e.g. "Anuj ko hello bhejo", "Rahul ko message karo ki main busy hoon").
+- "story": watching/opening someone's story or status (e.g. "Rahul ki story dikhao", "Anuj ka status dekho").
+- "follow": following or opening a new account/profile (e.g. "virat kohli ko follow karo", "Neha ka account open karo").
+- "reels": opening, playing, or scrolling Reels/short videos (e.g. "reels chalao", "next reel", "reels dekho").
+- "other": anything else.
+
+OUTPUT ONLY RAW JSON:
+{"actionType":"dm|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text to send if dm, else empty string>"}
+""".trimIndent()
+
+        for (model in models) {
+            try {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+                val requestPayload = JsonObject().apply {
+                    val contents = com.google.gson.JsonArray().apply {
+                        add(JsonObject().apply {
+                            val parts = com.google.gson.JsonArray().apply {
+                                add(JsonObject().apply { addProperty("text", prompt) })
+                            }
+                            add("parts", parts)
+                        })
+                    }
+                    add("contents", contents)
+                    val genConfig = JsonObject().apply {
+                        addProperty("temperature", 0.0)
+                        addProperty("response_mime_type", "application/json")
+                    }
+                    add("generation_config", genConfig)
+                }
+
+                val request = Request.Builder()
+                    .url(url)
+                    .post(requestPayload.toString().toRequestBody(jsonMediaType))
+                    .build()
+
+                val response = client.newCall(request).execute()
+                val body = response.body?.string() ?: ""
+                if (response.isSuccessful) {
+                    val jsonResponse = gson.fromJson(body, JsonObject::class.java)
+                    val textContent = jsonResponse.getAsJsonArray("candidates")?.get(0)?.asJsonObject
+                        ?.getAsJsonObject("content")?.getAsJsonArray("parts")?.get(0)?.asJsonObject
+                        ?.get("text")?.asString ?: ""
+                    val parsed = gson.fromJson(textContent, JsonObject::class.java)
+                    val actionType = parsed.get("actionType")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.lowercase()?.trim() ?: "other"
+                    val target = parsed.get("target")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim() ?: ""
+                    val msg = parsed.get("message")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim() ?: ""
+                    return@withContext SocialIntent(actionType, target, msg)
+                }
+            } catch (e: Exception) {
+                Log.w("GeminiBrain", "SocialIntent parse error on $model: ${e.message}")
+            }
+        }
+        SocialIntent("other", "", "")
     }
 
     /**

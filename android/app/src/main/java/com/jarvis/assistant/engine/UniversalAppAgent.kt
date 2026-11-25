@@ -7,6 +7,7 @@ import com.jarvis.assistant.brain.GeminiBrain
 import com.jarvis.assistant.security.AutoUnlockManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -43,21 +44,56 @@ class UniversalAppAgent(
                 return@launch
             }
 
+            val lowerApp = appName.lowercase().trim()
+            val isInstagram = lowerApp.contains("instagram") || lowerApp.contains("insta")
+
+            // Parse social goal in parallel while launching app (0ms overhead)
+            val socialIntentJob = if (isInstagram) {
+                async { geminiBrain.extractSocialIntent(instruction) }
+            } else {
+                null
+            }
+
             val openedMsg = systemController.openApp(appName)
             if (openedMsg.contains("nahi mila")) {
+                socialIntentJob?.cancel()
                 callback(false, openedMsg)
                 return@launch
             }
 
-            delay(1200) // Initial wait for app window or App Lock to render
+            // Poll dynamically every 120ms until target app (or App Lock) renders (fast on warm launch!)
+            delay(250)
+            val launchStart = System.currentTimeMillis()
+            while (System.currentTimeMillis() - launchStart < 2000) {
+                if (AutoUnlockManager.isAppLockScreen(service)) break
+                val activePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
+                val appReady = activePkg.isNotBlank() && activePkg != context.packageName.lowercase() &&
+                    (!isInstagram || activePkg.contains("instagram"))
+                if (appReady && service.dumpScreenElements().isNotEmpty()) break
+                delay(120)
+            }
 
             // 2. Auto-unlock App Lock if target app is protected (taps Use Privacy Password / PIN / Pattern dynamically)
             if (AutoUnlockManager.isAppLockScreen(service)) {
                 AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
-                delay(900)
+                delay(700)
             }
 
             val actionHistory = mutableListOf<String>()
+
+            // 3. Instant Live-Tree Fast-Path for Instagram (DMs, Stories, Follow, Reels) — zero static coords!
+            if (socialIntentJob != null) {
+                val socialIntent = socialIntentJob.await()
+                if (socialIntent.actionType != "other") {
+                    val fastResult = InstagramTreeNavigator.execute(service, socialIntent, instruction)
+                    if (fastResult.handled) {
+                        callback(fastResult.success, fastResult.message)
+                        return@launch
+                    }
+                    actionHistory.addAll(fastResult.stepsTaken)
+                }
+            }
+
             val maxTurns = 10
             var turn = 0
             var finalMsg = ""
@@ -65,13 +101,15 @@ class UniversalAppAgent(
 
             while (turn < maxTurns && !isCompleted) {
                 turn++
-                delay(1000) // Allow animations, screen transitions, or search loading to settle
+                if (turn > 1) {
+                    delay(350) // Short settle time between turns (replaces 1.7s blind sleep)
+                }
 
                 // Auto-unlock App Lock if it appeared midway
                 if (AutoUnlockManager.isAppLockScreen(service)) {
                     AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
                     actionHistory.add("Auto-unlocked App Lock")
-                    delay(900)
+                    delay(700)
                     continue
                 }
 
@@ -173,7 +211,7 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                         } else {
                             actionHistory.add("FAILED to tap [$targetTag] ($tapReply) — inspect updated UI tree")
                         }
-                        delay(700)
+                        delay(450)
                     }
                     "type_tag" -> {
                         val targetTag = decision.tag ?: 1
@@ -190,18 +228,18 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                         } else {
                             actionHistory.add("FAILED to type '$preview' into [$targetTag] ($typeReply)")
                         }
-                        delay(700)
+                        delay(500)
                     }
                     "scroll_screen" -> {
                         val dir = decision.direction ?: "down"
                         service.scroll(dir)
                         actionHistory.add("Scrolled screen $dir")
-                        delay(800)
+                        delay(550)
                     }
                     "back" -> {
                         service.performBack()
                         actionHistory.add("Pressed back button")
-                        delay(600)
+                        delay(450)
                     }
                     else -> {
                         isCompleted = true

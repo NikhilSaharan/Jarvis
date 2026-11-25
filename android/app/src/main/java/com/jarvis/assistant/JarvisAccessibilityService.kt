@@ -482,10 +482,56 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Direct node action: Set Text with Clipboard Fallback & Smart Multi-Line Handling.
-     * Prevents accidental Enter submission on multi-line chat/note inputs while preserving single-line Search submit.
+     * Single clean OS-level touch tap at the node's live visible bounds center.
+     * Triggers TouchListener / Compose / Meta Litho components reliably without double-tapping.
      */
-    fun typeText(node: AccessibilityNodeInfo?, text: String): Boolean {
+    suspend fun tapNodeSingleTouch(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        node.refresh()
+
+        var clickableTarget: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (clickableTarget != null && !clickableTarget.isClickable && depth < 4) {
+            clickableTarget = clickableTarget.parent
+            depth++
+        }
+        val targetNode = if (clickableTarget != null && clickableTarget.isClickable) clickableTarget else node
+
+        val bounds = Rect()
+        targetNode.getBoundsInScreen(bounds)
+        val dm = resources.displayMetrics
+        val screenRect = Rect(0, 0, dm.widthPixels, dm.heightPixels)
+
+        if (bounds.width() > 0 && bounds.height() > 0 && Rect.intersects(bounds, screenRect)) {
+            val tapped = tapCoordinatesAwait(bounds.centerX().toFloat(), bounds.centerY().toFloat(), 45L)
+            if (tapped) return true
+        }
+        return targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    /**
+     * Swipes horizontally inside a live container's bounds (e.g. horizontal Story tray).
+     */
+    suspend fun swipeHorizontalInRect(rect: Rect, toLeft: Boolean = true): Boolean {
+        if (rect.width() < 100 || rect.height() < 20) return false
+        val cy = rect.centerY().toFloat()
+        val startX = if (toLeft) rect.right - rect.width() * 0.15f else rect.left + rect.width() * 0.15f
+        val endX = if (toLeft) rect.left + rect.width() * 0.15f else rect.right - rect.width() * 0.15f
+        val path = Path().apply {
+            moveTo(startX, cy)
+            lineTo(endX, cy)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 280L))
+            .build()
+        return dispatchGestureAwait(gesture)
+    }
+
+    /**
+     * Direct node action: Set Text with Clipboard Fallback & Smart Multi-Line Handling.
+     * Allows callers to override pressEnter (e.g. false for live-filtering DM search & chat inputs).
+     */
+    fun typeText(node: AccessibilityNodeInfo?, text: String, pressEnter: Boolean? = null): Boolean {
         if (node == null) return false
         node.refresh()
 
@@ -510,8 +556,9 @@ class JarvisAccessibilityService : AccessibilityService() {
             success = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
         }
 
-        // 4. Only trigger IME ENTER for single-line fields (never for multi-line notes, tables, or chat boxes)
-        if (success && !text.contains("\n") && !node.isMultiLine && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        // 4. Only trigger IME ENTER when enabled and single-line
+        val shouldEnter = pressEnter ?: (!text.contains("\n") && !node.isMultiLine)
+        if (success && shouldEnter && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
             } catch (e: Exception) {}

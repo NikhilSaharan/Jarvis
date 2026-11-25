@@ -1,6 +1,6 @@
 {
-  "versionCode": 7,
-  "versionName": "1.0.6",
+  "versionCode": 8,
+  "versionName": "1.0.7",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Upgraded dynamic UI tree engine for accurate Instagram DMs, Stories, Follow, and Reels navigation without static coordinates."
+  "changelog": "Added instant in-memory live-tree Instagram navigation (~2-3s DMs, Stories, Follow, Reels) with zero static coordinates and faster app loop timing."
 }
