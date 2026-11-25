@@ -1,6 +1,6 @@
 {
-  "versionCode": 5,
-  "versionName": "1.0.4",
+  "versionCode": 6,
+  "versionName": "1.0.5",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Interactive visual 3x3 pattern pad, visible dark password setup, and zero-static-coordinate dynamic screen & app-lock unlocking."
+  "changelog": "Fixed WhatsApp voice recording button accidental tap after sending a message."
 }

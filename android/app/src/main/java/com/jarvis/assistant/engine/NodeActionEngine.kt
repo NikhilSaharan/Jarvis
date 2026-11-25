@@ -1,8 +1,10 @@
 package com.jarvis.assistant.engine
 
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.accessibility.AccessibilityNodeInfo
 import com.jarvis.assistant.JarvisAccessibilityService
 import com.jarvis.assistant.security.AutoUnlockManager
 import kotlinx.coroutines.CoroutineScope
@@ -154,24 +156,30 @@ class NodeActionEngine(
                 delay(700)
             }
 
-            // Poll for Send button by Resource ID or Description (up to 5.0 seconds)
-            val sendBtn = service.pollForNode(timeoutMs = 5000) { node ->
-                val resId = node.viewIdResourceName?.lowercase() ?: ""
-                val cd = node.contentDescription?.toString()?.lowercase() ?: ""
-                val text = node.text?.toString()?.lowercase() ?: ""
-
-                resId.contains("send") || cd == "send" || cd == "भेजें" || cd.contains("bhej") || text == "send"
-            }
+            // Poll for genuine Send button (explicitly excluding Voice/Mic button) up to 5.0 seconds
+            val sendBtn = service.pollForNode(timeoutMs = 5000) { isWhatsAppSendButton(it) }
 
             if (sendBtn != null) {
-                service.tapElement(sendBtn)
-                delay(300)
-                service.tapElement(sendBtn)
+                // Single click ONLY: never use dual-action tapElement() or double-tap here because WhatsApp
+                // swaps Send with the Voice Recording Mic button at the exact same coordinates upon sending!
+                service.clickNode(sendBtn)
+                delay(450)
+
+                // Re-query fresh UI tree: tap via coordinates ONLY if Send button genuinely didn't trigger
+                val stillSending = service.findNodeByPredicate { isWhatsAppSendButton(it) }
+                if (stillSending != null) {
+                    val b = Rect()
+                    stillSending.getBoundsInScreen(b)
+                    if (b.width() > 0 && b.height() > 0) {
+                        service.tapCoordinatesAwait(b.centerX().toFloat(), b.centerY().toFloat())
+                    }
+                }
+
                 callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
                 return@launch
             }
 
-            // Fallback: If not sent via pre-fill, type into input field and click Send
+            // Fallback: If not sent via pre-fill, type into input field and click Send once
             val inputField = service.pollForNode(timeoutMs = 2500) { node ->
                 val resId = node.viewIdResourceName?.lowercase() ?: ""
                 val text = node.text?.toString() ?: ""
@@ -181,13 +189,9 @@ class NodeActionEngine(
             if (inputField != null) {
                 service.typeText(inputField, message)
                 delay(400)
-                val retrySend = service.pollForNode(timeoutMs = 2500) { node ->
-                    val resId = node.viewIdResourceName?.lowercase() ?: ""
-                    val cd = node.contentDescription?.toString()?.lowercase() ?: ""
-                    resId.contains("send") || cd.contains("send") || cd.contains("भेजें")
-                }
+                val retrySend = service.pollForNode(timeoutMs = 2500) { isWhatsAppSendButton(it) }
                 if (retrySend != null) {
-                    service.tapElement(retrySend)
+                    service.clickNode(retrySend)
                     callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
                     return@launch
                 }
@@ -195,6 +199,29 @@ class NodeActionEngine(
 
             callback(false, "WhatsApp me message send nahi ho saka Sir.")
         }
+    }
+
+    /**
+     * Strictly matches WhatsApp's text Send button and rejects Voice Recording / Mic buttons
+     * that occupy the identical screen position immediately after sending.
+     */
+    private fun isWhatsAppSendButton(node: AccessibilityNodeInfo): Boolean {
+        val resId = node.viewIdResourceName?.lowercase() ?: ""
+        val cd = node.contentDescription?.toString()?.lowercase()?.trim() ?: ""
+        val text = node.text?.toString()?.lowercase()?.trim() ?: ""
+        val cls = node.className?.toString()?.lowercase() ?: ""
+
+        val isVoiceOrMic = resId.contains("voice") || resId.contains("mic") || resId.contains("audio") ||
+                resId.contains("record") || resId.contains("ptt") ||
+                cd.contains("voice") || cd.contains("mic") || cd.contains("audio") ||
+                cd.contains("record") || cd.contains("वॉइस") || cd.contains("रिकॉर्ड")
+        if (isVoiceOrMic) return false
+
+        val isSendId = resId.endsWith(":id/send") || resId == "send"
+        val isSendDesc = cd == "send" || cd == "भेजें" || (cd.contains("bhej") && node.isClickable)
+        val isSendButtonText = text == "send" && cls.contains("button")
+
+        return isSendId || isSendDesc || isSendButtonText
     }
 
     /**
