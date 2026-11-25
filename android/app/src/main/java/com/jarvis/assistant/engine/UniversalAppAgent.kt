@@ -137,14 +137,17 @@ TREE-BASED NAVIGATION & EXECUTION RULES (FOLLOW LIVE UI TREE STRICTLY — ZERO R
      * Do NOT use the public Explore/Account Search tab first!
      * Look in the live tree for the Messages / Direct / Inbox / Chat button or icon and tap it FIRST.
      * Inside Messages, tap the chat Search bar/button (tap it first if it shows as 'button' instead of 'input_field'), type the recipient's name, tap the matching chat row, tap the message 'input_field', type the message, and tap Send.
+   - FRIEND-SENT REEL / VIDEO / POST IN DM (e.g. "Vishal Yadav ne jo latest reel bheji hai wo chalao"):
+     * Do NOT open the generic Reels bottom tab!
+     * Go to Messages / Inbox -> search that friend -> open their chat thread -> tap the latest (bottom-most) shared reel/video preview card inside the chat!
    - STORY / STATUS WATCHING GOAL (e.g. "story dikhao", "story dekho"):
      * First check the live tree on the current screen for a visible story item matching the person's name (e.g. "<name>'s story") — if visible, tap it directly.
-     * If not visible in the current story tray, go to Messages / Inbox (or normal Search) -> search the person -> open their chat/profile -> tap their story avatar/ring/View Story element in the tree. NEVER tap unrelated feed posts or ads.
+     * If not visible in the current story tray, go to Messages / Inbox FIRST (so famous public strangers are NOT picked over friends) -> search the friend -> tap their story avatar OR open their chat -> tap header name/avatar -> tap their story ring/avatar! Only use Explore Search if absent in Messages. NEVER tap unrelated feed posts or ads.
    - FOLLOW / OPEN A NEW ACCOUNT OR PROFILE GOAL (e.g. "follow karo", "account kholo"):
      * Tap the normal Search / Explore tab or icon from the navigation bar (NOT Messages).
      * Tap the Search bar first if it is labeled 'button', wait for an 'input_field' to appear, then type the account/username.
      * Tap the matching account row in results (switch to an "Accounts" tab/filter if only posts grid appears), open their profile, and tap "Follow" (or "Follow Back"). If it already says "Following" or "Requested", do NOT tap again — choose "done".
-   - REELS / SHORTS / VIDEO TAB GOAL (e.g. "reel chalao", "reels dekho", "next reel"):
+   - GENERIC REELS / SHORTS / VIDEO TAB GOAL (e.g. "reel chalao", "reels dekho", "next reel" with NO friend sender):
      * First check the live tree to see if the Reels / Videos tab is already active (marked 'selected') or already showing a Reels player.
      * If NOT on the Reels tab yet, tap the "Reels" (or Video/Shorts) tab/button FIRST instead of scrolling Home photos. Once on Reels, scroll if asked or choose "done".
    - GENERAL MEDIA / MOVIES / SHOWS / ITEMS:

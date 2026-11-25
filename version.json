@@ -1,6 +1,6 @@
 {
-  "versionCode": 8,
-  "versionName": "1.0.7",
+  "versionCode": 9,
+  "versionName": "1.0.8",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Added instant in-memory live-tree Instagram navigation (~2-3s DMs, Stories, Follow, Reels) with zero static coordinates and faster app loop timing."
+  "changelog": "Instant DM search & sending (~1-2s), friend Story lookup via Messages before Explore search, and playing friend-shared reels directly inside DM chats."
 }

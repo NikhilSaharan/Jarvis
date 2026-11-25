@@ -214,13 +214,14 @@ Extract the exact social app intent from Sir's command: "$clean"
 
 Classify "actionType":
 - "dm": sending a direct message/reply to a person (e.g. "Anuj ko hello bhejo", "Rahul ko message karo ki main busy hoon").
+- "chat_media": opening or playing a reel, post, or video that a specific friend/person SENT in chat/DM (e.g. "Vishal Yadav ne jo latest reel bheji hai wo chalao", "Anuj ki bheji hui reel dekho").
 - "story": watching/opening someone's story or status (e.g. "Rahul ki story dikhao", "Anuj ka status dekho").
-- "follow": following or opening a new account/profile (e.g. "virat kohli ko follow karo", "Neha ka account open karo").
-- "reels": opening, playing, or scrolling Reels/short videos (e.g. "reels chalao", "next reel", "reels dekho").
+- "follow": following or opening a new public account/profile (e.g. "virat kohli ko follow karo", "Neha ka account open karo").
+- "reels": opening, playing, or scrolling the general Reels feed with NO specific sender named (e.g. "reels chalao", "next reel", "reels dekho").
 - "other": anything else.
 
 OUTPUT ONLY RAW JSON:
-{"actionType":"dm|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text to send if dm, else empty string>"}
+{"actionType":"dm|chat_media|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text to send if dm, else empty string>"}
 """.trimIndent()
 
         for (model in models) {
