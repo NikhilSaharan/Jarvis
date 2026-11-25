@@ -28,6 +28,7 @@ import com.jarvis.assistant.engine.TelephonyHelper
 import com.jarvis.assistant.engine.UniversalAppAgent
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.scheduler.ScheduledTaskManager
+import com.jarvis.assistant.security.AutoUnlockManager
 import com.jarvis.assistant.security.BankingProtectionManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import com.jarvis.assistant.voice.SpeechRecognizerHelper
@@ -288,30 +289,43 @@ class FloatingBubbleService : Service() {
                 if (!alreadySpoken) speakerHelper.speak(reply)
             }
             "make_phone_call" -> {
-                val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: "").trim()
-                val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(target)
-                if (resolvedNumber == null && target.replace(Regex("[^0-9+]"), "").length < 7) {
-                    speakerHelper.speak("Sir, '$target' ka phone number contacts me nahi mila.")
-                } else {
-                    val numberToCall = resolvedNumber ?: target
-                    val reply = systemController.makePhoneCall(numberToCall)
-                    speakerHelper.speak(reply)
+                runAfterScreenUnlock {
+                    val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: "").trim()
+                    val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(target)
+                    if (resolvedNumber == null && target.replace(Regex("[^0-9+]"), "").length < 7) {
+                        speakerHelper.speak("Sir, '$target' ka phone number contacts me nahi mila.")
+                    } else {
+                        val numberToCall = resolvedNumber ?: target
+                        val reply = systemController.makePhoneCall(numberToCall)
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "send_sms" -> {
-                val rec = (args["recipient"] as? String) ?: ""
-                val msg = (args["message"] as? String) ?: ""
-                systemController.sendSms(rec, msg)
+                runAfterScreenUnlock {
+                    val rec = (args["recipient"] as? String) ?: ""
+                    val msg = (args["message"] as? String) ?: ""
+                    systemController.sendSms(rec, msg)
+                }
             }
             "play_youtube" -> {
-                val q = (args["query"] as? String) ?: "trending songs"
-                systemController.playYoutube(q)
+                runAfterScreenUnlock {
+                    val q = (args["query"] as? String) ?: "trending songs"
+                    systemController.playYoutube(q) { _ ->
+                        serviceScope.launch {
+                            delay(900)
+                            AutoUnlockManager.unlockAppLockIfPresent(this@FloatingBubbleService, geminiBrain)
+                        }
+                    }
+                }
             }
             "open_app" -> {
-                val app = (args["app_name"] as? String) ?: ""
-                systemController.openApp(app)
+                runAfterScreenUnlock(checkAppLockAfter = true) {
+                    val app = (args["app_name"] as? String) ?: ""
+                    systemController.openApp(app)
+                }
             }
             "send_whatsapp_message" -> {
                 val rec = (args["recipient"] as? String) ?: ""
@@ -328,23 +342,53 @@ class FloatingBubbleService : Service() {
                 }
             }
             "tap_tag" -> {
-                val tag = (args["tag"] as? Number)?.toInt() ?: 1
-                nodeActionEngine.tapByTag(tag) { _, reply ->
-                    speakerHelper.speak(reply)
+                runAfterScreenUnlock {
+                    val tag = (args["tag"] as? Number)?.toInt() ?: 1
+                    nodeActionEngine.tapByTag(tag) { _, reply ->
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "type_tag" -> {
-                val tag = (args["tag"] as? Number)?.toInt() ?: 1
-                val text = (args["text"] as? String) ?: ""
-                nodeActionEngine.typeTextByTag(tag, text) { _, reply ->
-                    speakerHelper.speak(reply)
+                runAfterScreenUnlock {
+                    val tag = (args["tag"] as? Number)?.toInt() ?: 1
+                    val text = (args["text"] as? String) ?: ""
+                    nodeActionEngine.typeTextByTag(tag, text) { _, reply ->
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "scroll_screen" -> {
-                val dir = (args["direction"] as? String) ?: "down"
-                nodeActionEngine.scrollScreen(dir) { _, reply ->
-                    speakerHelper.speak(reply)
+                runAfterScreenUnlock {
+                    val dir = (args["direction"] as? String) ?: "down"
+                    nodeActionEngine.scrollScreen(dir) { _, reply ->
+                        speakerHelper.speak(reply)
+                    }
                 }
+            }
+        }
+    }
+
+    private fun runAfterScreenUnlock(
+        checkAppLockAfter: Boolean = false,
+        block: () -> Unit
+    ) {
+        if (!AutoUnlockManager.isScreenLockedOrOff(this)) {
+            block()
+            if (checkAppLockAfter) {
+                serviceScope.launch {
+                    delay(900)
+                    AutoUnlockManager.unlockAppLockIfPresent(this@FloatingBubbleService, geminiBrain)
+                }
+            }
+            return
+        }
+        serviceScope.launch {
+            AutoUnlockManager.ensureScreenUnlocked(this@FloatingBubbleService)
+            block()
+            if (checkAppLockAfter) {
+                delay(1000)
+                AutoUnlockManager.unlockAppLockIfPresent(this@FloatingBubbleService, geminiBrain)
             }
         }
     }

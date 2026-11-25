@@ -11,9 +11,11 @@ import com.jarvis.assistant.MainActivity
 import com.jarvis.assistant.engine.NodeActionEngine
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.engine.TelephonyHelper
+import com.jarvis.assistant.security.AutoUnlockManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class TaskAlarmReceiver : BroadcastReceiver() {
@@ -56,6 +58,9 @@ class TaskAlarmReceiver : BroadcastReceiver() {
             val speakerHelper = SpeakerHelper(context)
 
             CoroutineScope(Dispatchers.Main).launch {
+                if (action in listOf("make_phone_call", "play_youtube", "open_app")) {
+                    AutoUnlockManager.ensureScreenUnlocked(context)
+                }
                 when (action) {
                     "make_phone_call" -> {
                         val target = (args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
@@ -83,10 +88,14 @@ class TaskAlarmReceiver : BroadcastReceiver() {
                     "play_youtube" -> {
                         val q = (args["query"] as? String) ?: "trending songs"
                         systemController.playYoutube(q)
+                        delay(1000)
+                        AutoUnlockManager.unlockAppLockIfPresent(context)
                     }
                     "open_app" -> {
                         val app = (args["app_name"] as? String) ?: ""
                         systemController.openApp(app)
+                        delay(1000)
+                        AutoUnlockManager.unlockAppLockIfPresent(context)
                     }
                     "set_dnd" -> {
                         val enabled = (args["enabled"] as? Boolean) ?: true

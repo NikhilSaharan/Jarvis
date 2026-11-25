@@ -6,16 +6,21 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.InputType
 import android.util.Base64
 import android.util.Log
+import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
@@ -39,11 +44,13 @@ import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.scheduler.ScheduledTaskManager
 import com.jarvis.assistant.security.AutoUnlockManager
 import com.jarvis.assistant.security.BankingProtectionManager
+import com.jarvis.assistant.security.PatternLockPadView
 import com.jarvis.assistant.update.AppUpdateManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import com.jarvis.assistant.voice.SpeechRecognizerHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -360,114 +367,376 @@ class MainActivity : AppCompatActivity() {
         val currentAppType = AutoUnlockManager.getAppLockType(this)
         val currentAppVal = AutoUnlockManager.getAppLockValue(this)
 
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(48, 24, 48, 24)
+        val darkBg = Color.parseColor("#0A0E17")
+        val cardBg = Color.parseColor("#141D2B")
+        val cyan = Color.parseColor("#00E5FF")
+        val secondaryText = Color.parseColor("#B0BEC5")
+        val greenActive = Color.parseColor("#00E676")
+        val gold = Color.parseColor("#FFD700")
+        val cyanTint = ColorStateList.valueOf(cyan)
+
+        fun createInputBoxDrawable(): GradientDrawable {
+            return GradientDrawable().apply {
+                setColor(cardBg)
+                cornerRadius = 16f
+                setStroke(2, Color.parseColor("#5500E5FF"))
+            }
         }
 
+        val scrollView = ScrollView(this).apply {
+            setBackgroundColor(darkBg)
+        }
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(darkBg)
+            setPadding(48, 36, 48, 24)
+        }
+        scrollView.addView(container)
+
+        val tvHeader = TextView(this).apply {
+            text = "🔐 Auto-Unlock & Passwords"
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(cyan)
+            textSize = 18f
+            setPadding(0, 0, 0, 8)
+        }
+        container.addView(tvHeader)
+
         val tvInfo = TextView(this).apply {
-            text = "J.A.R.V.I.S. phone screen aur WhatsApp/Instagram app lock ko automatically unlock kar sakta hai Sir.\n"
-            textSize = 13f
-            setTextColor(Color.WHITE)
+            text = "J.A.R.V.I.S. zaroorat padne par hi lock check karke dynamic tareeqe se Phone Lock aur App Lock kholega. Bina lock ke direct execute hoga.\n"
+            textSize = 12.5f
+            setTextColor(secondaryText)
         }
         container.addView(tvInfo)
 
+        // ─── SECTION 1: PHONE SCREEN LOCK ──────────────────────────────
         val tvScreenLabel = TextView(this).apply {
-            text = "1. Phone Lock Screen Type:"
+            text = "1. Phone Lock Screen:"
             setTypeface(null, Typeface.BOLD)
-            setTextColor(ContextCompat.getColor(context, R.color.jarvis_cyan))
-            textSize = 14f
+            setTextColor(cyan)
+            textSize = 14.5f
+            setPadding(0, 8, 0, 6)
         }
         container.addView(tvScreenLabel)
 
         val rgScreenType = RadioGroup(this).apply {
             orientation = RadioGroup.HORIZONTAL
         }
-        val rbNone = RadioButton(this).apply { text = "None"; id = View.generateViewId(); setTextColor(Color.WHITE) }
-        val rbPin = RadioButton(this).apply { text = "PIN"; id = View.generateViewId(); setTextColor(Color.WHITE) }
-        val rbPattern = RadioButton(this).apply { text = "Pattern"; id = View.generateViewId(); setTextColor(Color.WHITE) }
-        rgScreenType.addView(rbNone)
-        rgScreenType.addView(rbPin)
-        rgScreenType.addView(rbPattern)
+        val rbScreenNone = RadioButton(this).apply {
+            text = "None"
+            id = View.generateViewId()
+            setTextColor(Color.WHITE)
+            buttonTintList = cyanTint
+        }
+        val rbScreenPin = RadioButton(this).apply {
+            text = "PIN"
+            id = View.generateViewId()
+            setTextColor(Color.WHITE)
+            buttonTintList = cyanTint
+        }
+        val rbScreenPattern = RadioButton(this).apply {
+            text = "Pattern"
+            id = View.generateViewId()
+            setTextColor(Color.WHITE)
+            buttonTintList = cyanTint
+        }
+        rgScreenType.addView(rbScreenNone)
+        rgScreenType.addView(rbScreenPin)
+        rgScreenType.addView(rbScreenPattern)
         container.addView(rgScreenType)
 
-        when (currentScreenType) {
-            AutoUnlockManager.TYPE_PIN -> rbPin.isChecked = true
-            AutoUnlockManager.TYPE_PATTERN -> rbPattern.isChecked = true
-            else -> rbNone.isChecked = true
+        // Screen PIN UI
+        val screenPinLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 12, 0, 12)
         }
-
-        val etScreenVal = EditText(this).apply {
-            hint = "Screen PIN ya Pattern (e.g. 1234 ya 1-2-3-6)"
-            setText(currentScreenVal)
+        val etScreenPin = EditText(this).apply {
+            hint = "Screen PIN daalein (e.g. 1234)"
+            background = createInputBoxDrawable()
+            setPadding(28, 22, 28, 22)
             setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            textSize = 14f
+            setHintTextColor(Color.parseColor("#8A99AD"))
+            textSize = 15f
+            inputType = InputType.TYPE_CLASS_NUMBER
+            if (currentScreenType == AutoUnlockManager.TYPE_PIN) setText(currentScreenVal)
         }
-        container.addView(etScreenVal)
+        screenPinLayout.addView(etScreenPin)
 
-        val tvPatternHint = TextView(this).apply {
-            text = "Pattern Dots: 1 2 3 (top), 4 5 6 (mid), 7 8 9 (bot). Example: 1-2-3-6-9\n"
+        val cbScreenAlpha = CheckBox(this).apply {
+            text = "Alphanumeric Password (A-Z + Numbers)"
+            setTextColor(secondaryText)
+            textSize = 12f
+            buttonTintList = cyanTint
+        }
+        cbScreenAlpha.setOnCheckedChangeListener { _, isChecked ->
+            etScreenPin.inputType = if (isChecked) {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            } else {
+                InputType.TYPE_CLASS_NUMBER
+            }
+            etScreenPin.setSelection(etScreenPin.text.length)
+        }
+        if (currentScreenType == AutoUnlockManager.TYPE_PIN && currentScreenVal.any { !it.isDigit() }) {
+            cbScreenAlpha.isChecked = true
+        }
+        screenPinLayout.addView(cbScreenAlpha)
+        container.addView(screenPinLayout)
+
+        // Screen Pattern UI (Interactive 3x3 Visual Pad)
+        val screenPatternLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 12, 0, 12)
+        }
+        val tvScreenPatternStatus = TextView(this).apply {
+            textSize = 12.5f
+            setPadding(0, 0, 0, 8)
+        }
+        val screenPatternPad = PatternLockPadView(this)
+        if (currentScreenType == AutoUnlockManager.TYPE_PATTERN) {
+            val savedDots = AutoUnlockManager.parsePatternDots(currentScreenVal)
+            screenPatternPad.setPattern(savedDots)
+        }
+        fun updateScreenPatternStatus(dots: List<Int>) {
+            if (dots.size >= 2) {
+                tvScreenPatternStatus.text = "✅ Screen Pattern: ${dots.joinToString(" → ")} (${dots.size} dots)"
+                tvScreenPatternStatus.setTextColor(greenActive)
+            } else {
+                tvScreenPatternStatus.text = "Neeche 3×3 dots par ungli se pattern draw karein"
+                tvScreenPatternStatus.setTextColor(gold)
+            }
+        }
+        updateScreenPatternStatus(screenPatternPad.getPatternDots())
+        screenPatternPad.onPatternChanged = { dots -> updateScreenPatternStatus(dots) }
+
+        val btnClearScreenPattern = Button(this).apply {
+            text = "Clear Pattern"
             textSize = 11f
-            setTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
+            setBackgroundColor(cardBg)
+            setOnClickListener { screenPatternPad.clearPattern() }
         }
-        container.addView(tvPatternHint)
+        screenPatternLayout.addView(tvScreenPatternStatus)
+        screenPatternLayout.addView(screenPatternPad)
+        screenPatternLayout.addView(btnClearScreenPattern)
+        container.addView(screenPatternLayout)
 
+        fun refreshScreenVisibility() {
+            screenPinLayout.visibility = if (rbScreenPin.isChecked) View.VISIBLE else View.GONE
+            screenPatternLayout.visibility = if (rbScreenPattern.isChecked) View.VISIBLE else View.GONE
+        }
+        when (currentScreenType) {
+            AutoUnlockManager.TYPE_PIN -> rbScreenPin.isChecked = true
+            AutoUnlockManager.TYPE_PATTERN -> rbScreenPattern.isChecked = true
+            else -> rbScreenNone.isChecked = true
+        }
+        refreshScreenVisibility()
+        rgScreenType.setOnCheckedChangeListener { _, _ -> refreshScreenVisibility() }
+
+        // ─── SECTION 2: APP LOCK (WHATSAPP, INSTA, NOTES) ──────────────
         val tvAppLabel = TextView(this).apply {
-            text = "2. App Lock (WhatsApp, Insta, etc.):"
+            text = "\n2. App Lock (WhatsApp, Insta, OnePlus Lock):"
             setTypeface(null, Typeface.BOLD)
-            setTextColor(ContextCompat.getColor(context, R.color.jarvis_cyan))
-            textSize = 14f
+            setTextColor(cyan)
+            textSize = 14.5f
+            setPadding(0, 8, 0, 6)
         }
         container.addView(tvAppLabel)
 
-        val cbSameAsScreen = CheckBox(this).apply {
-            text = "Screen lock wala password hi use karein"
-            isChecked = (currentAppType == AutoUnlockManager.TYPE_SAME_AS_SCREEN)
+        val rgAppType = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+        }
+        val rbAppSame = RadioButton(this).apply {
+            text = "Screen Lock wala hi use karein"
+            id = View.generateViewId()
             setTextColor(Color.WHITE)
-            textSize = 13f
+            buttonTintList = cyanTint
         }
-        container.addView(cbSameAsScreen)
-
-        val etAppVal = EditText(this).apply {
-            hint = "Alag App Lock PIN/Pattern"
-            setText(if (currentAppType != AutoUnlockManager.TYPE_SAME_AS_SCREEN) currentAppVal else "")
+        val rbAppPin = RadioButton(this).apply {
+            text = "Alag App Lock PIN / Privacy Password"
+            id = View.generateViewId()
             setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            textSize = 14f
-            visibility = if (cbSameAsScreen.isChecked) View.GONE else View.VISIBLE
+            buttonTintList = cyanTint
         }
-        container.addView(etAppVal)
-
-        cbSameAsScreen.setOnCheckedChangeListener { _, isChecked ->
-            etAppVal.visibility = if (isChecked) View.GONE else View.VISIBLE
+        val rbAppPattern = RadioButton(this).apply {
+            text = "Alag App Lock Pattern"
+            id = View.generateViewId()
+            setTextColor(Color.WHITE)
+            buttonTintList = cyanTint
         }
+        val rbAppNone = RadioButton(this).apply {
+            text = "No App Lock"
+            id = View.generateViewId()
+            setTextColor(Color.WHITE)
+            buttonTintList = cyanTint
+        }
+        rgAppType.addView(rbAppSame)
+        rgAppType.addView(rbAppPin)
+        rgAppType.addView(rbAppPattern)
+        rgAppType.addView(rbAppNone)
+        container.addView(rgAppType)
 
-        AlertDialog.Builder(this)
-            .setTitle("🔐 Auto-Unlock & Passwords")
-            .setView(container)
-            .setPositiveButton("Save") { _, _ ->
+        // App Lock PIN UI
+        val appPinLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 12, 0, 12)
+        }
+        val etAppPin = EditText(this).apply {
+            hint = "App Lock PIN / Privacy Password daalein"
+            background = createInputBoxDrawable()
+            setPadding(28, 22, 28, 22)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#8A99AD"))
+            textSize = 15f
+            inputType = InputType.TYPE_CLASS_NUMBER
+            if (currentAppType == AutoUnlockManager.TYPE_PIN) setText(currentAppVal)
+        }
+        appPinLayout.addView(etAppPin)
+
+        val cbAppAlpha = CheckBox(this).apply {
+            text = "Alphanumeric Privacy Password (A-Z + Numbers)"
+            setTextColor(secondaryText)
+            textSize = 12f
+            buttonTintList = cyanTint
+        }
+        cbAppAlpha.setOnCheckedChangeListener { _, isChecked ->
+            etAppPin.inputType = if (isChecked) {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            } else {
+                InputType.TYPE_CLASS_NUMBER
+            }
+            etAppPin.setSelection(etAppPin.text.length)
+        }
+        if (currentAppType == AutoUnlockManager.TYPE_PIN && currentAppVal.any { !it.isDigit() }) {
+            cbAppAlpha.isChecked = true
+        }
+        appPinLayout.addView(cbAppAlpha)
+        container.addView(appPinLayout)
+
+        // App Lock Pattern UI (Separate Interactive 3x3 Visual Pad)
+        val appPatternLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 12, 0, 12)
+        }
+        val tvAppPatternStatus = TextView(this).apply {
+            textSize = 12.5f
+            setPadding(0, 0, 0, 8)
+        }
+        val appPatternPad = PatternLockPadView(this)
+        if (currentAppType == AutoUnlockManager.TYPE_PATTERN) {
+            val savedAppDots = AutoUnlockManager.parsePatternDots(currentAppVal)
+            appPatternPad.setPattern(savedAppDots)
+        }
+        fun updateAppPatternStatus(dots: List<Int>) {
+            if (dots.size >= 2) {
+                tvAppPatternStatus.text = "✅ App Lock Pattern: ${dots.joinToString(" → ")} (${dots.size} dots)"
+                tvAppPatternStatus.setTextColor(greenActive)
+            } else {
+                tvAppPatternStatus.text = "Neeche 3×3 dots par App Lock pattern draw karein"
+                tvAppPatternStatus.setTextColor(gold)
+            }
+        }
+        updateAppPatternStatus(appPatternPad.getPatternDots())
+        appPatternPad.onPatternChanged = { dots -> updateAppPatternStatus(dots) }
+
+        val btnClearAppPattern = Button(this).apply {
+            text = "Clear App Pattern"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(cardBg)
+            setOnClickListener { appPatternPad.clearPattern() }
+        }
+        appPatternLayout.addView(tvAppPatternStatus)
+        appPatternLayout.addView(appPatternPad)
+        appPatternLayout.addView(btnClearAppPattern)
+        container.addView(appPatternLayout)
+
+        fun refreshAppVisibility() {
+            appPinLayout.visibility = if (rbAppPin.isChecked) View.VISIBLE else View.GONE
+            appPatternLayout.visibility = if (rbAppPattern.isChecked) View.VISIBLE else View.GONE
+        }
+        when (currentAppType) {
+            AutoUnlockManager.TYPE_PIN -> rbAppPin.isChecked = true
+            AutoUnlockManager.TYPE_PATTERN -> rbAppPattern.isChecked = true
+            AutoUnlockManager.TYPE_NONE -> rbAppNone.isChecked = true
+            else -> rbAppSame.isChecked = true
+        }
+        refreshAppVisibility()
+        rgAppType.setOnCheckedChangeListener { _, _ -> refreshAppVisibility() }
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(scrollView)
+            .setPositiveButton("Save", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(ColorDrawable(darkBg))
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(secondaryText)
+            val saveBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            saveBtn?.setTextColor(cyan)
+            saveBtn?.setOnClickListener {
                 val selectedScreenType = when {
-                    rbPin.isChecked -> AutoUnlockManager.TYPE_PIN
-                    rbPattern.isChecked -> AutoUnlockManager.TYPE_PATTERN
+                    rbScreenPin.isChecked -> AutoUnlockManager.TYPE_PIN
+                    rbScreenPattern.isChecked -> AutoUnlockManager.TYPE_PATTERN
                     else -> AutoUnlockManager.TYPE_NONE
                 }
-                val screenVal = etScreenVal.text.toString().trim()
-                val selectedAppType = if (cbSameAsScreen.isChecked) {
-                    AutoUnlockManager.TYPE_SAME_AS_SCREEN
-                } else if (etAppVal.text.toString().contains("-") || etAppVal.text.toString().contains(",")) {
-                    AutoUnlockManager.TYPE_PATTERN
-                } else {
-                    AutoUnlockManager.TYPE_PIN
+                val screenVal = when (selectedScreenType) {
+                    AutoUnlockManager.TYPE_PIN -> {
+                        val pin = etScreenPin.text.toString().trim()
+                        if (pin.isBlank()) {
+                            Toast.makeText(this, "Kripya Screen PIN daalein!", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        pin
+                    }
+                    AutoUnlockManager.TYPE_PATTERN -> {
+                        val dots = screenPatternPad.getPatternDots()
+                        if (dots.size < 2) {
+                            Toast.makeText(this, "Kripya Screen Pattern draw karein!", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        AutoUnlockManager.formatPatternDots(dots)
+                    }
+                    else -> ""
                 }
-                val appVal = if (cbSameAsScreen.isChecked) screenVal else etAppVal.text.toString().trim()
+
+                val selectedAppType = when {
+                    rbAppPin.isChecked -> AutoUnlockManager.TYPE_PIN
+                    rbAppPattern.isChecked -> AutoUnlockManager.TYPE_PATTERN
+                    rbAppNone.isChecked -> AutoUnlockManager.TYPE_NONE
+                    else -> AutoUnlockManager.TYPE_SAME_AS_SCREEN
+                }
+                val appVal = when (selectedAppType) {
+                    AutoUnlockManager.TYPE_PIN -> {
+                        val pin = etAppPin.text.toString().trim()
+                        if (pin.isBlank()) {
+                            Toast.makeText(this, "Kripya App Lock PIN daalein!", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        pin
+                    }
+                    AutoUnlockManager.TYPE_PATTERN -> {
+                        val dots = appPatternPad.getPatternDots()
+                        if (dots.size < 2) {
+                            Toast.makeText(this, "Kripya App Lock Pattern draw karein!", Toast.LENGTH_SHORT).show()
+                            return@setOnClickListener
+                        }
+                        AutoUnlockManager.formatPatternDots(dots)
+                    }
+                    AutoUnlockManager.TYPE_SAME_AS_SCREEN -> screenVal
+                    else -> ""
+                }
 
                 AutoUnlockManager.saveCredentials(this, selectedScreenType, screenVal, selectedAppType, appVal)
-                Toast.makeText(this, "Lock credentials saved safely!", Toast.LENGTH_SHORT).show()
-                appendLog("[Security]: Auto-Unlock credentials configured ($selectedScreenType).")
+                Toast.makeText(this, "Lock setup safely save ho gaya hai Sir!", Toast.LENGTH_SHORT).show()
+                appendLog("[Security]: Auto-Unlock configured (Screen=$selectedScreenType, App=$selectedAppType).")
+                dialog.dismiss()
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+        }
+        dialog.show()
     }
 
     private fun showAccessibilityGuidanceDialog() {
@@ -628,42 +897,54 @@ class MainActivity : AppCompatActivity() {
                 if (!alreadySpoken) speakerHelper.speak(reply)
             }
             "make_phone_call" -> {
-                val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: "").trim()
-                val (resolvedNumber, resolvedName) = telephonyHelper.resolveContactNumber(target)
-                if (resolvedNumber == null && target.replace(Regex("[^0-9+]"), "").length < 7) {
-                    val reply = "Sir, '$target' ka phone number contacts me nahi mila."
-                    appendLog("[Call]: $reply")
-                    speakerHelper.speak(reply)
-                } else {
-                    val numberToCall = resolvedNumber ?: target
-                    val reply = systemController.makePhoneCall(numberToCall)
-                    appendLog("[Call]: $reply ($resolvedName)")
-                    speakerHelper.speak(reply)
+                runAfterScreenUnlock {
+                    val target = ((args["recipient"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: (args["phone_number"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: "").trim()
+                    val (resolvedNumber, resolvedName) = telephonyHelper.resolveContactNumber(target)
+                    if (resolvedNumber == null && target.replace(Regex("[^0-9+]"), "").length < 7) {
+                        val reply = "Sir, '$target' ka phone number contacts me nahi mila."
+                        appendLog("[Call]: $reply")
+                        speakerHelper.speak(reply)
+                    } else {
+                        val numberToCall = resolvedNumber ?: target
+                        val reply = systemController.makePhoneCall(numberToCall)
+                        appendLog("[Call]: $reply ($resolvedName)")
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "send_sms" -> {
-                val rec = (args["recipient"] as? String) ?: ""
-                val msg = (args["message"] as? String) ?: ""
-                val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(rec)
-                val numberToSend = resolvedNumber ?: rec
-                val reply = systemController.sendSms(numberToSend, msg)
-                appendLog("[Result]: $reply")
-                speakerHelper.speak(reply)
-            }
-            "play_youtube" -> {
-                val q = (args["query"] as? String) ?: "trending songs"
-                systemController.playYoutube(q) { reply ->
-                    appendLog("[YouTube]: $reply")
+                runAfterScreenUnlock {
+                    val rec = (args["recipient"] as? String) ?: ""
+                    val msg = (args["message"] as? String) ?: ""
+                    val (resolvedNumber, _) = telephonyHelper.resolveContactNumber(rec)
+                    val numberToSend = resolvedNumber ?: rec
+                    val reply = systemController.sendSms(numberToSend, msg)
+                    appendLog("[Result]: $reply")
                     speakerHelper.speak(reply)
                 }
             }
+            "play_youtube" -> {
+                runAfterScreenUnlock {
+                    val q = (args["query"] as? String) ?: "trending songs"
+                    systemController.playYoutube(q) { reply ->
+                        appendLog("[YouTube]: $reply")
+                        speakerHelper.speak(reply)
+                        mainScope.launch {
+                            delay(900)
+                            AutoUnlockManager.unlockAppLockIfPresent(this@MainActivity, geminiBrain)
+                        }
+                    }
+                }
+            }
             "open_app" -> {
-                val app = (args["app_name"] as? String) ?: ""
-                val reply = systemController.openApp(app)
-                appendLog("[App Launcher]: $reply")
-                speakerHelper.speak(reply)
+                runAfterScreenUnlock(checkAppLockAfter = true) {
+                    val app = (args["app_name"] as? String) ?: ""
+                    val reply = systemController.openApp(app)
+                    appendLog("[App Launcher]: $reply")
+                    speakerHelper.speak(reply)
+                }
             }
             "send_whatsapp_message" -> {
                 val rec = (args["recipient"] as? String) ?: ""
@@ -682,29 +963,59 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             "tap_tag" -> {
-                val tag = (args["tag"] as? Number)?.toInt() ?: 1
-                nodeActionEngine.tapByTag(tag) { success, reply ->
-                    appendLog("[UI Agent]: $reply")
-                    speakerHelper.speak(reply)
+                runAfterScreenUnlock {
+                    val tag = (args["tag"] as? Number)?.toInt() ?: 1
+                    nodeActionEngine.tapByTag(tag) { success, reply ->
+                        appendLog("[UI Agent]: $reply")
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "type_tag" -> {
-                val tag = (args["tag"] as? Number)?.toInt() ?: 1
-                val text = (args["text"] as? String) ?: ""
-                nodeActionEngine.typeTextByTag(tag, text) { success, reply ->
-                    appendLog("[UI Agent]: $reply")
-                    speakerHelper.speak(reply)
+                runAfterScreenUnlock {
+                    val tag = (args["tag"] as? Number)?.toInt() ?: 1
+                    val text = (args["text"] as? String) ?: ""
+                    nodeActionEngine.typeTextByTag(tag, text) { success, reply ->
+                        appendLog("[UI Agent]: $reply")
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             "scroll_screen" -> {
-                val dir = (args["direction"] as? String) ?: "down"
-                nodeActionEngine.scrollScreen(dir) { success, reply ->
-                    appendLog("[Scroll]: $reply")
-                    speakerHelper.speak(reply)
+                runAfterScreenUnlock {
+                    val dir = (args["direction"] as? String) ?: "down"
+                    nodeActionEngine.scrollScreen(dir) { success, reply ->
+                        appendLog("[Scroll]: $reply")
+                        speakerHelper.speak(reply)
+                    }
                 }
             }
             else -> {
                 appendLog("[Tool Warning]: Unknown action '$tool'")
+            }
+        }
+    }
+
+    private fun runAfterScreenUnlock(
+        checkAppLockAfter: Boolean = false,
+        block: () -> Unit
+    ) {
+        if (!AutoUnlockManager.isScreenLockedOrOff(this)) {
+            block()
+            if (checkAppLockAfter) {
+                mainScope.launch {
+                    delay(900)
+                    AutoUnlockManager.unlockAppLockIfPresent(this@MainActivity, geminiBrain)
+                }
+            }
+            return
+        }
+        mainScope.launch {
+            AutoUnlockManager.ensureScreenUnlocked(this@MainActivity)
+            block()
+            if (checkAppLockAfter) {
+                delay(1000)
+                AutoUnlockManager.unlockAppLockIfPresent(this@MainActivity, geminiBrain)
             }
         }
     }

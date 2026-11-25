@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.jarvis.assistant.JarvisAccessibilityService
+import com.jarvis.assistant.security.AutoUnlockManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -30,12 +31,6 @@ class NodeActionEngine(
             return
         }
 
-        val opened = systemController.openChatWhatsApp(number)
-        if (!opened) {
-            callback(false, "WhatsApp open nahi ho saka Sir.")
-            return
-        }
-
         mainScope.launch {
             val service = JarvisAccessibilityService.instance
             if (service == null) {
@@ -43,8 +38,27 @@ class NodeActionEngine(
                 return@launch
             }
 
+            // Unlock phone screen if locked before launching WhatsApp
+            if (!AutoUnlockManager.ensureScreenUnlocked(systemController.appContext)) {
+                callback(false, "Sir, phone screen unlock nahi ho saki.")
+                return@launch
+            }
+
+            val opened = systemController.openChatWhatsApp(number)
+            if (!opened) {
+                callback(false, "WhatsApp open nahi ho saka Sir.")
+                return@launch
+            }
+
+            // Wait briefly for WhatsApp or App Lock screen to render, then auto-unlock if protected
+            delay(850)
+            if (AutoUnlockManager.isAppLockScreen(service)) {
+                AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
+                delay(700)
+            }
+
             // Dismiss any modal/privacy bottom-sheet if shown
-            delay(500)
+            delay(300)
             val closeBtn = service.findClickableNode("Close") ?: service.findClickableNode("close")
             if (closeBtn != null) {
                 service.clickNode(closeBtn)
@@ -114,13 +128,6 @@ class NodeActionEngine(
             return
         }
 
-        // Pre-fill text via URL so WhatsApp loads with the message already in the input field!
-        val opened = systemController.openChatWhatsApp(number, prefillMessage = message)
-        if (!opened) {
-            callback(false, "WhatsApp open nahi ho saka Sir.")
-            return
-        }
-
         mainScope.launch {
             val service = JarvisAccessibilityService.instance
             if (service == null) {
@@ -128,7 +135,25 @@ class NodeActionEngine(
                 return@launch
             }
 
-            delay(800)
+            // Unlock phone screen if locked before launching WhatsApp
+            if (!AutoUnlockManager.ensureScreenUnlocked(systemController.appContext)) {
+                callback(false, "Sir, phone screen unlock nahi ho saki.")
+                return@launch
+            }
+
+            // Pre-fill text via URL so WhatsApp loads with the message already in the input field!
+            val opened = systemController.openChatWhatsApp(number, prefillMessage = message)
+            if (!opened) {
+                callback(false, "WhatsApp open nahi ho saka Sir.")
+                return@launch
+            }
+
+            delay(900)
+            if (AutoUnlockManager.isAppLockScreen(service)) {
+                AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
+                delay(700)
+            }
+
             // Poll for Send button by Resource ID or Description (up to 5.0 seconds)
             val sendBtn = service.pollForNode(timeoutMs = 5000) { node ->
                 val resId = node.viewIdResourceName?.lowercase() ?: ""

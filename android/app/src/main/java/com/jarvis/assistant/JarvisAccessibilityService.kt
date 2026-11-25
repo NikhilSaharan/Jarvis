@@ -15,10 +15,14 @@ import android.telecom.TelecomManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.math.min
 
 data class ScreenElement(
     val tag: Int,
@@ -540,40 +544,188 @@ class JarvisAccessibilityService : AccessibilityService() {
         return performHome()
     }
 
+    // ═════════════════════════════════════════════════════════════════
+    // MULTI-WINDOW TREE ENGINE & DYNAMIC AUTO-UNLOCK (ZERO STATIC COORDS)
+    // ═════════════════════════════════════════════════════════════════
+
     /**
-     * Wakes the screen and swipes up to reveal lockscreen PIN keypad / pattern grid.
+     * Collects AccessibilityNodeInfo roots from ALL active non-Jarvis windows (sorted top-most layer first).
+     * Captures Keyguard, BiometricPrompt, OEM App Lock overlays, and system dialogs that rootInActiveWindow misses.
      */
-    fun wakeAndSwipeUp(): Boolean {
+    fun getAllNonJarvisWindowRoots(): List<AccessibilityNodeInfo> {
+        val roots = mutableListOf<AccessibilityNodeInfo>()
         try {
-            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
-            val wakeLock = pm?.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "Jarvis:ScreenUnlockWakeLock"
-            )
-            wakeLock?.acquire(3000L)
+            val allWindows = windows
+            if (!allWindows.isNullOrEmpty()) {
+                val sorted = allWindows.sortedByDescending { it.layer }
+                for (w in sorted) {
+                    val root = try { w.root } catch (e: Exception) { null } ?: continue
+                    val pkg = root.packageName?.toString() ?: ""
+                    if (pkg != packageName) {
+                        roots.add(root)
+                    }
+                }
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "WakeLock error: ${e.message}")
+            Log.w(TAG, "Error inspecting windows: ${e.message}")
         }
 
-        // Swipe up from bottom 82% to 22% height
-        val displayMetrics = resources.displayMetrics
-        val w = displayMetrics.widthPixels.toFloat()
-        val h = displayMetrics.heightPixels.toFloat()
-
-        val path = Path().apply {
-            moveTo(w / 2f, h * 0.82f)
-            lineTo(w / 2f, h * 0.22f)
+        val activeRoot = rootInActiveWindow
+        if (activeRoot != null && activeRoot.packageName?.toString() != packageName) {
+            val alreadyAdded = roots.any { it == activeRoot }
+            if (!alreadyAdded) roots.add(activeRoot)
         }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
-            .build()
-        return dispatchGesture(gesture, null, null)
+        return roots
     }
 
     /**
-     * Taps a specific physical point on screen via single hardware gesture.
+     * Returns package names of all currently visible non-Jarvis windows.
      */
-    fun tapCoordinates(x: Float, y: Float, durationMs: Long = 50): Boolean {
+    fun getAllActiveWindowPackages(): List<String> {
+        return getAllNonJarvisWindowRoots()
+            .mapNotNull { it.packageName?.toString()?.takeIf { p -> p.isNotBlank() } }
+            .distinct()
+    }
+
+    /**
+     * Traverses ALL non-Jarvis windows to find a matching node.
+     */
+    fun findNodeAcrossWindows(
+        resolveClickableParent: Boolean = true,
+        predicate: (AccessibilityNodeInfo) -> Boolean
+    ): AccessibilityNodeInfo? {
+        for (root in getAllNonJarvisWindowRoots()) {
+            fun search(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+                if (node == null) return null
+                if (predicate(node)) {
+                    if (resolveClickableParent) {
+                        var current: AccessibilityNodeInfo? = node
+                        while (current != null) {
+                            if (current.isClickable) return current
+                            current = current.parent
+                        }
+                    }
+                    return node
+                }
+                for (i in 0 until node.childCount) {
+                    val found = search(node.getChild(i))
+                    if (found != null) return found
+                }
+                return null
+            }
+            val match = search(root)
+            if (match != null) return match
+        }
+        return null
+    }
+
+    /**
+     * Dumps all interactive/readable elements across ALL non-Jarvis windows.
+     */
+    fun dumpAllWindowsElements(): List<ScreenElement> {
+        val elements = mutableListOf<ScreenElement>()
+        var counter = 1
+
+        for (root in getAllNonJarvisWindowRoots()) {
+            fun traverse(node: AccessibilityNodeInfo?) {
+                if (node == null) return
+                val text = node.text?.toString()?.trim() ?: ""
+                val cd = node.contentDescription?.toString()?.trim() ?: ""
+                val cls = node.className?.toString()?.substringAfterLast('.') ?: ""
+                val isClickable = node.isClickable
+                val isEditable = node.isEditable
+
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+
+                val isInteractive = isClickable || isEditable || node.isCheckable || node.isFocusable
+                if (isInteractive || text.isNotEmpty() || cd.isNotEmpty()) {
+                    if (bounds.width() > 0 && bounds.height() > 0) {
+                        elements.add(
+                            ScreenElement(
+                                tag = counter++,
+                                text = text,
+                                contentDescription = cd,
+                                className = cls,
+                                isClickable = isClickable,
+                                isEditable = isEditable,
+                                bounds = bounds,
+                                node = node
+                            )
+                        )
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    traverse(node.getChild(i))
+                }
+            }
+            traverse(root)
+        }
+        return elements
+    }
+
+    fun dumpAllWindowsElementsSummary(): String {
+        val elements = dumpAllWindowsElements()
+        if (elements.isEmpty()) return "Screen is empty or secure window."
+        val sb = StringBuilder()
+        for (el in elements) {
+            val resId = el.node.viewIdResourceName?.substringAfterLast('/') ?: ""
+            val rawLabel = if (el.text.isNotBlank()) el.text else el.contentDescription
+            val label = if (rawLabel.isNotBlank()) rawLabel else resId
+            if (label.isBlank() && !el.isEditable && !el.isClickable) continue
+            val type = when {
+                el.isEditable -> "input_field"
+                el.isClickable -> "button"
+                else -> "text"
+            }
+            val displayLabel = if (label.isNotBlank()) label else "button"
+            val idSuffix = if (resId.isNotBlank() && resId != displayLabel) " (id: $resId)" else ""
+            sb.append("[${el.tag}] $type$idSuffix: \"$displayLabel\"\n")
+        }
+        return sb.toString().trim()
+    }
+
+    /**
+     * Executes a GestureDescription and suspends until Android confirms completion or cancellation.
+     */
+    suspend fun dispatchGestureAwait(gesture: GestureDescription): Boolean {
+        return suspendCancellableCoroutine { cont ->
+            val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(false)
+                }
+            }, null)
+
+            if (!dispatched && cont.isActive) {
+                cont.resume(false)
+            }
+        }
+    }
+
+    /**
+     * Taps a node cleanly using accessibility click, falling back to live Rect center gesture ONLY if click returns false.
+     * Prevents double-digit entry ("11" instead of "1") on PIN keypads!
+     */
+    suspend fun tapNodeDynamically(node: AccessibilityNodeInfo?, allowDualTap: Boolean = false): Boolean {
+        if (node == null) return false
+        val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK) ||
+            (node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true)
+        if (clicked && !allowDualTap) return true
+
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            val tapDone = tapCoordinatesAwait(bounds.centerX().toFloat(), bounds.centerY().toFloat(), 50L)
+            return clicked || tapDone
+        }
+        return clicked
+    }
+
+    suspend fun tapCoordinatesAwait(x: Float, y: Float, durationMs: Long = 50L): Boolean {
         val path = Path().apply {
             moveTo(x, y)
             lineTo(x + 1f, y + 1f)
@@ -581,134 +733,393 @@ class JarvisAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
             .build()
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureAwait(gesture)
     }
 
     /**
-     * Draws an unlock pattern across a 3x3 grid connecting the specified sequence of dots (1..9).
-     * Dots are numbered:
-     * 1 2 3
-     * 4 5 6
-     * 7 8 9
+     * Wakes the screen via PowerManager and performs a dynamic vertical swipe-up to reveal lock prompt.
      */
-    fun drawPattern(dots: List<Int>): Boolean {
-        if (dots.size < 2) return false
+    suspend fun wakeScreenAndSwipeUp(): Boolean {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            @Suppress("DEPRECATION")
+            val wakeLock = pm?.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "Jarvis:ScreenUnlockWakeLock"
+            )
+            wakeLock?.acquire(4000L)
+        } catch (e: Exception) {
+            Log.w(TAG, "WakeLock error: ${e.message}")
+        }
+
+        delay(250)
         val displayMetrics = resources.displayMetrics
         val w = displayMetrics.widthPixels.toFloat()
         val h = displayMetrics.heightPixels.toFloat()
 
-        // Standard Android / OnePlus 3x3 lock pattern placement
-        // Grid is centered horizontally, located vertically between 45% and 75% screen height
-        val gridCenterX = w / 2f
-        val gridCenterY = h * 0.60f
-        val step = w * 0.28f // Distance between adjacent dots
-
-        val colMap = mapOf(
-            0 to (gridCenterX - step),
-            1 to gridCenterX,
-            2 to (gridCenterX + step)
-        )
-        val rowMap = mapOf(
-            0 to (gridCenterY - step),
-            1 to gridCenterY,
-            2 to (gridCenterY + step)
-        )
-
-        fun getDotCoord(dot: Int): Pair<Float, Float> {
-            val d = (dot - 1).coerceIn(0, 8)
-            val r = d / 3
-            val c = d % 3
-            return Pair(colMap[c] ?: gridCenterX, rowMap[r] ?: gridCenterY)
+        val path = Path().apply {
+            moveTo(w / 2f, h * 0.85f)
+            lineTo(w / 2f, h * 0.20f)
         }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 260))
+            .build()
+        return dispatchGestureAwait(gesture)
+    }
+
+    /**
+     * Checks whether ANY active window currently exposes a Pattern lock grid or PIN keypad / input.
+     */
+    fun hasVisibleUnlockPrompt(): Boolean {
+        if (findDynamicPatternPoints() != null) return true
+        if (collectDynamicDigitNodes().size >= 9) return true
+        if (findPinInputField() != null) return true
+        if (findKeypadContainerBounds() != null) return true
+        return false
+    }
+
+    /**
+     * Dynamically locates the 3x3 pattern dot coordinates from live Accessibility nodes across ALL windows.
+     * ZERO static screen percentages! Works across OnePlus, Samsung, Xiaomi, Pixel, LockScreen & AppLock.
+     */
+    fun findDynamicPatternPoints(): List<Pair<Float, Float>>? {
+        // Strategy 1: Parent pattern container exposing 9 child/virtual dot nodes
+        val containerWith9Dots = findNodeAcrossWindows(resolveClickableParent = false) { node ->
+            val cls = node.className?.toString()?.lowercase() ?: ""
+            val resId = node.viewIdResourceName?.lowercase() ?: ""
+            val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+            val looksLikePattern = cls.contains("pattern") || resId.contains("pattern") || cd.contains("pattern")
+            if (!looksLikePattern || node.childCount < 9) return@findNodeAcrossWindows false
+
+            var validChildren = 0
+            for (i in 0 until node.childCount) {
+                val c = node.getChild(i) ?: continue
+                val r = Rect()
+                c.getBoundsInScreen(r)
+                if (r.width() in 20..400 && r.height() in 20..400) validChildren++
+            }
+            validChildren == 9
+        }
+
+        if (containerWith9Dots != null) {
+            val dotRects = mutableListOf<Rect>()
+            for (i in 0 until containerWith9Dots.childCount) {
+                val c = containerWith9Dots.getChild(i) ?: continue
+                val r = Rect()
+                c.getBoundsInScreen(r)
+                if (r.width() in 20..400 && r.height() in 20..400) dotRects.add(r)
+            }
+            if (dotRects.size == 9) {
+                val sortedByY = dotRects.sortedBy { it.centerY() }
+                val ordered = mutableListOf<Rect>()
+                for (rowIdx in 0..2) {
+                    val rowSlice = sortedByY.subList(rowIdx * 3, rowIdx * 3 + 3).sortedBy { it.centerX() }
+                    ordered.addAll(rowSlice)
+                }
+                return ordered.map { Pair(it.centerX().toFloat(), it.centerY().toFloat()) }
+            }
+        }
+
+        // Strategy 2: Live LockPatternView container node — collect all matching candidates and choose
+        // the innermost roughly-square view (never accidentally matching an outer full-screen wrapper layout).
+        val patternCandidates = mutableListOf<Pair<Int, Rect>>()
+        for (root in getAllNonJarvisWindowRoots()) {
+            fun scanPattern(node: AccessibilityNodeInfo?) {
+                if (node == null) return
+                val cls = node.className?.toString()?.lowercase() ?: ""
+                val resId = node.viewIdResourceName?.lowercase() ?: ""
+                val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+                if (cls.contains("pattern") || resId.contains("pattern") || cd.contains("pattern")) {
+                    val r = Rect()
+                    node.getBoundsInScreen(r)
+                    if (r.width() >= 180 && r.height() >= 180) {
+                        val minDim = min(r.width(), r.height()).toFloat()
+                        val maxDim = maxOf(r.width(), r.height()).toFloat()
+                        val squareness = minDim / maxDim.coerceAtLeast(1f)
+                        if (squareness >= 0.55f) {
+                            var score = 0
+                            if (cls.contains("lockpattern") || cls.contains("patternview")) score += 50
+                            if (squareness >= 0.85f) score += 30
+                            // Prefer tighter inner bounds over giant screen-wide wrappers
+                            val compactness = (squareness * 20).toInt()
+                            score += compactness
+                            patternCandidates.add(Pair(score, r))
+                        }
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    scanPattern(node.getChild(i))
+                }
+            }
+            scanPattern(root)
+        }
+
+        val bestBox = patternCandidates
+            .sortedWith(compareByDescending<Pair<Int, Rect>> { it.first }.thenBy { it.second.width().toLong() * it.second.height().toLong() })
+            .firstOrNull()?.second
+
+        if (bestBox != null) {
+            val squareSize = minOf(bestBox.width(), bestBox.height()).toFloat()
+            val left = bestBox.centerX() - squareSize / 2f
+            val top = bestBox.centerY() - squareSize / 2f
+            val cell = squareSize / 3f
+
+            val pts = mutableListOf<Pair<Float, Float>>()
+            for (row in 0..2) {
+                for (col in 0..2) {
+                    pts.add(Pair(left + cell * (col + 0.5f), top + cell * (row + 0.5f)))
+                }
+            }
+            return pts
+        }
+
+        return null
+    }
+
+    /**
+     * Draws an unlock pattern dynamically across live discovered 3x3 grid coordinates.
+     * Never uses hardcoded screen positions — returns false if pattern grid isn't accessible.
+     */
+    suspend fun drawPatternDynamic(dots: List<Int>): Boolean {
+        if (dots.size < 2) return false
+        val gridPoints = findDynamicPatternPoints()
+        if (gridPoints == null || gridPoints.size != 9) {
+            Log.w(TAG, "Dynamic PatternView bounds not found in active windows.")
+            return false
+        }
+
+        val strokePts = dots.mapNotNull { d ->
+            val idx = d - 1
+            if (idx in 0..8) gridPoints[idx] else null
+        }
+        if (strokePts.size < 2) return false
 
         val path = Path()
-        val first = getDotCoord(dots[0])
+        val first = strokePts[0]
         path.moveTo(first.first, first.second)
+        path.lineTo(first.first + 1f, first.second + 1f)
 
-        for (i in 1 until dots.size) {
-            val pt = getDotCoord(dots[i])
-            path.lineTo(pt.first, pt.second)
+        for (i in 1 until strokePts.size) {
+            val prev = strokePts[i - 1]
+            val curr = strokePts[i]
+            val midX = (prev.first + curr.first) / 2f
+            val midY = (prev.second + curr.second) / 2f
+            path.lineTo(midX, midY)
+            path.lineTo(curr.first, curr.second)
         }
 
-        val duration = (dots.size * 120L).coerceIn(350L, 1200L)
+        val duration = (strokePts.size * 180L).coerceIn(550L, 1600L)
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
             .build()
 
-        return dispatchGesture(gesture, null, null)
+        return dispatchGestureAwait(gesture)
+    }
+
+    private fun collectDynamicDigitNodes(): Map<Char, AccessibilityNodeInfo> {
+        val bestCandidates = mutableMapOf<Char, Pair<Int, AccessibilityNodeInfo>>()
+        val wordToDigit = mapOf(
+            "zero" to '0', "one" to '1', "two" to '2', "three" to '3', "four" to '4',
+            "five" to '5', "six" to '6', "seven" to '7', "eight" to '8', "nine" to '9'
+        )
+        val resIdDigitRegex = Regex("(?i)(?:key|digit|num|btn|button|pin|pad)[_-]?([0-9])$")
+        val keypadLabelRegex = Regex("^([0-9])(?:[\\s,\\n]+[A-Za-z+∞\\s]{1,12})?$")
+        val ignoreIdWords = listOf("clock", "time", "date", "battery", "percent", "status", "alarm", "carrier", "sim")
+
+        for (root in getAllNonJarvisWindowRoots()) {
+            fun scan(node: AccessibilityNodeInfo?) {
+                if (node == null) return
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+
+                if (bounds.width() in 25..600 && bounds.height() in 25..600) {
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+                    if (ignoreIdWords.none { resId.contains(it) }) {
+                        val rawText = node.text?.toString()?.trim() ?: ""
+                        val rawCd = node.contentDescription?.toString()?.trim() ?: ""
+                        val isClickableOrChild = node.isClickable || node.parent?.isClickable == true
+
+                        var matchedDigit: Char? = null
+                        var score = 0
+
+                        val resMatch = resIdDigitRegex.find(resId.substringAfterLast('/'))
+                        if (resMatch != null) {
+                            matchedDigit = resMatch.groupValues[1][0]
+                            score = 3
+                        } else if (isClickableOrChild) {
+                            val tMatch = keypadLabelRegex.find(rawText)
+                            val cMatch = keypadLabelRegex.find(rawCd)
+                            when {
+                                rawText.length == 1 && rawText[0].isDigit() -> {
+                                    matchedDigit = rawText[0]
+                                    score = 3
+                                }
+                                rawCd.length == 1 && rawCd[0].isDigit() -> {
+                                    matchedDigit = rawCd[0]
+                                    score = 3
+                                }
+                                tMatch != null -> {
+                                    matchedDigit = tMatch.groupValues[1][0]
+                                    score = 2
+                                }
+                                cMatch != null -> {
+                                    matchedDigit = cMatch.groupValues[1][0]
+                                    score = 2
+                                }
+                                wordToDigit.containsKey(rawCd.lowercase()) -> {
+                                    matchedDigit = wordToDigit[rawCd.lowercase()]
+                                    score = 1
+                                }
+                            }
+                        }
+
+                        if (matchedDigit != null && score > 0) {
+                            val parent = node.parent
+                            val targetNode = if (!node.isClickable && parent?.isClickable == true) parent else node
+                            val existing = bestCandidates[matchedDigit]
+                            if (existing == null || score > existing.first) {
+                                bestCandidates[matchedDigit] = Pair(score, targetNode)
+                            }
+                        }
+                    }
+                }
+
+                for (i in 0 until node.childCount) {
+                    scan(node.getChild(i))
+                }
+            }
+            scan(root)
+        }
+
+        return bestCandidates.mapValues { it.value.second }
+    }
+
+    private fun findPinInputField(): AccessibilityNodeInfo? {
+        return findNodeAcrossWindows(resolveClickableParent = false) { node ->
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (bounds.width() <= 0 || bounds.height() <= 0) return@findNodeAcrossWindows false
+
+            val resId = node.viewIdResourceName?.lowercase() ?: ""
+            val isPwdInput = node.isPassword && node.isEditable
+            val isExplicitPinEdit = node.isEditable && (
+                resId.contains("pin") || resId.contains("password") || resId.contains("pwd") ||
+                resId.contains("lock") || resId.contains("privacy")
+            )
+            isPwdInput || isExplicitPinEdit
+        }
+    }
+
+    private fun findKeypadContainerBounds(): Rect? {
+        val keypadNode = findNodeAcrossWindows(resolveClickableParent = false) { node ->
+            val cls = node.className?.toString()?.lowercase() ?: ""
+            val resId = node.viewIdResourceName?.lowercase() ?: ""
+            val isNumpad = resId.contains("keypad") || resId.contains("numpad") || resId.contains("pin_keyboard") ||
+                resId.contains("security_keyboard") || resId.contains("pin_pad") || resId.contains("keyguard_pin") ||
+                resId.contains("password_keyboard") || cls.contains("numpad") || cls.contains("numeric")
+            if (!isNumpad) return@findNodeAcrossWindows false
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            r.width() >= 250 && r.height() >= 250
+        } ?: return null
+
+        val box = Rect()
+        keypadNode.getBoundsInScreen(box)
+        return if (box.width() >= 250 && box.height() >= 250) box else null
     }
 
     /**
-     * Taps PIN digits (0-9) sequentially on the lock screen / app lock keypad.
+     * Dynamically enters PIN / Password across ANY phone & lock screen with ZERO static screen coordinates.
+     * Supports: (1) Live keypad digit nodes 0-9, (2) Editable password fields, (3) Live keypad container bounds.
      */
-    suspend fun tapPinDigits(pin: String): Boolean {
+    suspend fun enterPinDynamic(pin: String, stillLockedCheck: () -> Boolean): Boolean {
         if (pin.isBlank()) return false
 
-        // Check if an editable input field exists first (some app locks allow direct text input)
-        val inputField = findFirstInputField()
-        if (inputField != null && inputField.isEditable) {
+        // 1. Best for SystemUI & App Lock numeric keypads: discover individual digit nodes dynamically
+        val digitNodes = collectDynamicDigitNodes()
+        if (pin.all { digitNodes.containsKey(it) }) {
+            Log.d(TAG, "Entering PIN via ${digitNodes.size} live digit nodes")
+            for (ch in pin) {
+                val node = digitNodes[ch] ?: return false
+                tapNodeDynamically(node)
+                delay(140)
+            }
+            delay(350)
+            if (stillLockedCheck()) {
+                val enterBtn = findNodeAcrossWindows(resolveClickableParent = true) { n ->
+                    val res = n.viewIdResourceName?.lowercase() ?: ""
+                    val txt = n.text?.toString()?.trim()?.lowercase() ?: ""
+                    val cd = n.contentDescription?.toString()?.trim()?.lowercase() ?: ""
+                    res.contains("key_enter") || res.endsWith("enter") || res.endsWith("ok") ||
+                        res.endsWith("done") || res.endsWith("confirm") ||
+                        txt in listOf("ok", "enter", "done", "confirm", "✓") ||
+                        cd in listOf("ok", "enter", "done", "confirm", "submit")
+                }
+                if (enterBtn != null) {
+                    tapNodeDynamically(enterBtn)
+                }
+            }
+            return true
+        }
+
+        // 2. Editable password/PIN input field (OnePlus Privacy Password dialog, alphanumeric lock, etc.)
+        val inputField = findPinInputField()
+        if (inputField != null) {
+            Log.d(TAG, "Entering PIN via live editable password field")
+            inputField.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
             val typed = typeText(inputField, pin)
             if (typed) {
                 delay(300)
-                val submitBtn = findClickableNode("OK") ?: findClickableNode("Enter") ?: findClickableNode("done")
-                submitBtn?.let { tapElement(it) }
+                if (stillLockedCheck()) {
+                    val submitBtn = findNodeAcrossWindows(resolveClickableParent = true) { n ->
+                        val res = n.viewIdResourceName?.lowercase() ?: ""
+                        val txt = n.text?.toString()?.trim()?.lowercase() ?: ""
+                        val cd = n.contentDescription?.toString()?.trim()?.lowercase() ?: ""
+                        txt in listOf("ok", "enter", "done", "confirm", "unlock", "verify", "next") ||
+                            cd in listOf("ok", "enter", "done", "confirm", "unlock", "verify") ||
+                            res.contains("enter") || res.contains("confirm") || res.contains("ok")
+                    }
+                    if (submitBtn != null) {
+                        tapNodeDynamically(submitBtn)
+                    }
+                }
                 return true
             }
         }
 
-        val displayMetrics = resources.displayMetrics
-        val w = displayMetrics.widthPixels.toFloat()
-        val h = displayMetrics.heightPixels.toFloat()
-
-        // Standard 3x4 Keypad layout:
-        // 1 2 3
-        // 4 5 6
-        // 7 8 9
-        // [X] 0 [OK]
-        val colW = w / 3f
-        val startY = h * 0.55f
-        val rowH = h * 0.09f
-
-        val keyCoords = mapOf(
-            '1' to Pair(colW * 0.5f, startY),
-            '2' to Pair(colW * 1.5f, startY),
-            '3' to Pair(colW * 2.5f, startY),
-            '4' to Pair(colW * 0.5f, startY + rowH),
-            '5' to Pair(colW * 1.5f, startY + rowH),
-            '6' to Pair(colW * 2.5f, startY + rowH),
-            '7' to Pair(colW * 0.5f, startY + rowH * 2),
-            '8' to Pair(colW * 1.5f, startY + rowH * 2),
-            '9' to Pair(colW * 2.5f, startY + rowH * 2),
-            '0' to Pair(colW * 1.5f, startY + rowH * 3)
-        )
-
-        for (ch in pin) {
-            val digitNode = findClickableNode(ch.toString()) ?: findNodeByPredicate { n ->
-                val text = n.text?.toString() ?: ""
-                val cd = n.contentDescription?.toString() ?: ""
-                val res = n.viewIdResourceName?.lowercase() ?: ""
-                (text == ch.toString() || cd == ch.toString() || res.endsWith("digit_$ch") || res.endsWith("key_$ch"))
-            }
-
-            if (digitNode != null) {
-                clickNode(digitNode)
-            } else {
-                val pt = keyCoords[ch]
-                if (pt != null) {
-                    tapCoordinates(pt.first, pt.second)
+        // 3. Fallback ONLY from live keypad container node Rect (never hardcoded screen %)
+        val keypadBox = findKeypadContainerBounds()
+        if (keypadBox != null && pin.all { it.isDigit() }) {
+            Log.d(TAG, "Entering PIN via live keypad container bounds: $keypadBox")
+            val colW = keypadBox.width() / 3f
+            val rowH = keypadBox.height() / 4f
+            fun digitCoordInBox(ch: Char): Pair<Float, Float> {
+                return when (ch) {
+                    '1' -> Pair(keypadBox.left + colW * 0.5f, keypadBox.top + rowH * 0.5f)
+                    '2' -> Pair(keypadBox.left + colW * 1.5f, keypadBox.top + rowH * 0.5f)
+                    '3' -> Pair(keypadBox.left + colW * 2.5f, keypadBox.top + rowH * 0.5f)
+                    '4' -> Pair(keypadBox.left + colW * 0.5f, keypadBox.top + rowH * 1.5f)
+                    '5' -> Pair(keypadBox.left + colW * 1.5f, keypadBox.top + rowH * 1.5f)
+                    '6' -> Pair(keypadBox.left + colW * 2.5f, keypadBox.top + rowH * 1.5f)
+                    '7' -> Pair(keypadBox.left + colW * 0.5f, keypadBox.top + rowH * 2.5f)
+                    '8' -> Pair(keypadBox.left + colW * 1.5f, keypadBox.top + rowH * 2.5f)
+                    '9' -> Pair(keypadBox.left + colW * 2.5f, keypadBox.top + rowH * 2.5f)
+                    else -> Pair(keypadBox.left + colW * 1.5f, keypadBox.top + rowH * 3.5f) // '0'
                 }
             }
-            delay(120)
+            for (ch in pin) {
+                val pt = digitCoordInBox(ch)
+                tapCoordinatesAwait(pt.first, pt.second, 50L)
+                delay(140)
+            }
+            delay(350)
+            if (stillLockedCheck()) {
+                tapCoordinatesAwait(keypadBox.left + colW * 2.5f, keypadBox.top + rowH * 3.5f, 50L)
+            }
+            return true
         }
 
-        delay(200)
-        val enterNode = findClickableNode("enter") ?: findClickableNode("ok") ?: findClickableNode("done")
-        if (enterNode != null) {
-            clickNode(enterNode)
-        } else {
-            tapCoordinates(colW * 2.5f, startY + rowH * 3)
-        }
-
-        return true
+        Log.w(TAG, "No dynamic PIN input field, digit nodes, or keypad container found in active windows.")
+        return false
     }
 }

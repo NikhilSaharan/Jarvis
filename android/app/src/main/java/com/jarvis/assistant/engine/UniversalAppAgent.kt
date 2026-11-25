@@ -29,12 +29,6 @@ class UniversalAppAgent(
         geminiBrain: GeminiBrain,
         callback: (Boolean, String) -> Unit
     ) {
-        val openedMsg = systemController.openApp(appName)
-        if (openedMsg.contains("nahi mila")) {
-            callback(false, openedMsg)
-            return
-        }
-
         mainScope.launch {
             val service = JarvisAccessibilityService.instance
             if (service == null) {
@@ -42,15 +36,25 @@ class UniversalAppAgent(
                 return@launch
             }
 
-            // Auto-unlock screen if locked before opening app
-            AutoUnlockManager.unlockScreenIfLocked(context, service) { _ -> }
+            // 1. Check screen lock dynamically BEFORE launching app (no delay if already unlocked)
+            val screenReady = AutoUnlockManager.ensureScreenUnlocked(context)
+            if (!screenReady) {
+                callback(false, "Sir, phone screen unlock nahi ho saki.")
+                return@launch
+            }
 
-            delay(1200) // Initial wait for app window to render
+            val openedMsg = systemController.openApp(appName)
+            if (openedMsg.contains("nahi mila")) {
+                callback(false, openedMsg)
+                return@launch
+            }
 
-            // Auto-unlock App Lock if target app is protected (WhatsApp, Instagram, OnePlus safecenter)
+            delay(1200) // Initial wait for app window or App Lock to render
+
+            // 2. Auto-unlock App Lock if target app is protected (taps Use Privacy Password / PIN / Pattern dynamically)
             if (AutoUnlockManager.isAppLockScreen(service)) {
-                AutoUnlockManager.unlockAppLockIfPresent(context, service) { _ -> }
-                delay(1000)
+                AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
+                delay(900)
             }
 
             val actionHistory = mutableListOf<String>()
@@ -65,9 +69,9 @@ class UniversalAppAgent(
 
                 // Auto-unlock App Lock if it appeared midway
                 if (AutoUnlockManager.isAppLockScreen(service)) {
-                    AutoUnlockManager.unlockAppLockIfPresent(context, service) { _ -> }
+                    AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
                     actionHistory.add("Auto-unlocked App Lock")
-                    delay(1000)
+                    delay(900)
                     continue
                 }
 

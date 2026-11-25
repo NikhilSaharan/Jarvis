@@ -3,12 +3,12 @@ package com.jarvis.assistant.security
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Rect
+import android.os.PowerManager
 import android.util.Log
 import com.jarvis.assistant.JarvisAccessibilityService
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import com.jarvis.assistant.brain.GeminiBrain
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 object AutoUnlockManager {
 
@@ -24,8 +24,6 @@ object AutoUnlockManager {
     private const val KEY_SCREEN_LOCK_VALUE = "screen_lock_value"
     private const val KEY_APP_LOCK_TYPE = "app_lock_type"
     private const val KEY_APP_LOCK_VALUE = "app_lock_value"
-
-    private val scope = CoroutineScope(Dispatchers.Main)
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -64,97 +62,157 @@ object AutoUnlockManager {
         return getPrefs(context).getString(KEY_APP_LOCK_VALUE, "") ?: ""
     }
 
-    /**
-     * Automatically wakes up screen, swipes up, and enters PIN or Pattern if screen is locked.
-     */
-    fun unlockScreenIfLocked(
-        context: Context,
-        service: JarvisAccessibilityService,
-        onComplete: (Boolean) -> Unit
-    ) {
-        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-        val isLocked = km?.isKeyguardLocked == true
+    fun parsePatternDots(raw: String): List<Int> {
+        return raw.split(Regex("[,\\-\\s]+")).mapNotNull { it.toIntOrNull() }.filter { it in 1..9 }
+    }
 
-        if (!isLocked) {
-            onComplete(true)
-            return
+    fun formatPatternDots(dots: List<Int>): String {
+        return dots.joinToString("-")
+    }
+
+    fun isScreenLockedOrOff(context: Context): Boolean {
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val locked = km?.isKeyguardLocked == true
+        val screenOff = pm?.isInteractive == false
+        return locked || screenOff
+    }
+
+    /**
+     * Checks if screen is locked/off and dynamically unlocks it BEFORE returning.
+     * If already awake & unlocked, returns true immediately in <1ms without delay.
+     */
+    suspend fun ensureScreenUnlocked(context: Context): Boolean {
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+
+        if (km?.isKeyguardLocked != true && pm?.isInteractive == true) {
+            return true
+        }
+
+        val service = JarvisAccessibilityService.instance
+        if (service == null) {
+            Log.w(TAG, "Cannot unlock screen: Accessibility service not active.")
+            return false
         }
 
         val lockType = getScreenLockType(context)
         val lockValue = getScreenLockValue(context)
 
-        if (lockType == TYPE_NONE || lockValue.isBlank()) {
-            Log.w(TAG, "Phone is locked, but no unlock credentials configured in J.A.R.V.I.S.")
-            onComplete(false)
-            return
-        }
+        Log.d(TAG, "Screen locked/off detected. Waking & unlocking (configured=$lockType)...")
 
-        scope.launch {
-            Log.d(TAG, "Unlocking screen with $lockType...")
-            service.wakeAndSwipeUp()
-            delay(500) // Allow keypad / pattern transition
-
-            when (lockType) {
-                TYPE_PIN -> {
-                    service.tapPinDigits(lockValue)
+        // Only swipe up if screen is asleep or keypad/pattern isn't visible yet
+        if (pm?.isInteractive == false || !service.hasVisibleUnlockPrompt()) {
+            service.wakeScreenAndSwipeUp()
+            // Wait dynamically for keypad/pattern prompt (or swipe-only unlock to finish)
+            for (i in 0 until 10) {
+                delay(200)
+                if (km?.isKeyguardLocked != true) {
+                    Log.d(TAG, "Screen unlocked after swipe-up!")
+                    return true
                 }
-                TYPE_PATTERN -> {
-                    val dots = parsePatternDots(lockValue)
-                    if (dots.size >= 2) {
-                        service.drawPattern(dots)
-                    }
-                }
+                if (service.hasVisibleUnlockPrompt()) break
             }
-
-            delay(700)
-            val stillLocked = km?.isKeyguardLocked == true
-            Log.d(TAG, "Screen unlock finished. Still locked: $stillLocked")
-            onComplete(!stillLocked)
         }
+
+        if (km?.isKeyguardLocked != true) return true
+
+        if (lockType == TYPE_NONE || lockValue.isBlank()) {
+            Log.w(TAG, "Phone has lock prompt, but no screen PIN/Pattern configured.")
+            return false
+        }
+
+        val entered = when (lockType) {
+            TYPE_PIN -> service.enterPinDynamic(lockValue) { km?.isKeyguardLocked == true }
+            TYPE_PATTERN -> {
+                val dots = parsePatternDots(lockValue)
+                if (dots.size >= 2) service.drawPatternDynamic(dots) else false
+            }
+            else -> false
+        }
+
+        if (!entered) {
+            Log.w(TAG, "Could not locate lock screen unlock UI nodes dynamically.")
+            return false
+        }
+
+        // Poll until Keyguard dismisses
+        for (i in 0 until 10) {
+            delay(200)
+            if (km?.isKeyguardLocked != true) {
+                Log.d(TAG, "Screen successfully unlocked!")
+                return true
+            }
+        }
+        return km?.isKeyguardLocked != true
     }
 
     /**
-     * Checks if current foreground window is an App Lock or Privacy Password prompt.
+     * Dynamically detects whether ANY active window is currently showing an App Lock / Privacy Lock / Biometric Lock.
+     * Inspects ALL windows (including system overlays & OEM safecenter) and guards against normal login pages.
      */
     fun isAppLockScreen(service: JarvisAccessibilityService): Boolean {
-        val root = service.rootInActiveWindow ?: return false
-        val pkg = root.packageName?.toString()?.lowercase() ?: ""
+        val activePackages = service.getAllActiveWindowPackages().map { it.lowercase() }
 
-        // Common OEM App Lock packages (ColorOS/OxygenOS safecenter, Samsung Secure Folder, Xiaomi, etc.)
-        if (pkg.contains("safecenter") || pkg.contains("privacy") || pkg.contains("applock") || pkg.contains("password")) {
-            return true
+        val oemAppLockPkgMatch = activePackages.any { pkg ->
+            pkg.contains("safecenter") ||
+                pkg.contains("applock") ||
+                pkg.contains("securitycenter") ||
+                pkg.contains("privacy") ||
+                pkg.contains("biometric")
         }
+        if (oemAppLockPkgMatch) return true
 
-        // Screen text heuristic for in-app biometric/pin lock (WhatsApp, Instagram, etc.)
-        val summary = service.dumpScreenElementsSummary().lowercase()
-        val appLockKeywords = listOf(
+        val summary = service.dumpAllWindowsElementsSummary().lowercase()
+        if (summary.isBlank()) return false
+
+        // Guard against normal in-app login forms (Instagram Login, Email Sign-In, etc.)
+        val looksLikeAccountLogin = summary.contains("sign up") ||
+            summary.contains("create account") ||
+            summary.contains("forgot password") ||
+            summary.contains("username") ||
+            summary.contains("email address") ||
+            summary.contains("log in with")
+        if (looksLikeAccountLogin) return false
+
+        val strongLockKeywords = listOf(
+            "use privacy password",
             "privacy password",
-            "enter pin",
-            "draw pattern",
+            "enter privacy password",
             "app lock",
             "unlock whatsapp",
-            "touch the fingerprint",
+            "whatsapp locked",
+            "confirm your pin",
+            "confirm your pattern",
+            "confirm screen lock",
+            "use screen lock",
+            "verify your identity",
             "verify it's you",
-            "enter password to unlock",
-            "use pin",
-            "use password"
+            "touch the fingerprint",
+            "fingerprint sensor",
+            "use fingerprint",
+            "draw unlock pattern",
+            "draw your pattern"
         )
+        if (strongLockKeywords.any { summary.contains(it) }) return true
 
-        return appLockKeywords.any { summary.contains(it) }
+        // Fallback/biometric switch button paired with lock prompt context
+        val hasSwitchAndLockContext = (summary.contains("use pin") || summary.contains("use password") || summary.contains("use pattern")) &&
+            (summary.contains("lock") || summary.contains("unlock") || summary.contains("verify") || summary.contains("biometric") || summary.contains("fingerprint"))
+
+        return hasSwitchAndLockContext
     }
 
     /**
-     * Automatically enters App Lock PIN or Pattern if an App Lock screen is visible.
+     * Automatically taps "Use privacy password / Use PIN / Use Pattern" across ANY phone's App Lock,
+     * waits for credential entry screen, and dynamically unlocks using saved App Lock PIN or Pattern.
      */
-    fun unlockAppLockIfPresent(
+    suspend fun unlockAppLockIfPresent(
         context: Context,
-        service: JarvisAccessibilityService,
-        onComplete: (Boolean) -> Unit
-    ) {
-        if (!isAppLockScreen(service)) {
-            onComplete(false)
-            return
-        }
+        geminiBrain: GeminiBrain? = null
+    ): Boolean {
+        val service = JarvisAccessibilityService.instance ?: return false
+        if (!isAppLockScreen(service)) return false
 
         val appLockType = getAppLockType(context)
         val (effType, effValue) = if (appLockType == TYPE_SAME_AS_SCREEN) {
@@ -164,44 +222,127 @@ object AutoUnlockManager {
         }
 
         if (effType == TYPE_NONE || effValue.isBlank()) {
-            Log.w(TAG, "App Lock detected, but no app lock credentials configured.")
-            onComplete(false)
-            return
+            Log.w(TAG, "App Lock detected, but no App Lock PIN/Pattern configured.")
+            return false
         }
 
-        scope.launch {
-            Log.d(TAG, "Auto-unlocking App Lock using $effType...")
+        Log.d(TAG, "App Lock screen detected. Attempting dynamic unlock with $effType...")
 
-            // If a "Use PIN" or "Use password" button is shown (e.g. fingerprint fallback), tap it
-            val usePinBtn = service.findClickableNode("Use PIN")
-                ?: service.findClickableNode("Use password")
-                ?: service.findClickableNode("Password")
-                ?: service.findClickableNode("PIN")
-            usePinBtn?.let {
-                service.clickNode(it)
-                delay(300)
-            }
-
-            when (effType) {
-                TYPE_PIN -> {
-                    service.tapPinDigits(effValue)
+        // Step 1: Only if PIN/Pattern input isn't visible yet (e.g. Fingerprint prompt first),
+        // dynamically tap "Use privacy password / Use PIN / Use Pattern"
+        if (!service.hasVisibleUnlockPrompt()) {
+            val switched = trySwitchToPasswordEntry(service, geminiBrain)
+            if (switched) {
+                for (i in 0 until 8) {
+                    delay(180)
+                    if (service.hasVisibleUnlockPrompt()) break
                 }
-                TYPE_PATTERN -> {
-                    val dots = parsePatternDots(effValue)
-                    if (dots.size >= 2) {
-                        service.drawPattern(dots)
+            }
+        }
+
+        if (!isAppLockScreen(service)) return true
+
+        // Step 2: Dynamically enter PIN or Pattern from live window nodes (zero hardcoded coordinates)
+        val entered = when (effType) {
+            TYPE_PIN -> service.enterPinDynamic(effValue) { isAppLockScreen(service) }
+            TYPE_PATTERN -> {
+                val dots = parsePatternDots(effValue)
+                if (dots.size >= 2) service.drawPatternDynamic(dots) else false
+            }
+            else -> false
+        }
+
+        if (!entered) {
+            Log.w(TAG, "Dynamic App Lock input could not find accessible PIN/Pattern nodes on this OEM window.")
+            return false
+        }
+
+        for (i in 0 until 8) {
+            delay(200)
+            if (!isAppLockScreen(service)) {
+                Log.d(TAG, "App Lock unlocked successfully!")
+                return true
+            }
+        }
+
+        val unlocked = !isAppLockScreen(service)
+        Log.d(TAG, "App Lock unlock completed. Unlocked=$unlocked")
+        return unlocked
+    }
+
+    /**
+     * Finds and taps the dynamic button that switches biometric/fingerprint prompts
+     * to Privacy Password / PIN / Pattern entry across OnePlus, Xiaomi, Samsung, Pixel, WhatsApp, etc.
+     */
+    private suspend fun trySwitchToPasswordEntry(
+        service: JarvisAccessibilityService,
+        geminiBrain: GeminiBrain?
+    ): Boolean {
+        val switchPhrases = listOf(
+            "use privacy password",
+            "enter privacy password",
+            "verify privacy password",
+            "use screen lock",
+            "use password",
+            "use pattern",
+            "use pin",
+            "privacy password",
+            "verify password",
+            "enter password",
+            "enter pin"
+        )
+        val forbiddenWords = listOf("forgot", "reset", "cancel", "help", "change")
+
+        // Deterministic fast search across all active windows
+        for (phrase in switchPhrases) {
+            val btn = service.findNodeAcrossWindows(resolveClickableParent = true) { node ->
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                if (bounds.width() <= 0 || bounds.height() <= 0) return@findNodeAcrossWindows false
+
+                val txt = node.text?.toString()?.trim()?.lowercase() ?: ""
+                val cd = node.contentDescription?.toString()?.trim()?.lowercase() ?: ""
+                val combined = "$txt $cd".trim()
+
+                if (forbiddenWords.any { combined.contains(it) }) return@findNodeAcrossWindows false
+                val matches = txt == phrase || cd == phrase || txt.contains(phrase) || cd.contains(phrase)
+                val clickableSelfOrParent = node.isClickable || node.parent?.isClickable == true
+                matches && clickableSelfOrParent
+            }
+            if (btn != null) {
+                Log.d(TAG, "Tapping dynamic App Lock switch button matching '$phrase'")
+                service.tapNodeDynamically(btn, allowDualTap = true)
+                return true
+            }
+        }
+
+        // Fallback: If unfamiliar OEM wording is shown and no keypad/pattern is visible yet, ask Gemini ONLY on screen UI labels
+        if (!service.hasVisibleUnlockPrompt() && geminiBrain != null) {
+            val elements = service.dumpAllWindowsElements()
+            val summary = service.dumpAllWindowsElementsSummary()
+            if (summary.isNotBlank() && !summary.contains("secure window")) {
+                val prompt = """
+You are looking at an Android App Lock / Biometric prompt screen:
+$summary
+
+Task: If there is a button to switch from fingerprint/face unlock to entering Privacy Password, PIN, Pattern, or Password, choose "tap_tag" with its [tag].
+NEVER tap Cancel, Forgot password, or Emergency.
+If password/PIN/pattern input is already ready on screen or no switch button exists, choose "done".
+OUTPUT ONLY RAW JSON:
+{"action":"tap_tag"|"done","tag":<number or null>,"text":null,"direction":null,"summary":null}
+""".trimIndent()
+                val decision = geminiBrain.decideUIAction(prompt)
+                if (decision.action.equals("tap_tag", ignoreCase = true) && decision.tag != null) {
+                    val target = elements.find { it.tag == decision.tag }
+                    if (target != null) {
+                        Log.d(TAG, "Gemini dynamic fallback tapping App Lock tag [${decision.tag}]")
+                        service.tapNodeDynamically(target.node, allowDualTap = true)
+                        return true
                     }
                 }
             }
-
-            delay(800) // Allow app to open after unlocking
-            val stillLocked = isAppLockScreen(service)
-            Log.d(TAG, "App Lock unlock finished. Still locked: $stillLocked")
-            onComplete(!stillLocked)
         }
-    }
 
-    private fun parsePatternDots(raw: String): List<Int> {
-        return raw.split(Regex("[,\\-\\s]+")).mapNotNull { it.toIntOrNull() }.filter { it in 1..9 }
+        return false
     }
 }

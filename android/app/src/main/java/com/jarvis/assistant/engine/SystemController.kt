@@ -27,6 +27,9 @@ data class AppCandidate(val label: String, val packageName: String, val score: I
 
 class SystemController(private val context: Context) {
 
+    val appContext: Context
+        get() = context.applicationContext
+
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
