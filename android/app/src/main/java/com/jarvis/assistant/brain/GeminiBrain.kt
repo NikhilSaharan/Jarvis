@@ -214,14 +214,16 @@ Extract the exact social app intent from Sir's command: "$clean"
 
 Classify "actionType":
 - "dm": sending a direct message/reply to a person (e.g. "Anuj ko hello bhejo", "Rahul ko message karo ki main busy hoon").
-- "chat_media": opening or playing a reel, post, or video that a specific friend/person SENT in chat/DM (e.g. "Vishal Yadav ne jo latest reel bheji hai wo chalao", "Anuj ki bheji hui reel dekho").
-- "story": watching/opening someone's story or status (e.g. "Rahul ki story dikhao", "Anuj ka status dekho").
+- "read_dm": opening a specific person's chat/DM to mark it seen and read aloud the last message they sent (e.g. "Vishal Yadav ne last kya message bheja hai", "Anuj ka last msg padh ke batao", "check karo Rahul ne kya likha hai").
+- "chat_media_all": playing ALL reels/videos sent by a specific person in their chat/DM one by one (e.g. "Vishal Yadav ne jo jo reel bheji hai saari play kar de", "Anuj ki bheji hui saari reels chalao").
+- "chat_media": opening or playing the latest reel, post, or video that a specific friend/person SENT in chat/DM (e.g. "Vishal Yadav ne kya reel bheji hai wo dikhao", "Vishal Yadav ne jo latest reel bheji hai wo chalao", "Anuj ki bheji hui reel dekho").
+- "story": watching/opening someone's story or status from the homepage story tray (e.g. "Rahul ki story dikhao", "Anuj ka status dekho").
 - "follow": following or opening a new public account/profile (e.g. "virat kohli ko follow karo", "Neha ka account open karo").
 - "reels": opening, playing, or scrolling the general Reels feed with NO specific sender named (e.g. "reels chalao", "next reel", "reels dekho").
 - "other": anything else.
 
 OUTPUT ONLY RAW JSON:
-{"actionType":"dm|chat_media|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text to send if dm, else empty string>"}
+{"actionType":"dm|read_dm|chat_media|chat_media_all|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text to send if dm, else empty string>"}
 """.trimIndent()
 
         for (model in models) {
@@ -359,7 +361,7 @@ CORE OPERATING PRINCIPLES:
    - send_sms(recipient: string, message: string): Sends a normal SMS text message.
    - play_youtube(query: string): ONLY when Sir explicitly asks to play a song, music, or video on YouTube.
    - open_app(app_name: string): ONLY when Sir specifically asks to just launch or open an app without further actions.
-   - universal_app_action(app_name: string, instruction: string): Use whenever Sir commands ANY multi-step task, in-app action, searching, content playing, note creation, table writing, feed scrolling, or in-app navigation.
+   - universal_app_action(app_name: string, instruction: string): Use whenever Sir commands ANY multi-step task, in-app action, searching, content playing, reading/checking recent messages or shared reels inside an app (e.g. "last kya message bheja hai"), note creation, table writing, feed scrolling, or in-app navigation.
    - tap_tag(tag: int): Taps on a numbered element [tag] from the Live Screen Elements.
    - type_tag(tag: int, text: string): Types text into a numbered input field [tag] from Live Screen Elements.
    - scroll_screen(direction: "down"|"up"): Swipes/scrolls the active screen.

@@ -1,6 +1,6 @@
 {
-  "versionCode": 9,
-  "versionName": "1.0.8",
+  "versionCode": 10,
+  "versionName": "1.0.9",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Instant DM search & sending (~1-2s), friend Story lookup via Messages before Explore search, and playing friend-shared reels directly inside DM chats."
+  "changelog": "Home story tray left-swipe story lookup without Search, friend DM shared reel single & play-all playback, and Seen + read aloud last DM message."
 }
