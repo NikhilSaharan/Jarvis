@@ -11,6 +11,7 @@ import com.jarvis.assistant.MainActivity
 import com.jarvis.assistant.engine.NodeActionEngine
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.engine.TelephonyHelper
+import com.jarvis.assistant.engine.UniversalAppAgent
 import com.jarvis.assistant.security.AutoUnlockManager
 import com.jarvis.assistant.voice.SpeakerHelper
 import kotlinx.coroutines.CoroutineScope
@@ -100,6 +101,17 @@ class TaskAlarmReceiver : BroadcastReceiver() {
                     "set_dnd" -> {
                         val enabled = (args["enabled"] as? Boolean) ?: true
                         systemController.setDnd(enabled)
+                    }
+                    "instagram_send_message",
+                    "instagram_read_last_message",
+                    "instagram_watch_story",
+                    "instagram_follow_account",
+                    "instagram_play_chat_reels",
+                    "instagram_play_reels" -> {
+                        UniversalAppAgent(context, systemController, nodeActionEngine)
+                            .performInstagramTool(action, args, null) { _, reply ->
+                                if (reply.isNotBlank()) speakerHelper.speak(reply)
+                            }
                     }
                     else -> {
                         Log.d("TaskAlarmReceiver", "Background task executed: $action")

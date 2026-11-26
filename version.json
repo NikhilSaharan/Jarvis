@@ -1,6 +1,6 @@
 {
-  "versionCode": 10,
-  "versionName": "1.0.9",
+  "versionCode": 11,
+  "versionName": "1.1.0",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Home story tray left-swipe story lookup without Search, friend DM shared reel single & play-all playback, and Seen + read aloud last DM message."
+  "changelog": "Dedicated fast Instagram tools, strict personal vs group DM matching, verified/official follow prioritization over fanpages, and deep N-reel DM playback."
 }

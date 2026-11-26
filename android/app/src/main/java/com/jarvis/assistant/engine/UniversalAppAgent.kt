@@ -4,8 +4,10 @@ import android.content.Context
 import android.util.Log
 import com.jarvis.assistant.JarvisAccessibilityService
 import com.jarvis.assistant.brain.GeminiBrain
+import com.jarvis.assistant.brain.SocialIntent
 import com.jarvis.assistant.security.AutoUnlockManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -19,15 +21,72 @@ class UniversalAppAgent(
     private val mainScope = CoroutineScope(Dispatchers.Main)
 
     /**
-     * Autonomous Multi-Turn Observation-Action Loop (Human-like smartphone navigation):
-     * 1. Launches target app (Notes, Prime Video, Instagram, Amazon, etc.).
-     * 2. Loops up to 6 turns (Observe -> Reason -> Act -> Repeat).
-     * 3. Completely general & dynamic: Zero hardcoded app templates or button keywords.
+     * Direct typed entrypoint for dedicated Instagram tools (skips 2nd AI intent-parsing call).
+     */
+    fun performInstagramTool(
+        toolName: String,
+        args: Map<String, Any>,
+        geminiBrain: GeminiBrain?,
+        callback: (Boolean, String) -> Unit
+    ) {
+        val (directIntent, fallbackInstruction) = when (toolName) {
+            "instagram_send_message" -> {
+                val rec = (args["recipient"] as? String)?.trim() ?: ""
+                val msg = (args["message"] as? String)?.trim() ?: ""
+                SocialIntent("dm", rec, msg, 1) to "Send direct Instagram message '$msg' to '$rec'"
+            }
+            "instagram_read_last_message" -> {
+                val sender = (args["sender"] as? String)?.trim() ?: ""
+                SocialIntent("read_dm", sender, "", 1) to "Open '$sender' chat on Instagram, mark seen, and read their last message"
+            }
+            "instagram_watch_story" -> {
+                val person = (args["person"] as? String)?.trim() ?: ""
+                SocialIntent("story", person, "", 1) to "Slide Instagram homepage story tray horizontally and watch '$person' story without searching"
+            }
+            "instagram_follow_account" -> {
+                val account = (args["account"] as? String)?.trim() ?: ""
+                SocialIntent("follow", account, "", 1) to "Search Instagram accounts for '$account' and follow the verified/official profile"
+            }
+            "instagram_play_chat_reels" -> {
+                val sender = (args["sender"] as? String)?.trim() ?: ""
+                val count = (args["count"] as? Number)?.toInt() ?: 1
+                val actionType = if (count < 0) "chat_media_all" else "chat_media"
+                val desc = when {
+                    count < 0 -> "Open '$sender' chat on Instagram and play all shared reels from latest upward"
+                    count > 1 -> "Open '$sender' chat on Instagram and play the last $count shared reels from latest upward"
+                    else -> "Open '$sender' chat on Instagram and play the latest shared reel"
+                }
+                SocialIntent(actionType, sender, "", count) to desc
+            }
+            "instagram_play_reels" -> {
+                val next = (args["next"] as? Boolean) == true
+                val instr = if (next) "scroll next reel" else "open reels"
+                SocialIntent("reels", "", "", 1) to instr
+            }
+            else -> {
+                SocialIntent("other", "", "", 1) to toolName
+            }
+        }
+        executeInternal("Instagram", fallbackInstruction, directIntent, geminiBrain, callback)
+    }
+
+    /**
+     * Autonomous Multi-Turn Observation-Action Loop for general apps and fallback UI tasks.
      */
     fun performAppAction(
         appName: String,
         instruction: String,
         geminiBrain: GeminiBrain,
+        callback: (Boolean, String) -> Unit
+    ) {
+        executeInternal(appName, instruction, null, geminiBrain, callback)
+    }
+
+    private fun executeInternal(
+        appName: String,
+        instruction: String,
+        directSocialIntent: SocialIntent?,
+        geminiBrain: GeminiBrain?,
         callback: (Boolean, String) -> Unit
     ) {
         mainScope.launch {
@@ -47,8 +106,8 @@ class UniversalAppAgent(
             val lowerApp = appName.lowercase().trim()
             val isInstagram = lowerApp.contains("instagram") || lowerApp.contains("insta")
 
-            // Parse social goal in parallel while launching app (0ms overhead)
-            val socialIntentJob = if (isInstagram) {
+            // Only invoke extractSocialIntent when arriving via generic universal_app_action without a typed tool
+            val socialIntentJob: Deferred<SocialIntent>? = if (isInstagram && directSocialIntent == null && geminiBrain != null) {
                 async { geminiBrain.extractSocialIntent(instruction) }
             } else {
                 null
@@ -61,37 +120,40 @@ class UniversalAppAgent(
                 return@launch
             }
 
-            // Poll dynamically every 120ms until target app (or App Lock) renders (fast on warm launch!)
-            delay(250)
+            // Poll fast every 70ms until target app (or App Lock) renders
+            delay(120)
             val launchStart = System.currentTimeMillis()
-            while (System.currentTimeMillis() - launchStart < 2000) {
+            while (System.currentTimeMillis() - launchStart < 1800) {
                 if (AutoUnlockManager.isAppLockScreen(service)) break
                 val activePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
                 val appReady = activePkg.isNotBlank() && activePkg != context.packageName.lowercase() &&
                     (!isInstagram || activePkg.contains("instagram"))
                 if (appReady && service.dumpScreenElements().isNotEmpty()) break
-                delay(120)
+                delay(70)
             }
 
-            // 2. Auto-unlock App Lock if target app is protected (taps Use Privacy Password / PIN / Pattern dynamically)
+            // 2. Auto-unlock App Lock if target app is protected
             if (AutoUnlockManager.isAppLockScreen(service)) {
                 AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
-                delay(700)
+                delay(650)
             }
 
             val actionHistory = mutableListOf<String>()
 
-            // 3. Instant Live-Tree Fast-Path for Instagram (DMs, Stories, Follow, Reels) — zero static coords!
-            if (socialIntentJob != null) {
-                val socialIntent = socialIntentJob.await()
-                if (socialIntent.actionType != "other") {
-                    val fastResult = InstagramTreeNavigator.execute(service, socialIntent, instruction)
-                    if (fastResult.handled) {
-                        callback(fastResult.success, fastResult.message)
-                        return@launch
-                    }
-                    actionHistory.addAll(fastResult.stepsTaken)
+            // 3. Instant Live-Tree Fast-Path for Instagram — zero static coords, zero extra AI calls for direct tools!
+            val resolvedSocialIntent = directSocialIntent ?: socialIntentJob?.await()
+            if (isInstagram && resolvedSocialIntent != null && resolvedSocialIntent.actionType != "other") {
+                val fastResult = InstagramTreeNavigator.execute(service, resolvedSocialIntent, instruction)
+                if (fastResult.handled) {
+                    callback(fastResult.success, fastResult.message)
+                    return@launch
                 }
+                actionHistory.addAll(fastResult.stepsTaken)
+            }
+
+            if (geminiBrain == null) {
+                callback(false, "Sir, $appName par action complete nahi ho saka.")
+                return@launch
             }
 
             val maxTurns = 10
@@ -102,10 +164,9 @@ class UniversalAppAgent(
             while (turn < maxTurns && !isCompleted) {
                 turn++
                 if (turn > 1) {
-                    delay(350) // Short settle time between turns (replaces 1.7s blind sleep)
+                    delay(350)
                 }
 
-                // Auto-unlock App Lock if it appeared midway
                 if (AutoUnlockManager.isAppLockScreen(service)) {
                     AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
                     actionHistory.add("Auto-unlocked App Lock")
@@ -115,7 +176,7 @@ class UniversalAppAgent(
 
                 val screenSummary = service.dumpScreenElementsSummary()
                 if (screenSummary.isBlank() || screenSummary.contains("empty")) {
-                    delay(800)
+                    delay(700)
                     continue
                 }
 
@@ -133,25 +194,21 @@ Sir's Overall Goal: "$instruction"
 
 TREE-BASED NAVIGATION & EXECUTION RULES (FOLLOW LIVE UI TREE STRICTLY — ZERO RANDOM CLICKS):
 1. ROUTE TO THE RIGHT APP SECTION BASED ON SIR'S INTENT:
-   - DIRECT MESSAGE / CHAT / DM GOAL (e.g. "msg bhejo", "DM karo", "reply karo"):
-     * Do NOT use the public Explore/Account Search tab first!
-     * Look in the live tree for the Messages / Direct / Inbox / Chat button or icon and tap it FIRST.
-     * Inside Messages, tap the chat Search bar/button (tap it first if it shows as 'button' instead of 'input_field'), type the recipient's name, tap the matching chat row, tap the message 'input_field', type the message, and tap Send.
-   - READ LAST DM MESSAGE GOAL (e.g. "last kya message bheja hai", "msg padh ke batao"):
-     * Go to Messages / Inbox -> search that friend -> open their chat thread so it marks Seen -> read the latest incoming message text from the friend in the tree and speak it clearly in "reply".
-   - FRIEND-SENT REEL / VIDEO / POST IN DM (e.g. "Vishal Yadav ne kya reel bheji hai wo dikhao", "saari reels chalao"):
+   - DIRECT MESSAGE / CHAT / DM GOAL:
+     * Do NOT use public Explore Search first! Tap the Messages / Direct / Inbox button first.
+     * Inside Messages, tap the Search bar first if labeled 'button' instead of 'input_field', type <recipient>, tap the matching one-to-one personal chat row (SKIP group chats with multiple member names unless explicitly targeting a group, and skip Meta AI suggestion rows), tap message 'input_field', type message, and tap Send.
+   - READ LAST DM MESSAGE GOAL:
+     * Go to Messages / Inbox -> search <sender> -> open their one-to-one chat thread so it marks Seen -> read the latest incoming message text from the tree and speak it clearly in "reply".
+   - FRIEND-SENT REEL / VIDEO / POST IN DM:
      * Do NOT open the generic Reels bottom tab!
-     * Go to Messages / Inbox -> search that friend -> open their chat thread -> tap the latest (bottom-most) shared reel/video preview card inside the chat!
-   - STORY WATCHING GOAL (e.g. "story dikhao", "story dekho"):
+     * Go to Messages / Inbox -> search <sender> -> open their one-to-one chat thread -> scroll up if needed and tap shared reel/video preview card(s) inside the chat.
+   - STORY WATCHING GOAL:
      * Stay strictly on the Home feed Story Tray — NEVER open Search (neither Explore nor DM Search) for stories!
-     * Check visible story bubbles on Home; if not visible, keep scrolling/swiping the horizontal Story tray cleanly until the person's story appears and tap it. If not present in the Home Story tray, stop cleanly and inform Sir. NEVER tap unrelated feed posts or ads.
-   - FOLLOW / OPEN A NEW ACCOUNT OR PROFILE GOAL (e.g. "follow karo", "account kholo"):
-     * Tap the normal Search / Explore tab or icon from the navigation bar (NOT Messages).
-     * Tap the Search bar first if it is labeled 'button', wait for an 'input_field' to appear, then type the account/username.
-     * Tap the matching account row in results (switch to an "Accounts" tab/filter if only posts grid appears), open their profile, and tap "Follow" (or "Follow Back"). If it already says "Following" or "Requested", do NOT tap again — choose "done".
-   - GENERIC REELS / SHORTS / VIDEO TAB GOAL (e.g. "reel chalao", "reels dekho", "next reel" with NO friend sender):
-     * First check the live tree to see if the Reels / Videos tab is already active (marked 'selected') or already showing a Reels player.
-     * If NOT on the Reels tab yet, tap the "Reels" (or Video/Shorts) tab/button FIRST instead of scrolling Home photos. Once on Reels, scroll if asked or choose "done".
+     * Scroll/swipe the horizontal Story tray cleanly until <person>'s story bubble appears and tap it. If absent in the Home Story tray, stop cleanly and inform Sir.
+   - FOLLOW / OPEN A PUBLIC ACCOUNT OR PROFILE GOAL:
+     * Tap the normal Search / Explore tab -> type <account> -> check Accounts tab if needed -> prioritize the Verified / official primary account match and strictly avoid fanpages, parody, or backup accounts -> open profile and tap "Follow" (stop if already "Following" or "Requested").
+   - GENERIC REELS / VIDEO TAB GOAL (NO friend sender):
+     * Tap the Reels / Video tab if not already active; scroll if asked or choose "done".
    - GENERAL MEDIA / MOVIES / SHOWS / ITEMS:
      * Prefer Search over endless scrolling; tap the matching item/show card and tap Play / Resume to start playback.
 
@@ -161,14 +218,12 @@ TREE-BASED NAVIGATION & EXECUTION RULES (FOLLOW LIVE UI TREE STRICTLY — ZERO R
    - Never repeat the exact same failed action consecutively — adapt directly from the updated UI tree.
 
 3. CONTENT CREATION & NOTES (TABLES, LISTS, MEMOS):
-   - When Sir's goal is to create or write structured content (e.g. a table, list, notes, checklist, memo):
-   - Do NOT get trapped clicking proprietary formatting buttons, table grid wizards, or column add dialogs.
-   - Construct the COMPLETE, cleanly formatted content (Markdown or aligned text table, bullet list, etc.) directly inside the "text" field of "type_tag" and inject it into the note's main 'input_field' in one clean action!
-   - Once typed, tap a Save/Done/Tick button if needed, or choose "done".
+   - Construct the COMPLETE, cleanly formatted content directly inside the "text" field of "type_tag" and inject it into the note's main 'input_field' in one clean action!
+   - Once typed, tap Save/Done/Tick if needed, or choose "done".
 
 4. VERIFY COMPLETION OR NOT FOUND:
-   - Confirm from the latest Live Screen UI Tree Elements that the message sent, story opened, follow button changed to Following/Requested, or reel is active before choosing "done".
-   - If the target contact, account, story, or show is genuinely not found after searching, choose "done" with an honest spoken Hinglish summary (e.g. "Anuj nahi mila Sir").
+   - Confirm from the latest Live Screen UI Tree Elements that the goal succeeded before choosing "done".
+   - If genuinely not found, choose "done" with a short, honest spoken Hinglish reply.
 
 Decide the best next single action:
 - "tap_tag": Tap a numbered element [tag] from the Live Screen UI Tree.
@@ -181,9 +236,9 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
   "action": "tap_tag" | "type_tag" | "scroll_screen" | "back" | "done",
   "tag": <number or null>,
-  "text": "<text to type, or full generated table/list/note content, or null>",
+  "text": "<text to type, or full generated content, or null>",
   "direction": "down" | "up" | null,
-  "summary": "<When continuing: short step log. When done: a single, natural, clean sentence in spoken Hinglish to Sir confirming what happened, e.g. 'Instagram par Anuj ko hello bhej diya hai Sir' or 'Reels chala di hain Sir'. NEVER include robotic words like 'goal complete', 'execute', or app prefixes.>"
+  "summary": "<When continuing: short step log. When done: a single, natural, clean sentence in spoken Hinglish confirming what happened.>"
 }
 """.trimIndent()
 

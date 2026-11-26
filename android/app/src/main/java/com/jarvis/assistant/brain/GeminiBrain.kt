@@ -27,9 +27,10 @@ data class UIActionDecision(
 )
 
 data class SocialIntent(
-    val actionType: String, // "dm", "story", "follow", "reels", "other"
+    val actionType: String, // "dm", "read_dm", "chat_media", "chat_media_all", "story", "follow", "reels", "other"
     val target: String,
-    val message: String
+    val message: String,
+    val count: Int = 1 // 1 = latest, N = last N shared items, -1 = all available
 )
 
 class GeminiBrain(
@@ -200,12 +201,11 @@ class GeminiBrain(
     }
 
     /**
-     * Parses a Hinglish/English social app goal (e.g. "Anuj ko hello bhejo") into structured intent
-     * in a single fast request (run in parallel with app launch).
+     * Parses a user command for social app navigation into structured typed intent.
      */
     suspend fun extractSocialIntent(instruction: String): SocialIntent = withContext(Dispatchers.IO) {
         if (apiKey.isBlank() || apiKey.startsWith("your_")) {
-            return@withContext SocialIntent("other", "", "")
+            return@withContext SocialIntent("other", "", "", 1)
         }
 
         val clean = instruction.replace("\"", "'").trim()
@@ -213,17 +213,17 @@ class GeminiBrain(
 Extract the exact social app intent from Sir's command: "$clean"
 
 Classify "actionType":
-- "dm": sending a direct message/reply to a person (e.g. "Anuj ko hello bhejo", "Rahul ko message karo ki main busy hoon").
-- "read_dm": opening a specific person's chat/DM to mark it seen and read aloud the last message they sent (e.g. "Vishal Yadav ne last kya message bheja hai", "Anuj ka last msg padh ke batao", "check karo Rahul ne kya likha hai").
-- "chat_media_all": playing ALL reels/videos sent by a specific person in their chat/DM one by one (e.g. "Vishal Yadav ne jo jo reel bheji hai saari play kar de", "Anuj ki bheji hui saari reels chalao").
-- "chat_media": opening or playing the latest reel, post, or video that a specific friend/person SENT in chat/DM (e.g. "Vishal Yadav ne kya reel bheji hai wo dikhao", "Vishal Yadav ne jo latest reel bheji hai wo chalao", "Anuj ki bheji hui reel dekho").
-- "story": watching/opening someone's story or status from the homepage story tray (e.g. "Rahul ki story dikhao", "Anuj ka status dekho").
-- "follow": following or opening a new public account/profile (e.g. "virat kohli ko follow karo", "Neha ka account open karo").
-- "reels": opening, playing, or scrolling the general Reels feed with NO specific sender named (e.g. "reels chalao", "next reel", "reels dekho").
+- "dm": sending a direct personal message/reply to a recipient.
+- "read_dm": opening a specific sender's DM chat to mark it seen and read aloud their latest incoming message.
+- "chat_media": opening or playing the latest reel/video (count=1), last N reels/videos (count=N), or all shared reels (count=-1) sent by a specific person inside their DM chat.
+- "chat_media_all": playing all available reels/videos sent by a specific person inside their DM chat (count=-1).
+- "story": watching someone's story by sliding the homepage story tray horizontally.
+- "follow": searching and following a public account/profile.
+- "reels": opening or scrolling the general Reels feed when NO specific sender is named.
 - "other": anything else.
 
 OUTPUT ONLY RAW JSON:
-{"actionType":"dm|read_dm|chat_media|chat_media_all|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text to send if dm, else empty string>"}
+{"actionType":"dm|read_dm|chat_media|chat_media_all|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text if dm, else empty string>","count":<integer 1 for latest, N for last N requested reels, or -1 for all>}
 """.trimIndent()
 
         for (model in models) {
@@ -262,13 +262,14 @@ OUTPUT ONLY RAW JSON:
                     val actionType = parsed.get("actionType")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.lowercase()?.trim() ?: "other"
                     val target = parsed.get("target")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim() ?: ""
                     val msg = parsed.get("message")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim() ?: ""
-                    return@withContext SocialIntent(actionType, target, msg)
+                    val count = parsed.get("count")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asInt ?: 1
+                    return@withContext SocialIntent(actionType, target, msg, count)
                 }
             } catch (e: Exception) {
                 Log.w("GeminiBrain", "SocialIntent parse error on $model: ${e.message}")
             }
         }
-        SocialIntent("other", "", "")
+        SocialIntent("other", "", "", 1)
     }
 
     /**
@@ -344,8 +345,8 @@ CORE OPERATING PRINCIPLES:
 
 2. CLEAN ACTION EXECUTION (NO ROBOTIC CLICHÉS OR STEP NARRATION):
    - Invoke an action tool ONLY when Sir explicitly gives a direct command to do something.
-   - For multi-step in-app tasks (universal_app_action):
-     - Set `speech`: null. Jarvis will execute the in-app actions silently in the background and confirm once completed.
+   - For multi-step in-app tasks (universal_app_action or instagram_*):
+     - Set `speech`: null. Jarvis will execute the actions and confirm once completed.
    - For direct single-action system tools (e.g. set_dnd, set_alarm, make_phone_call):
      - Provide a short, natural confirmation in `speech` in everyday Hinglish.
    - STRICTLY AVOID robotic English clichés (never say "Right away, Sir", "Opening X for you", "Playing X for you", "Executing X", "At your service").
@@ -354,14 +355,20 @@ CORE OPERATING PRINCIPLES:
 3. HARDWARE & APPLICATION TOOLS:
    - answer_call(): Answers, accepts, or picks up an incoming call (phone or WhatsApp).
    - end_call(): Cuts, ends, or disconnects an ongoing call, or declines/rejects an incoming call.
-   - close_app(app_name: string?): Closes, stops, or kills a specific app (e.g. "YouTube", "Instagram") or media playing in PiP/background, or closes the current screen if none specified.
+   - close_app(app_name: string?): Closes, stops, or kills a specific open app or media playing in PiP/background, or closes the current screen if none specified.
    - make_phone_call(recipient: string): Dials a normal phone call.
    - whatsapp_call(recipient: string, call_type: "voice"|"video"): Starts a WhatsApp audio/voice or video call.
    - send_whatsapp_message(recipient: string, message: string): Sends a WhatsApp message.
+   - instagram_send_message(recipient: string, message: string): Sends a direct personal one-to-one DM message on Instagram to recipient.
+   - instagram_read_last_message(sender: string): Opens sender's Instagram DM chat so it is marked Seen and reads aloud their latest incoming message.
+   - instagram_watch_story(person: string): Opens Instagram homepage and slides the horizontal story tray to play person's active story without using Search.
+   - instagram_follow_account(account: string): Searches Instagram accounts and follows the verified/official matching account (prioritizing genuine profiles over fanpages).
+   - instagram_play_chat_reels(sender: string, count: int): Opens sender's Instagram DM chat and plays shared reels starting from the latest upward (count=1 for latest, count=N for last N requested reels, count=-1 for all shared reels).
+   - instagram_play_reels(next: boolean): Opens Instagram's general Reels feed (only when NO friend sender is named) and scrolls next if next=true.
    - send_sms(recipient: string, message: string): Sends a normal SMS text message.
    - play_youtube(query: string): ONLY when Sir explicitly asks to play a song, music, or video on YouTube.
    - open_app(app_name: string): ONLY when Sir specifically asks to just launch or open an app without further actions.
-   - universal_app_action(app_name: string, instruction: string): Use whenever Sir commands ANY multi-step task, in-app action, searching, content playing, reading/checking recent messages or shared reels inside an app (e.g. "last kya message bheja hai"), note creation, table writing, feed scrolling, or in-app navigation.
+   - universal_app_action(app_name: string, instruction: string): Use for other apps (notes, browsers, shopping, streaming, etc.) or any generic in-app multi-step UI task not covered by a dedicated tool above.
    - tap_tag(tag: int): Taps on a numbered element [tag] from the Live Screen Elements.
    - type_tag(tag: int, text: string): Types text into a numbered input field [tag] from Live Screen Elements.
    - scroll_screen(direction: "down"|"up"): Swipes/scrolls the active screen.
@@ -377,7 +384,7 @@ CORE OPERATING PRINCIPLES:
 OUTPUT FORMAT:
 Respond with ONLY a raw JSON object (no markdown, no backticks, no extra text):
 {
-  "speech": "<Natural, short reply in everyday Hinglish, or null if executing universal_app_action>",
+  "speech": "<Natural, short reply in everyday Hinglish, or null if calling universal_app_action or instagram_*>",
   "tool_name": "<tool_name or null>",
   "tool_args": { ... or null }
 }

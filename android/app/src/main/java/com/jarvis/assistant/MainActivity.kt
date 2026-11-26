@@ -990,6 +990,19 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+            "instagram_send_message",
+            "instagram_read_last_message",
+            "instagram_watch_story",
+            "instagram_follow_account",
+            "instagram_play_chat_reels",
+            "instagram_play_reels" -> {
+                universalAppAgent.performInstagramTool(tool, args, geminiBrain) { _, reply ->
+                    appendLog("[Instagram]: $reply")
+                    if (!alreadySpoken && reply.isNotBlank()) {
+                        speakerHelper.speak(reply)
+                    }
+                }
+            }
             else -> {
                 appendLog("[Tool Warning]: Unknown action '$tool'")
             }

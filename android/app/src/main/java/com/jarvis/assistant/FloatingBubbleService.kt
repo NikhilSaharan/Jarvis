@@ -366,6 +366,18 @@ class FloatingBubbleService : Service() {
                     }
                 }
             }
+            "instagram_send_message",
+            "instagram_read_last_message",
+            "instagram_watch_story",
+            "instagram_follow_account",
+            "instagram_play_chat_reels",
+            "instagram_play_reels" -> {
+                universalAppAgent.performInstagramTool(tool, args, geminiBrain) { _, reply ->
+                    if (!alreadySpoken && reply.isNotBlank()) {
+                        speakerHelper.speak(reply)
+                    }
+                }
+            }
         }
     }
 
