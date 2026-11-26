@@ -233,6 +233,7 @@
                 android:text="[System]: J.A.R.V.I.S. Core initialized.\n[System]: Ready for voice or text commands."
                 android:textColor="#00E5FF"
                 android:textSize="12sp"
+                android:textIsSelectable="true"
                 android:typeface="monospace" />
         </ScrollView>
     </androidx.cardview.widget.CardView>

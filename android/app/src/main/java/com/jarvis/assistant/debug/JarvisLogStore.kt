@@ -3,13 +3,11 @@ package com.jarvis.assistant.debug
 import android.content.Context
 import android.util.Log
 import com.jarvis.assistant.ScreenElement
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 
 /**
  * Shared thread-safe execution trace store capturing A-to-Z runtime telemetry:
@@ -19,14 +17,14 @@ import java.util.Locale
  */
 object JarvisLogStore {
 
-    private const val MAX_LINES = 1200
-    private const val DISPLAY_TAIL_LINES = 350
+    private const val MAX_LINES = 1500
+    private const val DISPLAY_TAIL_LINES = 400
     private const val LOG_FILE_NAME = "jarvis_trace.log"
 
     private val lock = Any()
     private val lines = ArrayDeque<String>()
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
-    private val ioScope = CoroutineScope(Dispatchers.IO)
+    private val fileExecutor = Executors.newSingleThreadExecutor()
 
     @Volatile
     private var logFile: File? = null
@@ -74,10 +72,9 @@ object JarvisLogStore {
         persistLineAsync(formatted)
     }
 
-    fun logScreenTree(stage: String, elements: List<ScreenElement>, limit: Int = 55) {
-        val header = "TREE_SNAPSHOT stage='$stage' count=${elements.size} (showing ${minOf(elements.size, limit)})"
+    fun logScreenTree(stage: String, elements: List<ScreenElement>, limit: Int = 65) {
         val body = buildString {
-            append(header)
+            append("TREE_SNAPSHOT stage='$stage' count=${elements.size}")
             elements.take(limit).forEach { el ->
                 val res = try {
                     el.node.viewIdResourceName?.substringAfterLast('/') ?: ""
@@ -85,9 +82,19 @@ object JarvisLogStore {
                     ""
                 }
                 val b = el.bounds
-                val txt = el.text.replace("\n", " ").take(65)
-                val cd = el.contentDescription.replace("\n", " ").take(65)
-                append("\n  [${el.tag}] cls=${el.className} txt='$txt' cd='$cd' res='$res' bounds=[${b.left},${b.top},${b.right},${b.bottom}] click=${el.isClickable} edit=${el.isEditable} sel=${el.node.isSelected}")
+                val txt = el.text.replace("\n", " ").take(75)
+                val cd = el.contentDescription.replace("\n", " ").take(75)
+                val flags = buildList {
+                    if (el.isClickable) add("C")
+                    if (el.isEditable) add("E")
+                    if (el.node.isSelected) add("S")
+                }.joinToString(",")
+                append("\n  [${el.tag}] ${el.className}")
+                if (txt.isNotEmpty()) append(" txt='$txt'")
+                if (cd.isNotEmpty() && cd != txt) append(" cd='$cd'")
+                if (res.isNotEmpty()) append(" id='$res'")
+                append(" [${b.left},${b.top},${b.right},${b.bottom}]")
+                if (flags.isNotEmpty()) append(" [$flags]")
             }
         }
         log("UI_TREE", body)
@@ -101,7 +108,7 @@ object JarvisLogStore {
             ""
         }
         val b = el.bounds
-        return "tag=${el.tag} cls=${el.className} txt='${el.text.replace("\n", " ").take(50)}' cd='${el.contentDescription.replace("\n", " ").take(50)}' res='$res' bounds=[${b.left},${b.top},${b.right},${b.bottom}] click=${el.isClickable} edit=${el.isEditable} sel=${el.node.isSelected}"
+        return "tag=${el.tag} ${el.className} txt='${el.text.replace("\n", " ").take(55)}' cd='${el.contentDescription.replace("\n", " ").take(55)}' id='$res' [${b.left},${b.top},${b.right},${b.bottom}] click=${el.isClickable} edit=${el.isEditable}"
     }
 
     fun getFullLogText(): String = synchronized(lock) {
@@ -119,10 +126,13 @@ object JarvisLogStore {
         synchronized(lock) {
             lines.clear()
         }
-        ioScope.launch {
-            try {
-                logFile?.writeText("")
-            } catch (_: Exception) {
+        val f = logFile
+        if (f != null) {
+            fileExecutor.execute {
+                try {
+                    f.writeText("")
+                } catch (_: Exception) {
+                }
             }
         }
         log("SYSTEM", "Console trace logs cleared.")
@@ -130,9 +140,9 @@ object JarvisLogStore {
 
     private fun persistLineAsync(entry: String) {
         val f = logFile ?: return
-        ioScope.launch {
+        fileExecutor.execute {
             try {
-                if (f.exists() && f.length() > 350_000L) {
+                if (f.exists() && f.length() > 400_000L) {
                     val snapshot = synchronized(lock) { lines.joinToString("\n") }
                     f.writeText(if (snapshot.isNotEmpty()) "$snapshot\n" else "")
                 } else {

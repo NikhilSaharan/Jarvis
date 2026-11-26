@@ -275,6 +275,16 @@ class JarvisAccessibilityService : AccessibilityService() {
 
             val nodeArea = bounds.width().toLong() * bounds.height().toLong()
             val isHugeWrapper = !isEditable && nodeArea > (screenArea * 0.72) && text.isBlank() && cdOrHint.isBlank()
+            val isLargeClickableCard = isClickable &&
+                bounds.width() >= (screenRect.width() * 0.24f).toInt() &&
+                bounds.height() >= (screenRect.height() * 0.11f).toInt()
+            val isLargeVisualMedia = bounds.width() >= (screenRect.width() * 0.22f).toInt() &&
+                bounds.height() >= (screenRect.height() * 0.12f).toInt() &&
+                (cls.contains("ImageView", ignoreCase = true) ||
+                    cls.contains("TextureView", ignoreCase = true) ||
+                    cls.contains("VideoView", ignoreCase = true) ||
+                    cls.contains("SurfaceView", ignoreCase = true) ||
+                    cls.contains("DraweeView", ignoreCase = true))
 
             var emittedThisNode = false
             if (isInteractive && !isHugeWrapper) {
@@ -284,7 +294,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                     isClickable -> collectDescendantLabels(node)
                     else -> ""
                 }
-                if (aggregatedLabel.isNotBlank() || resId.isNotBlank() || isEditable) {
+                if (aggregatedLabel.isNotBlank() || resId.isNotBlank() || isEditable || isLargeClickableCard) {
                     elements.add(
                         ScreenElement(
                             tag = counter++,
@@ -299,7 +309,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                     )
                     emittedThisNode = true
                 }
-            } else if (!insideClickableParent && !isHugeWrapper && (text.isNotBlank() || cdOrHint.isNotBlank())) {
+            } else if (!insideClickableParent && !isHugeWrapper && (text.isNotBlank() || cdOrHint.isNotBlank() || isLargeVisualMedia)) {
                 elements.add(
                     ScreenElement(
                         tag = counter++,
