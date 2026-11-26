@@ -127,25 +127,29 @@ class UniversalAppAgent(
                 return@launch
             }
 
-            // Poll fast every 70ms until target app (or App Lock) renders
-            delay(120)
+            // Poll fast every 45ms until target app (or App Lock) renders
+            delay(50)
             val launchStart = System.currentTimeMillis()
             var finalActivePkg = ""
-            while (System.currentTimeMillis() - launchStart < 1800) {
+            while (System.currentTimeMillis() - launchStart < 1500) {
                 if (AutoUnlockManager.isAppLockScreen(service)) break
                 finalActivePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
                 val appReady = finalActivePkg.isNotBlank() && finalActivePkg != context.packageName.lowercase() &&
                     (!isInstagram || finalActivePkg.contains("instagram"))
                 if (appReady && service.dumpScreenElements().isNotEmpty()) break
-                delay(70)
+                delay(45)
             }
             JarvisLogStore.log("APP_READY", "pkg='$finalActivePkg' waitMs=${System.currentTimeMillis() - launchStart}")
 
-            // 2. Auto-unlock App Lock if target app is protected
+            // 2. Auto-unlock App Lock if target app is protected (poll immediately instead of blind 650ms sleep)
             if (AutoUnlockManager.isAppLockScreen(service)) {
                 JarvisLogStore.log("APPLOCK", "Detected AppLock; attempting unlock")
                 AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
-                delay(650)
+                val unlockStart = System.currentTimeMillis()
+                while (System.currentTimeMillis() - unlockStart < 700) {
+                    if (!AutoUnlockManager.isAppLockScreen(service) && service.dumpScreenElements().isNotEmpty()) break
+                    delay(45)
+                }
             }
 
             val actionHistory = mutableListOf<String>()
@@ -174,6 +178,8 @@ class UniversalAppAgent(
             var turn = 0
             var finalMsg = ""
             var isCompleted = false
+            var lastTapKey = ""
+            var repeatedTapCount = 0
 
             while (turn < maxTurns && !isCompleted) {
                 turn++
@@ -231,8 +237,8 @@ TREE-BASED NAVIGATION & EXECUTION RULES (FOLLOW LIVE UI TREE STRICTLY — ZERO R
 
 2. INPUT FIELDS & SCREEN NAVIGATION SAFETY:
    - ONLY call "type_tag" on an element labeled 'input_field'. If a search box or text box shows as 'button', call "tap_tag" FIRST so the editable 'input_field' opens on the next turn.
-   - NEVER tap random feed posts, comments, or generic empty wrappers. If an unintended post/popup covers the screen and main navigation tabs/buttons are missing, use "back" to return.
-   - Never repeat the exact same failed action consecutively — adapt directly from the updated UI tree.
+   - NEVER tap the top username header ('igds_action_bar_title') that opens "Add Instagram" / account switcher, and NEVER tap random feed posts or comments. If a popup/account-menu opens or main navigation tabs are missing, use "back" to dismiss it.
+   - Never repeat the exact same tap on an unchanged screen — switch to "back" or a different action cleanly.
 
 3. CONTENT CREATION & NOTES (TABLES, LISTS, MEMOS):
    - Construct the COMPLETE, cleanly formatted content directly inside the "text" field of "type_tag" and inject it into the note's main 'input_field' in one clean action!
@@ -282,6 +288,22 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     }
                     "tap_tag" -> {
                         val targetTag = decision.tag ?: 1
+                        val tapKey = "$targetTag|${screenSummary.hashCode()}"
+                        if (tapKey == lastTapKey) {
+                            repeatedTapCount++
+                        } else {
+                            lastTapKey = tapKey
+                            repeatedTapCount = 0
+                        }
+                        if (repeatedTapCount >= 1) {
+                            val backOk = service.performBack()
+                            JarvisLogStore.log("FALLBACK_LOOP_BREAK", "Repeated tap on [$targetTag] with unchanged screen; pressed Back ok=$backOk")
+                            actionHistory.add("Screen unchanged after repeating tap [$targetTag]; pressed Back")
+                            lastTapKey = ""
+                            repeatedTapCount = 0
+                            delay(450)
+                            continue
+                        }
                         val pickedEl = service.findTaggedElement(targetTag)
                         JarvisLogStore.log("FALLBACK_PICKED_NODE", "tap_tag($targetTag) -> ${JarvisLogStore.describeElement(pickedEl)}")
                         var tapOk = false
@@ -320,10 +342,10 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     }
                     "scroll_screen" -> {
                         val dir = decision.direction ?: "down"
-                        val ok = service.scroll(dir)
+                        val ok = service.scrollExact(dir)
                         JarvisLogStore.log("FALLBACK_EXEC", "scroll_screen($dir) ok=$ok")
                         actionHistory.add("Scrolled screen $dir")
-                        delay(550)
+                        delay(180)
                     }
                     "back" -> {
                         val ok = service.performBack()

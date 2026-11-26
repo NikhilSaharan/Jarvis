@@ -113,7 +113,17 @@ class GeminiBrain(
                     val toolName = parsedDecision.get("tool_name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
                     val rawSpeech = parsedDecision.get("speech")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
                     val reasoning = parsedDecision.get("reasoning")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
-                    val speech = if (toolName == null && rawSpeech == null) "Ji Sir?" else rawSpeech
+                    val asyncExecutionTools = setOf(
+                        "send_whatsapp_message", "whatsapp_call", "make_phone_call", "send_sms",
+                        "play_youtube", "open_app", "universal_app_action",
+                        "instagram_send_message", "instagram_read_last_message", "instagram_watch_story",
+                        "instagram_follow_account", "instagram_play_chat_reels", "instagram_play_reels"
+                    )
+                    val speech = when {
+                        toolName != null && toolName in asyncExecutionTools -> null
+                        toolName == null && rawSpeech == null -> "Ji Sir?"
+                        else -> rawSpeech
+                    }
                     val argsObj = parsedDecision.get("tool_args")?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
 
                     val argsMap = mutableMapOf<String, Any>()
@@ -384,9 +394,9 @@ CORE OPERATING PRINCIPLES:
 
 2. CLEAN ACTION EXECUTION (NO ROBOTIC CLICHÉS OR STEP NARRATION):
    - Invoke an action tool ONLY when Sir explicitly gives a direct command or asks to check/perform an in-app action.
-   - For multi-step in-app tasks (universal_app_action or instagram_*):
-     - Set `speech`: null. Jarvis will execute the actions and confirm once completed.
-   - For direct single-action system tools (e.g. set_dnd, set_alarm, make_phone_call):
+   - For app, calling, messaging, and media tools (universal_app_action, instagram_*, send_whatsapp_message, whatsapp_call, make_phone_call, send_sms, play_youtube):
+     - Set `speech`: null. Never say "Bhej diya" or "Kar diya" before the tool finishes executing!
+   - For direct single-action device settings tools (set_dnd, set_brightness, set_alarm, set_timer):
      - Provide a short, natural confirmation in `speech` in everyday Hinglish.
    - STRICTLY AVOID robotic English clichés (never say "Right away, Sir", "Opening X for you", "Playing X for you", "Executing X", "At your service").
    - NEVER narrate internal steps, screens, or UI buttons (do not say what screen was opened, what was typed, or what button was tapped). Let the tool execute cleanly.

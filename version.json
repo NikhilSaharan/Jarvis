@@ -1,6 +1,6 @@
 {
-  "versionCode": 15,
-  "versionName": "1.1.4",
+  "versionCode": 17,
+  "versionName": "1.1.6",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Fix scrolled-down Inbox detection and Search history double-tap, back out cleanly from shared Reels to Home Story tray, detect non-clickable Litho Reel cards, guard 503 errors, and add one-tap Save .txt full logs export."
+  "changelog": "Zero-fling exact scroll for instant tap accuracy, pure structural UI tree state detection (tab selection & section containers instead of fragile words), and tighter fast-path polling across AppLock & Instagram."
 }

@@ -671,6 +671,48 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Precision zero-fling scroll that pauses briefly before lifting finger and awaits OS completion.
+     * Prevents RecyclerView drift so the very next tap lands accurately on cards/rows without wasted fling-stop taps.
+     */
+    suspend fun scrollExact(direction: String = "down"): Boolean {
+        val displayMetrics = resources.displayMetrics
+        val width = displayMetrics.widthPixels.toFloat()
+        val height = displayMetrics.heightPixels.toFloat()
+
+        val cx = width / 2f
+        val (startY, endY) = if (direction.lowercase() == "up") {
+            Pair(height * 0.34f, height * 0.70f)
+        } else {
+            Pair(height * 0.70f, height * 0.34f)
+        }
+
+        val slidePath = Path().apply {
+            moveTo(cx, startY)
+            lineTo(cx, endY)
+        }
+        val holdPath = Path().apply {
+            moveTo(cx, endY)
+            lineTo(cx, endY)
+        }
+        val ok = try {
+            val stroke1 = GestureDescription.StrokeDescription(slidePath, 0L, 230L, true)
+            val moved = dispatchGestureAwait(GestureDescription.Builder().addStroke(stroke1).build())
+            if (moved) {
+                val stroke2 = stroke1.continueStroke(holdPath, 0L, 65L, false)
+                dispatchGestureAwait(GestureDescription.Builder().addStroke(stroke2).build())
+            } else {
+                val gentle = GestureDescription.StrokeDescription(slidePath, 0L, 380L)
+                dispatchGestureAwait(GestureDescription.Builder().addStroke(gentle).build())
+            }
+        } catch (_: Exception) {
+            val gentle = GestureDescription.StrokeDescription(slidePath, 0L, 380L)
+            dispatchGestureAwait(GestureDescription.Builder().addStroke(gentle).build())
+        }
+        JarvisLogStore.log("ACC_SCROLL_EXACT", "scrollExact($direction) ($cx,$startY -> $cx,$endY) ok=$ok")
+        return ok
+    }
+
+    /**
      * Global Hardware Back button press.
      */
     fun performBack(): Boolean {
