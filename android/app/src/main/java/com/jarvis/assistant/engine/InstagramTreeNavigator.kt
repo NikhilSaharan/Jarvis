@@ -505,7 +505,7 @@ object InstagramTreeNavigator {
                     val l = labelOf(el)
                     el.bounds.top > searchBottom && (l == "searching…" || l == "searching...")
                 }
-                val looksSuggested = mode == PersonMatchMode.DM_PERSON &&
+                val looksSuggested = matchMode == PersonMatchMode.DM_PERSON &&
                     (lbl.contains("you both follow") || lbl.contains("followed by") || lbl.contains("follows you"))
                 if (!isSearching && (!looksSuggested || System.currentTimeMillis() - firstMatchTime >= 1400L)) break
             }
