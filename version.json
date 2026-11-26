@@ -1,6 +1,6 @@
 {
-  "versionCode": 21,
-  "versionName": "1.2.0",
+  "versionCode": 22,
+  "versionName": "1.2.1",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Fixed DM multi-reel duplicate replays with viewport-rect and scroll-invariant card attribution signatures, added instant DM search-row click retry, fast profile info/latest post navigation, and halved HTTP stall timeout."
+  "changelog": "Minimal surgical fixes: settle DM search results before clicking, auto-learn name-to-handle aliases for Home Story matching, and scan full live Accessibility tree rangeInfo/timers for 1.0x DM reel playback."
 }

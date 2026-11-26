@@ -1,5 +1,6 @@
 package com.jarvis.assistant.engine
 
+import android.content.Context
 import android.graphics.Rect
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
@@ -26,6 +27,7 @@ data class FastNavResult(
 object InstagramTreeNavigator {
 
     private const val TAG = "InstagramTreeNav"
+    private const val ALIAS_PREFS = "jarvis_insta_aliases"
 
     suspend fun execute(
         service: JarvisAccessibilityService,
@@ -34,6 +36,7 @@ object InstagramTreeNavigator {
     ): FastNavResult {
         val steps = mutableListOf<String>()
         val initialTree = service.dumpScreenElements()
+        learnAliasesFromTree(service, initialTree)
         JarvisLogStore.log(
             "INSTA_NAV",
             "START action=${intent.actionType} target='${intent.target}' count=${intent.count} fromMe=${intent.fromMe} msgLen=${intent.message.length}"
@@ -449,6 +452,7 @@ object InstagramTreeNavigator {
             return loadedRetry
         }
         JarvisLogStore.log("INSTA_INBOX", "Messages Inbox loaded cleanly")
+        learnAliasesFromTree(service, service.dumpScreenElements())
         return true
     }
 
@@ -487,17 +491,33 @@ object InstagramTreeNavigator {
         val searchBottom = activateAndTypeInSearchBar(service, screenWidth, screenHeight, target, steps, pressEnter = false)
             ?: return false
 
-        // Wait up to 4.5s for network "Searching..." row to resolve into live DM results
-        val matchedRow = pollElement(service, timeoutMs = 4500, intervalMs = 80) { elements ->
-            findBestPersonMatch(elements, target, searchBottom, screenHeight, screenWidth, mode = matchMode)
+        // Wait up to 4.5s for network "Searching..." and connected DM rows to settle before picking
+        val searchDeadline = System.currentTimeMillis() + 4500L
+        var firstMatchTime = 0L
+        while (System.currentTimeMillis() < searchDeadline) {
+            val els = service.dumpScreenElements()
+            learnAliasesFromTree(service, els)
+            val candidate = findBestPersonMatch(els, target, searchBottom, screenHeight, screenWidth, mode = matchMode)
+            if (candidate != null) {
+                if (firstMatchTime == 0L) firstMatchTime = System.currentTimeMillis()
+                val lbl = labelOf(candidate)
+                val isSearching = els.any { el ->
+                    val l = labelOf(el)
+                    el.bounds.top > searchBottom && (l == "searching…" || l == "searching...")
+                }
+                val looksSuggested = mode == PersonMatchMode.DM_PERSON &&
+                    (lbl.contains("you both follow") || lbl.contains("followed by") || lbl.contains("follows you"))
+                if (!isSearching && (!looksSuggested || System.currentTimeMillis() - firstMatchTime >= 1400L)) break
+            }
+            delay(80)
         }
         val finalSearchEls = service.dumpScreenElements()
+        learnAliasesFromTree(service, finalSearchEls)
         val searchReasons = mutableListOf<String>()
-        val loggedMatch = findBestPersonMatch(
+        val chosenRow = findBestPersonMatch(
             finalSearchEls, target, searchBottom, screenHeight, screenWidth,
             mode = matchMode, debugReasons = searchReasons
         )
-        val chosenRow = matchedRow ?: loggedMatch
         JarvisLogStore.log("DM_SEARCH_MATCH", "mode=$matchMode minTopY=$searchBottom reasons=$searchReasons -> picked=${JarvisLogStore.describeElement(chosenRow)}")
         if (chosenRow == null) {
             JarvisLogStore.logScreenTree("DM_SEARCH_MISS", finalSearchEls)
@@ -523,7 +543,11 @@ object InstagramTreeNavigator {
             }
         }
         JarvisLogStore.log("DM_COMPOSER", "Loaded composer=${JarvisLogStore.describeElement(composer)}")
-        if (composer == null) JarvisLogStore.logScreenTree("DM_COMPOSER_MISS", service.dumpScreenElements())
+        if (composer != null) {
+            learnAliasesFromTree(service, service.dumpScreenElements())
+        } else {
+            JarvisLogStore.logScreenTree("DM_COMPOSER_MISS", service.dumpScreenElements())
+        }
         return composer != null
     }
 
@@ -600,12 +624,13 @@ object InstagramTreeNavigator {
         val dm = service.resources.displayMetrics
         val w = dm.widthPixels
         val h = dm.heightPixels
+        var aliases = lookupAliases(service, target)
 
         // 1. Check immediately only when Home Story tray is already visible on screen
         val initialEls = service.dumpScreenElements()
         var trayRect = findStoryTrayRect(initialEls, w, h)
         if (trayRect != null) {
-            val directMatch = findMatchingStoryElement(initialEls, target, w, h)
+            val directMatch = findMatchingStoryElement(initialEls, target, w, h, aliases)
             if (directMatch != null) {
                 service.tapNodeSingleTouch(directMatch.node)
                 delay(350)
@@ -618,6 +643,8 @@ object InstagramTreeNavigator {
         if (trayRect == null) {
             for (attempt in 1..6) {
                 val elsNow = service.dumpScreenElements()
+                learnAliasesFromTree(service, elsNow)
+                aliases = lookupAliases(service, target)
                 trayRect = findStoryTrayRect(elsNow, w, h)
                 if (trayRect != null) break
 
@@ -657,8 +684,8 @@ object InstagramTreeNavigator {
             return FastNavResult(handled = false, stepsTaken = steps)
         }
 
-        // 3. Check Story Tray before sliding
-        var storyEl = findMatchingStoryElement(homeEls, target, w, h)
+        // 3. Check Story Tray before sliding (supports both spoken name and learned username handles)
+        var storyEl = findMatchingStoryElement(homeEls, target, w, h, aliases)
         if (storyEl != null) {
             service.tapNodeSingleTouch(storyEl.node)
             delay(350)
@@ -666,7 +693,7 @@ object InstagramTreeNavigator {
             return FastNavResult(true, true, "Instagram par $target ki story chala di hai Sir.", steps)
         }
 
-        // 4. Slide Home Story Tray left horizontally until target's story appears or tray ends (NEVER Search!)
+        // 4. Slide Home Story Tray left horizontally until target's story appears or tray ends
         var stagnantCount = 0
         for (swipeAttempt in 1..12) {
             val currentEls = service.dumpScreenElements()
@@ -677,7 +704,7 @@ object InstagramTreeNavigator {
             delay(260)
 
             val afterEls = service.dumpScreenElements()
-            storyEl = findMatchingStoryElement(afterEls, target, w, h)
+            storyEl = findMatchingStoryElement(afterEls, target, w, h, aliases)
             if (storyEl != null) {
                 service.tapNodeSingleTouch(storyEl.node)
                 delay(350)
@@ -694,6 +721,11 @@ object InstagramTreeNavigator {
             }
         }
 
+        // 5. Fallback if username handle differs from display name and wasn't cached yet
+        if (openInboxStoryFallback(service, target, w, h, steps)) {
+            return FastNavResult(true, true, "Instagram par $target ki story chala di hai Sir.", steps)
+        }
+
         steps.add("Scanned Home Story tray without Search; $target not found")
         return FastNavResult(
             handled = true,
@@ -701,6 +733,56 @@ object InstagramTreeNavigator {
             message = "Homepage story tray mein $target ki story nahi mili Sir.",
             stepsTaken = steps
         )
+    }
+
+    private suspend fun openInboxStoryFallback(
+        service: JarvisAccessibilityService,
+        target: String,
+        screenWidth: Int,
+        screenHeight: Int,
+        steps: MutableList<String>
+    ): Boolean {
+        if (!openMessagesInbox(service, screenHeight, steps)) return false
+        val tokens = target.lowercase().trim().split(Regex("\\s+")).filter { it.length >= 2 }
+        if (tokens.isEmpty()) return false
+
+        val inboxEls = service.dumpScreenElements()
+        learnAliasesFromTree(service, inboxEls)
+        val directAvatar = inboxEls.firstOrNull { av ->
+            labelOf(av).contains("open story of ") &&
+                inboxEls.any { row ->
+                    row !== av && !labelOf(row).contains("open story of ") &&
+                        row.bounds.top <= av.bounds.bottom && row.bounds.bottom >= av.bounds.top &&
+                        tokens.all { labelOf(row).contains(it) }
+                }
+        }
+        if (directAvatar != null) {
+            service.tapNodeSingleTouch(directAvatar.node)
+            delay(350)
+            steps.add("Opened $target's story from Inbox")
+            return true
+        }
+
+        val searchBottom = activateAndTypeInSearchBar(service, screenWidth, screenHeight, target, steps, pressEnter = false)
+            ?: return false
+        val matched = pollElement(service, timeoutMs = 2600, intervalMs = 80) { els ->
+            findBestPersonMatch(els, target, searchBottom, screenHeight, screenWidth, mode = PersonMatchMode.DM_PERSON)
+        } ?: return false
+        learnAliasesFromTree(service, service.dumpScreenElements())
+        service.tapNodeSingleTouch(matched.node)
+        val loaded = pollCondition(timeoutMs = 1500, intervalMs = 60) {
+            service.dumpScreenElements().any { isChatComposerElement(it, screenHeight) }
+        }
+        if (!loaded) return false
+        val chatEls = service.dumpScreenElements()
+        learnAliasesFromTree(service, chatEls)
+        val headerStory = chatEls.firstOrNull {
+            resIdOf(it) == "header_avatar" && labelOf(it).contains("open story of")
+        } ?: return false
+        service.tapNodeSingleTouch(headerStory.node)
+        delay(350)
+        steps.add("Opened $target's story from chat header")
+        return true
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -1441,11 +1523,16 @@ object InstagramTreeNavigator {
         val tokens = targetLower.split(Regex("\\s+")).filter { it.length >= 2 }
         if (tokens.isEmpty()) return null
 
-        // Structural section header boundary: connected DM rows always sit BEFORE RecyclerView section dividers ("header_container" / "header_text")
+        // Structural section header boundary: connected DM rows always sit BEFORE RecyclerView section dividers ("More accounts" / "Ask Meta AI" / "See All")
         val firstSectionHeaderTop = elements.filter { el ->
             val r = resIdOf(el)
-            el.bounds.top > minTopY &&
-                (r == "header_container" || r == "header_text" || r.contains("meta_ai_header"))
+            val l = labelOf(el)
+            el.bounds.top > minTopY && (
+                r == "header_container" || r == "header_text" || r == "header_action_button" ||
+                    r.contains("meta_ai_header") ||
+                    l == "more accounts" || l == "ask meta ai" || l == "see all" ||
+                    l.startsWith("more accounts,")
+                )
         }.minOfOrNull { it.bounds.top }
 
         val fakeWords = listOf(
@@ -1575,9 +1662,15 @@ object InstagramTreeNavigator {
                     (!targetLower.contains("fc") && Regex("\\bfc\\b").containsMatchIn(label))
                 if (hasFakeWord) score -= 320
             } else if (mode == PersonMatchMode.DM_PERSON) {
-                // Prioritize connected DM contacts appearing above RecyclerView section dividers
-                if (firstSectionHeaderTop != null && el.bounds.bottom < firstSectionHeaderTop) {
-                    score += 180
+                val isSuggestedStranger = label.contains("you both follow") ||
+                    label.contains("followed by") ||
+                    label.contains("follows you") ||
+                    (firstSectionHeaderTop != null && el.bounds.top >= firstSectionHeaderTop)
+                val isChannelRow = label.contains("channel ·") || label.contains("channel •")
+                if (isSuggestedStranger) {
+                    score -= 90
+                } else if (!isChannelRow) {
+                    score += 220
                 }
             }
 
@@ -1671,11 +1764,13 @@ object InstagramTreeNavigator {
         var seekSamples = 0
         var maxTimerSec = -1
         var prevTimerSec = -1
-        val timerRegex = Regex("^(\\d{1,2}):(\\d{2})$")
+        var loggedPlayerTree = false
+        val timerRegex = Regex("^-?(\\d{1,2}):(\\d{2})$")
+        val dualTimeRegex = Regex("(\\d{1,2}):(\\d{2})\\s*(?:/|of)\\s*(\\d{1,2}):(\\d{2})", RegexOption.IGNORE_CASE)
 
-        delay(1000)
+        delay(800)
 
-        while (System.currentTimeMillis() - start < 36_000L) {
+        while (System.currentTimeMillis() - start < 45_000L) {
             val elapsed = System.currentTimeMillis() - start
             val activePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
             if (activePkg.isNotBlank() && !activePkg.contains("instagram")) {
@@ -1683,62 +1778,96 @@ object InstagramTreeNavigator {
             }
 
             val els = service.dumpScreenElements()
-            // Only treat as back-in-chat if genuine DM composer is present (never a Reel comment field)
-            if (elapsed > 2500L && els.any { isChatComposerElement(it, screenHeight) }) {
+            if (elapsed > 2400L && els.any { isChatComposerElement(it, screenHeight) }) {
                 return ReelWaitOutcome.COMPLETED
             }
 
-            // Check exact end-of-video button text (avoid matching words inside reel captions/songs)
-            val hasReplayButton = els.any { el ->
-                val t = el.text.trim().lowercase()
-                val c = el.contentDescription.trim().lowercase()
-                t == "watch again" || c == "watch again" || t == "replay" || c == "replay"
-            }
-            if (hasReplayButton && elapsed > 2000L) {
-                return ReelWaitOutcome.COMPLETED
+            // Walk live Accessibility tree directly so non-clickable SeekBar / ProgressBar / timer nodes inside fullscreen player are never hidden
+            var ratioNow: Float? = null
+            var curSecNow: Int? = null
+            var totalSecNow: Int? = null
+            var hasReplay = false
+            val captureDump = if (!loggedPlayerTree && elapsed >= 1800L) mutableListOf<String>() else null
+
+            fun walkPlayer(node: AccessibilityNodeInfo?, depth: Int) {
+                if (node == null || depth > 16 || !node.isVisibleToUser) return
+                val t = node.text?.toString()?.trim() ?: ""
+                val c = node.contentDescription?.toString()?.trim() ?: ""
+                val r = node.rangeInfo
+                if (captureDump != null && captureDump.size < 35 && (r != null || t.isNotBlank() || c.isNotBlank())) {
+                    val cls = node.className?.toString()?.substringAfterLast('.') ?: ""
+                    val id = node.viewIdResourceName?.substringAfterLast('/') ?: ""
+                    captureDump.add("$cls#$id(t='${t.take(20)}' cd='${c.take(20)}' rng=${r?.let { "${it.min}..${it.max}@${it.current}" }})")
+                }
+                if (t.equals("watch again", true) || c.equals("watch again", true) ||
+                    t.equals("replay", true) || c.equals("replay", true)
+                ) {
+                    hasReplay = true
+                }
+                if (ratioNow == null && r != null && r.max > r.min) {
+                    ratioNow = ((r.current - r.min) / (r.max - r.min)).coerceIn(0f, 1f)
+                }
+                if (curSecNow == null) {
+                    for (s in listOf(t, c)) {
+                        if (s.isBlank()) continue
+                        dualTimeRegex.find(s)?.let { m ->
+                            curSecNow = (m.groupValues[1].toIntOrNull() ?: 0) * 60 + (m.groupValues[2].toIntOrNull() ?: 0)
+                            totalSecNow = (m.groupValues[3].toIntOrNull() ?: 0) * 60 + (m.groupValues[4].toIntOrNull() ?: 0)
+                        } ?: timerRegex.matchEntire(s)?.let { m ->
+                            curSecNow = (m.groupValues[1].toIntOrNull() ?: 0) * 60 + (m.groupValues[2].toIntOrNull() ?: 0)
+                        }
+                        if (curSecNow != null) break
+                    }
+                }
+                for (i in 0 until node.childCount) walkPlayer(node.getChild(i), depth + 1)
             }
 
-            // Check live SeekBar progression + wrap/completion dynamically when exposed
-            val seekBar = els.firstOrNull { it.className.contains("SeekBar", ignoreCase = true) }
-            val range = seekBar?.node?.rangeInfo
-            if (range != null && range.max > range.min) {
-                val ratio = ((range.current - range.min) / (range.max - range.min)).coerceIn(0f, 1f)
-                if (ratio in 0.04f..0.85f) {
+            walkPlayer(service.rootInActiveWindow, 0)
+            if (captureDump != null) {
+                loggedPlayerTree = true
+                if (ratioNow == null && curSecNow == null) {
+                    JarvisLogStore.log("DM_MEDIA_PLAYER_TREE", "nodes=$captureDump")
+                }
+            }
+
+            if (hasReplay && elapsed > 1800L) return ReelWaitOutcome.COMPLETED
+
+            ratioNow?.let { ratio ->
+                if (ratio in 0.03f..0.88f) {
                     seekSamples++
                     if (seekSamples >= 2) sawSeekProgress = true
                 }
                 if (sawSeekProgress) {
-                    if ((maxSeekRatio >= 0.78f && ratio < 0.16f) || (ratio >= 0.93f && elapsed >= 3500L)) {
+                    if ((maxSeekRatio >= 0.72f && ratio < 0.20f) || (ratio >= 0.93f && elapsed >= 2800L)) {
+                        JarvisLogStore.log("DM_MEDIA_DONE_BY", "reason=seek maxR=$maxSeekRatio curR=$ratio elapsed=$elapsed")
                         return ReelWaitOutcome.COMPLETED
                     }
                 }
                 if (ratio > maxSeekRatio) maxSeekRatio = ratio
             }
 
-            // Check live MM:SS timer counter if exposed on Reel player
-            val timerMatch = els.asSequence()
-                .mapNotNull { el -> timerRegex.matchEntire(el.text.trim()) }
-                .firstOrNull()
-            if (timerMatch != null) {
-                val mins = timerMatch.groupValues[1].toIntOrNull() ?: 0
-                val secs = timerMatch.groupValues[2].toIntOrNull() ?: 0
-                val totalSec = mins * 60 + secs
-                if (totalSec > maxTimerSec) maxTimerSec = totalSec
-                // Count-up timer wrapped back to start OR count-down timer hit 0
-                if (elapsed >= 3500L && prevTimerSec >= 0) {
-                    val wrappedUp = maxTimerSec >= 5 && prevTimerSec >= 4 && totalSec <= 1
-                    val countdownDone = maxTimerSec >= 5 && totalSec == 0 && prevTimerSec == 1
-                    if (wrappedUp || countdownDone) return ReelWaitOutcome.COMPLETED
+            curSecNow?.let { curSec ->
+                val tot = totalSecNow
+                if (tot != null && tot >= 3 && elapsed >= 2000L && curSec >= tot - 1) {
+                    JarvisLogStore.log("DM_MEDIA_DONE_BY", "reason=dualTimer cur=$curSec total=$tot elapsed=$elapsed")
+                    return ReelWaitOutcome.COMPLETED
                 }
-                prevTimerSec = totalSec
+                if (curSec > maxTimerSec) maxTimerSec = curSec
+                if (elapsed >= 2800L && prevTimerSec >= 0 && maxTimerSec >= 4) {
+                    val wrapped = (prevTimerSec >= 4 && curSec <= 1) || (prevTimerSec - curSec >= 4) || (curSec - prevTimerSec >= 4)
+                    if (wrapped) {
+                        JarvisLogStore.log("DM_MEDIA_DONE_BY", "reason=timer prev=$prevTimerSec cur=$curSec max=$maxTimerSec elapsed=$elapsed")
+                        return ReelWaitOutcome.COMPLETED
+                    }
+                }
+                prevTimerSec = curSec
             }
 
-            // If DM reel player exposes neither SeekBar nor timer telemetry, cap wait cleanly at 22s
             if (!sawSeekProgress && maxTimerSec < 0 && elapsed >= 22_000L) {
                 return ReelWaitOutcome.COMPLETED
             }
 
-            delay(250)
+            delay(200)
         }
         return ReelWaitOutcome.COMPLETED
     }
@@ -2083,34 +2212,45 @@ object InstagramTreeNavigator {
         elements: List<ScreenElement>,
         target: String,
         screenWidth: Int = Int.MAX_VALUE,
-        screenHeight: Int = Int.MAX_VALUE
+        screenHeight: Int = Int.MAX_VALUE,
+        aliases: List<String> = emptyList()
     ): ScreenElement? {
-        val tokens = target.lowercase().trim().split(Regex("\\s+")).filter { it.length >= 2 }
-        if (tokens.isEmpty()) return null
         val marginX = if (screenWidth == Int.MAX_VALUE) 0 else (screenWidth * 0.018f).toInt()
         val maxCenterX = if (screenWidth == Int.MAX_VALUE) Int.MAX_VALUE else screenWidth - marginX
 
-        // Pass 1: Strict match inside top Home Story tray
-        val strict = elements.firstOrNull { el ->
-            if (el.bounds.top >= screenHeight * 0.44 || el.bounds.centerX() !in marginX..maxCenterX) return@firstOrNull false
-            val label = labelOf(el)
-            if (!label.contains("story")) return@firstOrNull false
-            if (label.contains("your story") && !tokens.contains("your") && !tokens.contains("my")) return@firstOrNull false
-            tokens.all { label.contains(it) } && hasClickableOrAncestor(el.node, maxDepth = 4)
-        }
-        if (strict != null) return strict
-
-        // Pass 2: Handle multi-word name vs Story tray handle or primary first name
-        if (tokens.size > 1) {
-            val joined = tokens.joinToString("")
-            val primary = tokens[0]
-            return elements.firstOrNull { el ->
+        fun matchStoryTokens(tokens: List<String>): ScreenElement? {
+            if (tokens.isEmpty()) return null
+            val strict = elements.firstOrNull { el ->
                 if (el.bounds.top >= screenHeight * 0.44 || el.bounds.centerX() !in marginX..maxCenterX) return@firstOrNull false
                 val label = labelOf(el)
                 if (!label.contains("story")) return@firstOrNull false
                 if (label.contains("your story") && !tokens.contains("your") && !tokens.contains("my")) return@firstOrNull false
-                val matches = label.contains(joined) || (primary.length >= 3 && label.contains(primary))
-                matches && hasClickableOrAncestor(el.node, maxDepth = 4)
+                tokens.all { label.contains(it) } && hasClickableOrAncestor(el.node, maxDepth = 4)
+            }
+            if (strict != null) return strict
+
+            if (tokens.size > 1) {
+                val joined = tokens.joinToString("")
+                val primary = tokens[0]
+                return elements.firstOrNull { el ->
+                    if (el.bounds.top >= screenHeight * 0.44 || el.bounds.centerX() !in marginX..maxCenterX) return@firstOrNull false
+                    val label = labelOf(el)
+                    if (!label.contains("story")) return@firstOrNull false
+                    if (label.contains("your story") && !tokens.contains("your") && !tokens.contains("my")) return@firstOrNull false
+                    val matches = label.contains(joined) || (primary.length >= 3 && label.contains(primary))
+                    matches && hasClickableOrAncestor(el.node, maxDepth = 4)
+                }
+            }
+            return null
+        }
+
+        val targetTokens = target.lowercase().trim().split(Regex("\\s+")).filter { it.length >= 2 }
+        matchStoryTokens(targetTokens)?.let { return it }
+
+        for (alias in aliases) {
+            val cleanAlias = alias.lowercase().trim().removePrefix("@")
+            if (cleanAlias.length >= 3) {
+                matchStoryTokens(listOf(cleanAlias))?.let { return it }
             }
         }
         return null
@@ -2213,6 +2353,85 @@ object InstagramTreeNavigator {
             delay(intervalMs)
         }
         return false
+    }
+
+    private fun learnAliasesFromTree(service: JarvisAccessibilityService, elements: List<ScreenElement>) {
+        val pairs = mutableListOf<Pair<String, String>>()
+        val handleRe = Regex("^[a-z0-9._]{3,32}$")
+        val timeRe = Regex("^\\d+[smhdwy]$")
+
+        fun validHandle(h: String): Boolean {
+            val clean = h.lowercase().trim().removePrefix("@")
+            return handleRe.matches(clean) && !timeRe.matches(clean) &&
+                clean != "messages" && clean != "requests" && clean != "active" && clean != "posts"
+        }
+
+        val chatTitle = elements.firstOrNull { resIdOf(it) == "header_title" }?.text?.trim() ?: ""
+        val chatSub = elements.firstOrNull { resIdOf(it) == "header_subtitle" }?.text?.trim() ?: ""
+        if (chatTitle.isNotBlank() && validHandle(chatSub)) pairs.add(chatTitle to chatSub)
+
+        val headerAv = elements.firstOrNull { resIdOf(it) == "header_avatar" }?.let { labelOf(it) } ?: ""
+        if (chatTitle.isNotBlank() && headerAv.contains("open story of ")) {
+            val h = headerAv.substringAfter("open story of ").trim().substringBefore(" ")
+            if (validHandle(h)) pairs.add(chatTitle to h)
+        }
+
+        val profName = elements.firstOrNull { resIdOf(it).contains("profile_header_full_name") }?.text?.trim() ?: ""
+        val profUser = elements.firstOrNull { resIdOf(it).contains("action_bar_username") }?.text?.trim() ?: ""
+        if (profName.isNotBlank() && validHandle(profUser)) pairs.add(profName to profUser)
+
+        for (el in elements) {
+            val lbl = labelOf(el)
+            if (lbl.contains("open story of ")) {
+                val h = lbl.substringAfter("open story of ").trim().substringBefore(" ")
+                if (validHandle(h)) {
+                    val row = elements.firstOrNull { other ->
+                        other !== el && !labelOf(other).contains("open story of ") &&
+                            other.bounds.top <= el.bounds.bottom && other.bounds.bottom >= el.bounds.top &&
+                            (other.text.isNotBlank() || other.contentDescription.isNotBlank())
+                    }
+                    val display = row?.let { it.text.ifBlank { it.contentDescription } }
+                        ?.substringBefore("|")?.substringBefore(",")?.trim() ?: ""
+                    if (display.isNotBlank()) pairs.add(display to h)
+                }
+            }
+            val raw = el.text.ifBlank { el.contentDescription }.trim()
+            val low = raw.lowercase()
+            if (raw.contains("|") && !low.contains("you both follow") && !low.contains("followed by") && !low.contains("channel ·")) {
+                val segs = raw.split("|").map { it.trim() }.filter { it.isNotEmpty() }
+                if (segs.size == 2 && validHandle(segs[1])) pairs.add(segs[0] to segs[1])
+            }
+        }
+
+        if (pairs.isEmpty()) return
+        val prefs = service.getSharedPreferences(ALIAS_PREFS, Context.MODE_PRIVATE)
+        val editor = prefs.edit()
+        for ((displayName, handleRaw) in pairs) {
+            val handle = handleRaw.lowercase().trim().removePrefix("@")
+            val normName = displayName.lowercase().replace(Regex("[^a-z0-9\\s]"), " ").replace(Regex("\\s+"), " ").trim()
+            if (normName.length < 3 || normName == handle) continue
+            val existing = prefs.getString(normName, "")?.split(",")?.filter { it.isNotBlank() }?.toMutableList() ?: mutableListOf()
+            existing.remove(handle)
+            existing.add(0, handle)
+            editor.putString(normName, existing.take(4).joinToString(","))
+        }
+        editor.apply()
+    }
+
+    private fun lookupAliases(service: JarvisAccessibilityService, target: String): List<String> {
+        val normTarget = target.lowercase().replace(Regex("[^a-z0-9\\s]"), " ").replace(Regex("\\s+"), " ").trim()
+        val tokens = normTarget.split(" ").filter { it.length >= 2 }
+        if (tokens.isEmpty()) return emptyList()
+        val prefs = service.getSharedPreferences(ALIAS_PREFS, Context.MODE_PRIVATE)
+        val exact = mutableListOf<String>()
+        val partial = mutableListOf<String>()
+        for ((savedName, rawHandles) in prefs.all) {
+            val handles = (rawHandles as? String)?.split(",")?.filter { it.isNotBlank() }.orEmpty()
+            if (handles.isEmpty()) continue
+            if (savedName == normTarget) exact.addAll(handles)
+            else if (tokens.all { tok -> Regex("\\b${Regex.escape(tok)}\\b").containsMatchIn(savedName) }) partial.addAll(handles)
+        }
+        return (exact + partial).distinct()
     }
 
     private fun labelOf(el: ScreenElement): String =
