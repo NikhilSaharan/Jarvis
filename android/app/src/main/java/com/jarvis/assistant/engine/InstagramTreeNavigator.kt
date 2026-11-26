@@ -240,7 +240,7 @@ object InstagramTreeNavigator {
             emptyScrolls = 0
             sameScreenScrolls = 0
             if (nextCardSig != null) playedSignatures.add(nextCardSig)
-            openMediaCardViewer(service, nextCard, h)
+            openMediaCardViewer(service, nextCard, els, h)
             playedCount++
             steps.add("Playing shared reel #$playedCount ($ownerPhrase)")
 
@@ -359,25 +359,38 @@ object InstagramTreeNavigator {
             return true
         }
 
-        var inboxBtn = pollElement(service, timeoutMs = 1100, intervalMs = 60) { findInboxButton(it, screenHeight) }
+        var inboxBtn = pollElement(service, timeoutMs = 950, intervalMs = 60) { findInboxButton(it, screenHeight) }
         if (inboxBtn == null) {
-            // Maybe inside another screen/tab -> switch to Home tab first to surface Messages icon
-            val homeTab = findBottomNavTab(service, screenHeight, listOf("home", "feed"), listOf("feed_tab", "home_tab"))
-            if (homeTab != null && !homeTab.node.isSelected) {
-                JarvisLogStore.log("INSTA_INBOX", "Switching to Home tab: ${JarvisLogStore.describeElement(homeTab)}")
-                service.tapNodeSingleTouch(homeTab.node)
-                steps.add("Tapped Home tab to access Messages")
-                inboxBtn = pollElement(service, timeoutMs = 1200, intervalMs = 60) { findInboxButton(it, screenHeight) }
-            }
-            if (inboxBtn == null) {
-                service.performBack()
-                delay(340)
-                if (isInNewMessageComposeScreen(service.dumpScreenElements())) {
-                    service.performBack()
-                    delay(300)
-                }
+            for (backStep in 1..4) {
+                val elsNow = service.dumpScreenElements()
                 if (isInMessagesInbox(service, screenHeight)) return true
-                inboxBtn = pollElement(service, timeoutMs = 1000, intervalMs = 60) { findInboxButton(it, screenHeight) }
+                inboxBtn = findInboxButton(elsNow, screenHeight)
+                if (inboxBtn != null) break
+
+                val homeTab = findBottomNavTab(elsNow, screenHeight, listOf("home", "feed"), listOf("feed_tab", "home_tab"))
+                if (homeTab != null && !homeTab.node.isSelected) {
+                    JarvisLogStore.log("INSTA_INBOX", "Switching to Home tab: ${JarvisLogStore.describeElement(homeTab)}")
+                    service.tapNodeSingleTouch(homeTab.node)
+                    steps.add("Tapped Home tab to access Messages")
+                    inboxBtn = pollElement(service, timeoutMs = 1100, intervalMs = 60) { findInboxButton(it, screenHeight) }
+                    if (inboxBtn != null) break
+                } else {
+                    val explicitBack = elsNow.firstOrNull { el ->
+                        el.bounds.top < screenHeight * 0.18 &&
+                            (labelOf(el) == "back" || resIdOf(el).contains("back")) &&
+                            hasClickableOrAncestor(el.node, 3)
+                    }
+                    if (explicitBack != null) service.tapNodeSingleTouch(explicitBack.node) else service.performBack()
+                    delay(320)
+                    if (isInNewMessageComposeScreen(service.dumpScreenElements())) {
+                        service.performBack()
+                        delay(280)
+                    }
+                }
+            }
+            if (isInMessagesInbox(service, screenHeight)) return true
+            if (inboxBtn == null) {
+                inboxBtn = pollElement(service, timeoutMs = 700, intervalMs = 60) { findInboxButton(it, screenHeight) }
             }
         }
 
@@ -544,44 +557,64 @@ object InstagramTreeNavigator {
         val w = dm.widthPixels
         val h = dm.heightPixels
 
-        // 1. Check right away if target story is already visible on screen
-        var storyEl = findMatchingStoryElement(service.dumpScreenElements(), target, h)
-        if (storyEl != null) {
-            service.tapNodeSingleTouch(storyEl.node)
-            delay(350)
-            steps.add("Opened $target's story directly")
-            return FastNavResult(true, true, "Instagram par $target ki story chala di hai Sir.", steps)
+        // 1. Check immediately only when Home Story tray is already visible on screen
+        val initialEls = service.dumpScreenElements()
+        var trayRect = findStoryTrayRect(initialEls, w, h)
+        if (trayRect != null) {
+            val directMatch = findMatchingStoryElement(initialEls, target, w, h)
+            if (directMatch != null) {
+                service.tapNodeSingleTouch(directMatch.node)
+                delay(350)
+                steps.add("Opened $target's story directly")
+                return FastNavResult(true, true, "Instagram par $target ki story chala di hai Sir.", steps)
+            }
         }
 
-        // 2. Always return to Home Feed so the Story Tray is visible (Back out of DM/Search if needed)
-        if (findStoryTrayRect(service.dumpScreenElements(), w, h) == null) {
-            for (backTry in 1..3) {
+        // 2. Back out cleanly from Reels/Chat/Search/Inbox until Home tab appears, then reveal Story Tray at top
+        if (trayRect == null) {
+            for (attempt in 1..6) {
                 val elsNow = service.dumpScreenElements()
-                if (findStoryTrayRect(elsNow, w, h) != null) break
+                trayRect = findStoryTrayRect(elsNow, w, h)
+                if (trayRect != null) break
 
                 val homeTab = findBottomNavTab(elsNow, h, listOf("home", "feed"), listOf("feed_tab", "home_tab"))
                 if (homeTab != null) {
                     service.tapNodeSingleTouch(homeTab.node)
-                    steps.add("Opened Home tab for Story tray")
+                    steps.add("Tapped Home tab for Story tray")
                     val ready = pollCondition(timeoutMs = 1300, intervalMs = 65) {
-                        val els = service.dumpScreenElements()
-                        findMatchingStoryElement(els, target, h) != null || findStoryTrayRect(els, w, h) != null
+                        findStoryTrayRect(service.dumpScreenElements(), w, h) != null
                     }
                     if (!ready) {
-                        // Home feed was scrolled down past Story tray -> scroll back to top
-                        service.scroll("up")
-                        delay(350)
+                        for (scrollTry in 1..4) {
+                            service.scroll("up")
+                            delay(300)
+                            if (findStoryTrayRect(service.dumpScreenElements(), w, h) != null) break
+                        }
                     }
-                    break
+                    trayRect = findStoryTrayRect(service.dumpScreenElements(), w, h)
+                    if (trayRect != null) break
                 } else {
-                    service.performBack()
-                    delay(320)
+                    val explicitBack = elsNow.firstOrNull { el ->
+                        el.bounds.top < h * 0.18 &&
+                            (labelOf(el) == "back" || resIdOf(el).contains("back")) &&
+                            hasClickableOrAncestor(el.node, 3)
+                    }
+                    if (explicitBack != null) service.tapNodeSingleTouch(explicitBack.node) else service.performBack()
+                    delay(340)
                 }
             }
         }
 
+        val homeEls = service.dumpScreenElements()
+        trayRect = findStoryTrayRect(homeEls, w, h)
+        if (trayRect == null) {
+            JarvisLogStore.log("STORY_HOME_MISS", "Could not reach Home Story tray")
+            JarvisLogStore.logScreenTree("STORY_HOME_MISS", homeEls)
+            return FastNavResult(handled = false, stepsTaken = steps)
+        }
+
         // 3. Check Story Tray before sliding
-        storyEl = findMatchingStoryElement(service.dumpScreenElements(), target, h)
+        var storyEl = findMatchingStoryElement(homeEls, target, w, h)
         if (storyEl != null) {
             service.tapNodeSingleTouch(storyEl.node)
             delay(350)
@@ -593,14 +626,14 @@ object InstagramTreeNavigator {
         var stagnantCount = 0
         for (swipeAttempt in 1..12) {
             val currentEls = service.dumpScreenElements()
-            val trayRect = findStoryTrayRect(currentEls, w, h) ?: break
+            val curTrayRect = findStoryTrayRect(currentEls, w, h) ?: break
             val beforeSig = storyTraySignature(currentEls, h)
 
-            service.swipeHorizontalInRect(trayRect, toLeft = true)
-            delay(250)
+            service.swipeHorizontalInRect(curTrayRect, toLeft = true)
+            delay(260)
 
             val afterEls = service.dumpScreenElements()
-            storyEl = findMatchingStoryElement(afterEls, target, h)
+            storyEl = findMatchingStoryElement(afterEls, target, w, h)
             if (storyEl != null) {
                 service.tapNodeSingleTouch(storyEl.node)
                 delay(350)
@@ -698,16 +731,17 @@ object InstagramTreeNavigator {
         if (inDmInbox || (!isSearchTabSelected && searchBar == null)) {
             var searchTab = findBottomNavTab(service, screenHeight, listOf("search and explore", "search"), listOf("search_tab", "explore_tab"))
             if (searchTab == null) {
-                service.performBack()
-                delay(350)
-                searchTab = pollElement(service, timeoutMs = 1100, intervalMs = 70) {
-                    findBottomNavTab(it, screenHeight, listOf("search and explore", "search"), listOf("search_tab", "explore_tab"))
+                for (backTry in 1..4) {
+                    service.performBack()
+                    delay(320)
+                    searchTab = findBottomNavTab(service.dumpScreenElements(), screenHeight, listOf("search and explore", "search"), listOf("search_tab", "explore_tab"))
+                    if (searchTab != null) break
                 }
             }
             if (searchTab == null) return false
             service.tapNodeSingleTouch(searchTab.node)
             steps.add("Tapped Search tab")
-            delay(220)
+            delay(240)
         }
 
         // Activate & type account query without IME Enter so live verified account autocomplete stays open
@@ -798,6 +832,7 @@ object InstagramTreeNavigator {
     private suspend fun pollEditableSearchNode(
         service: JarvisAccessibilityService,
         triggerEl: ScreenElement,
+        screenWidth: Int,
         screenHeight: Int,
         timeoutMs: Long,
         intervalMs: Long
@@ -805,16 +840,19 @@ object InstagramTreeNavigator {
         val start = System.currentTimeMillis()
         var clickedFallback = false
         while (System.currentTimeMillis() - start < timeoutMs) {
-            val inDump = service.dumpScreenElements().firstOrNull { el ->
-                el.isEditable && el.bounds.top < screenHeight * 0.48
+            val els = service.dumpScreenElements()
+            val inDump = els.firstOrNull { el ->
+                (el.isEditable || el.className.contains("EditText", ignoreCase = true)) &&
+                    el.bounds.top < screenHeight * 0.52
             }
             if (inDump != null) return Pair(inDump.node, inDump.bounds)
 
             val crossWindow = service.findNodeAcrossWindows(resolveClickableParent = false) { node ->
-                if (!node.isEditable) return@findNodeAcrossWindows false
+                val cls = node.className?.toString() ?: ""
+                if (!node.isEditable && !cls.contains("EditText", ignoreCase = true)) return@findNodeAcrossWindows false
                 val r = Rect()
                 node.getBoundsInScreen(r)
-                r.top in 0 until (screenHeight * 0.48f).toInt() && r.height() > 15
+                r.top in 0 until (screenHeight * 0.52f).toInt() && r.height() > 15
             }
             if (crossWindow != null) {
                 val r = Rect()
@@ -822,10 +860,21 @@ object InstagramTreeNavigator {
                 return Pair(crossWindow, r)
             }
 
-            // Self-heal if inner pill tap didn't open Search EditText within 420ms
-            if (!clickedFallback && System.currentTimeMillis() - start > 420) {
+            // Never double-tap Search coordinates once "Recent searches" / "Search history" already opened!
+            val summary = els.joinToString(" | ") { labelOf(it) }
+            if (summary.contains("search history") && !summary.contains("search or ask meta ai")) {
+                JarvisLogStore.log("INSTA_SEARCH", "Detected Search history screen; backing out once")
+                service.performBack()
+                delay(280)
+                continue
+            }
+
+            if (!clickedFallback && System.currentTimeMillis() - start > 850) {
                 clickedFallback = true
-                service.clickNode(triggerEl.node)
+                if (!summary.contains("recent searches") && !summary.contains("clear all")) {
+                    val liveTrigger = findSearchTriggerOrInput(els, screenWidth, screenHeight) ?: triggerEl
+                    service.clickNode(liveTrigger.node)
+                }
             }
             delay(intervalMs)
         }
@@ -840,16 +889,28 @@ object InstagramTreeNavigator {
         steps: MutableList<String>,
         pressEnter: Boolean
     ): Int? {
-        var searchEl = pollElement(service, timeoutMs = 1100, intervalMs = 55) { elements ->
+        var searchEl = pollElement(service, timeoutMs = 1000, intervalMs = 55) { elements ->
             findSearchTriggerOrInput(elements, screenWidth, screenHeight)
         }
-        // If inside Inbox and user scrolled down hiding top Search pill, scroll up once to reveal it
+        // If inside scrolled Inbox hiding top Search pill, jump to top via selected Inbox tab or upward scrolls
         if (searchEl == null && isInMessagesInbox(service, screenHeight)) {
-            JarvisLogStore.log("INSTA_SEARCH", "Search bar not visible in Inbox; scrolling up once")
-            service.scroll("up")
-            delay(320)
-            searchEl = pollElement(service, timeoutMs = 1000, intervalMs = 55) { elements ->
-                findSearchTriggerOrInput(elements, screenWidth, screenHeight)
+            for (revealTry in 1..4) {
+                val curEls = service.dumpScreenElements()
+                val inboxTab = if (revealTry == 1) {
+                    findInboxButton(curEls, screenHeight)?.takeIf { it.node.isSelected && resIdOf(it).contains("tab") }
+                } else null
+                if (inboxTab != null) {
+                    JarvisLogStore.log("INSTA_SEARCH", "Search bar hidden in scrolled Inbox; tapping Inbox tab to jump to top")
+                    service.tapNodeSingleTouch(inboxTab.node)
+                } else {
+                    JarvisLogStore.log("INSTA_SEARCH", "Search bar not visible in Inbox (try $revealTry); scrolling up")
+                    service.scroll("up")
+                }
+                delay(320)
+                searchEl = pollElement(service, timeoutMs = 650, intervalMs = 55) { elements ->
+                    findSearchTriggerOrInput(elements, screenWidth, screenHeight)
+                }
+                if (searchEl != null) break
             }
         }
         if (searchEl == null) {
@@ -865,7 +926,7 @@ object InstagramTreeNavigator {
         if (!searchEl.isEditable) {
             service.tapNodeSingleTouch(searchEl.node)
             steps.add("Activated Search bar")
-            val opened = pollEditableSearchNode(service, searchEl, screenHeight, timeoutMs = 1800, intervalMs = 55)
+            val opened = pollEditableSearchNode(service, searchEl, screenWidth, screenHeight, timeoutMs = 2100, intervalMs = 55)
             if (opened == null) {
                 JarvisLogStore.log("INSTA_SEARCH_MISS", "Editable search EditText did not appear after tapping searchEl")
                 JarvisLogStore.logScreenTree("EDITABLE_SEARCH_TIMEOUT", service.dumpScreenElements())
@@ -897,7 +958,7 @@ object InstagramTreeNavigator {
         JarvisLogStore.log("INSTA_SEARCH_TYPE", "typed=$typed enteredOk=$enteredOk currentText='${afterTxt.take(40)}'")
         if (!enteredOk) {
             // Ensure IME InputConnection binds on freshly opened overlay, then retry typing once
-            val retryPair = pollEditableSearchNode(service, searchEl, screenHeight, timeoutMs = 550, intervalMs = 55)
+            val retryPair = pollEditableSearchNode(service, searchEl, screenWidth, screenHeight, timeoutMs = 550, intervalMs = 55)
             val retryNode = retryPair?.first ?: editableNode
             service.tapNodeSingleTouch(retryNode)
             delay(85)
@@ -916,28 +977,31 @@ object InstagramTreeNavigator {
         return elements.filter { el ->
             val label = labelOf(el)
             val res = resIdOf(el)
-            val inBarArea = el.bounds.top < screenHeight * 0.24 || el.bounds.top > screenHeight * 0.72
+            val inBarArea = el.bounds.top < screenHeight * 0.24 || el.bounds.top > screenHeight * 0.80
             if (!inBarArea || el.isEditable) return@filter false
 
             val isInvalid = label.contains("comment") || label.contains("share") || label.contains("voice") ||
                 label.contains("like") || label.contains("story") || label.contains("notification") ||
                 label.contains("new message") || label == "message..." || label.contains("send message") ||
-                res.contains("notification") || res.contains("compose") || res.contains("create_thread")
+                res.contains("notification") || res.contains("compose") || res.contains("create_thread") ||
+                res.contains("quick_snap") || res.contains("consumption_preview")
             if (isInvalid) return@filter false
 
-            val resMatch = res.contains("inbox") || res.contains("direct") || res.contains("messages_tab")
+            val resMatch = res == "direct_tab" || res.contains("messages_tab") ||
+                res.contains("inbox") || res.contains("direct")
             val descMatch = label.contains("unread message") || label == "direct" || label == "messages" ||
-                label == "messaging" || label.contains("direct message") || label == "chats" ||
+                label == "message" || label == "messaging" || label.contains("direct message") || label == "chats" ||
                 label.startsWith("messages") || label.startsWith("direct") || label.startsWith("chats") ||
-                (label.contains("unread") && el.bounds.top > screenHeight * 0.72)
+                (label.contains("unread") && el.bounds.top > screenHeight * 0.80)
             (resMatch || descMatch) && hasClickableOrAncestor(el.node, maxDepth = 4)
         }.minByOrNull { el ->
             val res = resIdOf(el)
             val label = labelOf(el)
             when {
-                res.contains("inbox") || res.contains("direct") || res.contains("messages_tab") -> 0
-                label.startsWith("messages") || label.startsWith("direct") -> 1
-                else -> 2
+                res == "direct_tab" || res.contains("messages_tab") -> 0
+                res.contains("inbox") || res.contains("direct") -> 1
+                label.startsWith("messages") || label.startsWith("direct") || label == "message" -> 2
+                else -> 3
             }
         }
     }
@@ -962,7 +1026,12 @@ object InstagramTreeNavigator {
 
         val hasStrongInboxId = resSummary.contains("direct_inbox") || resSummary.contains("inbox_recycler") ||
             resSummary.contains("direct_search") || resSummary.contains("thread_list") ||
-            resSummary.contains("notes_tray") || resSummary.contains("row_inbox")
+            resSummary.contains("notes_tray") || resSummary.contains("row_inbox") ||
+            resSummary.contains("direct_quick_snap")
+
+        val hasInboxHeaderChrome = resSummary.contains("igds_action_bar_title") &&
+            summary.contains("new message") &&
+            !summary.contains("your story")
 
         val hasStrongInboxText = summary.contains("search or ask meta ai") || summary.contains("ask meta ai") ||
             summary.contains("your note") || summary.contains("leave a note") ||
@@ -970,14 +1039,20 @@ object InstagramTreeNavigator {
             (summary.contains("messages") && (summary.contains("requests") || summary.contains("primary") || summary.contains("general") || summary.contains("your note"))) ||
             (summary.contains("primary") && (summary.contains("general") || summary.contains("channels")))
 
-        // Bottom Messages tab selected (do not reject just because bottom nav tabs stay visible on Inbox)
-        val messagesTabSelected = findInboxButton(elements, screenHeight)?.node?.isSelected == true &&
-            !summary.contains("your story")
+        // Bottom Messages tab selected even when quick_snap preview pill is floating above it
+        val hasSelectedDirectTab = elements.any { el ->
+            el.bounds.top > screenHeight * 0.78 &&
+                (resIdOf(el) == "direct_tab" || resIdOf(el) == "messages_tab") &&
+                el.node.isSelected &&
+                !summary.contains("your story")
+        }
+        val messagesTabSelected = hasSelectedDirectTab ||
+            (findInboxButton(elements, screenHeight)?.node?.isSelected == true && !summary.contains("your story"))
 
         val homeTabSelected = findBottomNavTab(elements, screenHeight, listOf("home", "feed"), listOf("feed_tab", "home_tab"))?.node?.isSelected == true
         if (homeTabSelected && !hasStrongInboxId && !messagesTabSelected) return false
 
-        return hasStrongInboxId || hasStrongInboxText || messagesTabSelected
+        return hasStrongInboxId || hasInboxHeaderChrome || hasStrongInboxText || messagesTabSelected
     }
 
     private fun findChatComposer(service: JarvisAccessibilityService, screenHeight: Int): ScreenElement? {
@@ -1339,15 +1414,29 @@ object InstagramTreeNavigator {
     private suspend fun openMediaCardViewer(
         service: JarvisAccessibilityService,
         mediaCard: ScreenElement,
+        elements: List<ScreenElement>,
         screenHeight: Int
     ) {
         service.tapNodeSingleTouch(mediaCard.node)
-        val opened = pollCondition(timeoutMs = 1600, intervalMs = 75) {
+        var opened = pollCondition(timeoutMs = 1500, intervalMs = 75) {
             service.dumpScreenElements().none { isChatComposerElement(it, screenHeight) }
         }
         if (!opened) {
+            val captionTarget = elements.firstOrNull { other ->
+                other !== mediaCard &&
+                    other.bounds.centerY() in (mediaCard.bounds.top - 30)..(mediaCard.bounds.bottom + 80) &&
+                    (resIdOf(other).contains("caption_title") || resIdOf(other) == "title")
+            }
+            if (captionTarget != null) {
+                service.tapNodeSingleTouch(captionTarget.node)
+                opened = pollCondition(timeoutMs = 1100, intervalMs = 75) {
+                    service.dumpScreenElements().none { isChatComposerElement(it, screenHeight) }
+                }
+            }
+        }
+        if (!opened) {
             service.clickNode(mediaCard.node)
-            delay(400)
+            delay(380)
         }
     }
 
@@ -1367,7 +1456,7 @@ object InstagramTreeNavigator {
 
         delay(1000)
 
-        while (System.currentTimeMillis() - start < 32_000L) {
+        while (System.currentTimeMillis() - start < 36_000L) {
             val elapsed = System.currentTimeMillis() - start
             val activePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
             if (activePkg.isNotBlank() && !activePkg.contains("instagram")) {
@@ -1423,6 +1512,11 @@ object InstagramTreeNavigator {
                     if (wrappedUp || countdownDone) return ReelWaitOutcome.COMPLETED
                 }
                 prevTimerSec = totalSec
+            }
+
+            // If DM reel player exposes neither SeekBar nor timer telemetry, cap wait cleanly at 22s
+            if (!sawSeekProgress && maxTimerSec < 0 && elapsed >= 22_000L) {
+                return ReelWaitOutcome.COMPLETED
             }
 
             delay(250)
@@ -1558,14 +1652,19 @@ object InstagramTreeNavigator {
             if (cls.contains("recyclerview") || cls.contains("listview") || cls.contains("scrollview")) continue
             val label = labelOf(el)
             val res = resIdOf(el)
-            if (!hasClickableOrAncestor(el.node, maxDepth = 5)) {
+            val innerVisualRect = findInnerVisualMediaBounds(el.node, minMediaDescW, minMediaDescH)
+            val isVisualCls = cls.contains("imageview") || cls.contains("textureview") ||
+                cls.contains("videoview") || cls.contains("surfaceview") || cls.contains("draweeview")
+            val isLargeUnlabeledCard = el.node.text.isNullOrBlank() &&
+                el.bounds.height() >= (screenHeight * 0.11f).toInt() &&
+                el.bounds.width() >= (screenWidth * 0.22f).toInt()
+
+            // Allow large visual/XMA media containers even when Meta Litho uses RecyclerView touch interceptors (isClickable=false)
+            if (!hasClickableOrAncestor(el.node, maxDepth = 5) && !isVisualCls && innerVisualRect == null && !isLargeUnlabeledCard) {
                 debugReasons?.add("SKIP(not_click ${el.bounds.width()}x${el.bounds.height()}): '${label.take(25)}'")
                 continue
             }
 
-            val innerVisualRect = findInnerVisualMediaBounds(el.node, minMediaDescW, minMediaDescH)
-            val isVisualCls = cls.contains("imageview") || cls.contains("textureview") ||
-                cls.contains("videoview") || cls.contains("surfaceview") || cls.contains("draweeview")
             val isReelKeyword = label.contains("reel") || label.contains("clip") || res.contains("reel") || res.contains("clip")
             val isVideoOrXma = isReelKeyword || label.contains("video") || label.contains("watch") ||
                 label.contains("play") || label.contains("audio") || res.contains("video") || res.contains("xma")
@@ -1714,13 +1813,16 @@ object InstagramTreeNavigator {
     private fun findMatchingStoryElement(
         elements: List<ScreenElement>,
         target: String,
+        screenWidth: Int = Int.MAX_VALUE,
         screenHeight: Int = Int.MAX_VALUE
     ): ScreenElement? {
         val tokens = target.lowercase().trim().split(Regex("\\s+")).filter { it.length >= 2 }
         if (tokens.isEmpty()) return null
+        val maxCenterX = if (screenWidth == Int.MAX_VALUE) Int.MAX_VALUE else screenWidth - 18
 
-        // Pass 1: Strict match (all spoken name tokens match)
+        // Pass 1: Strict match inside top Home Story tray
         val strict = elements.firstOrNull { el ->
+            if (el.bounds.top >= screenHeight * 0.44 || el.bounds.centerX() !in 18..maxCenterX) return@firstOrNull false
             val label = labelOf(el)
             if (!label.contains("story")) return@firstOrNull false
             if (label.contains("your story") && !tokens.contains("your") && !tokens.contains("my")) return@firstOrNull false
@@ -1733,7 +1835,7 @@ object InstagramTreeNavigator {
             val joined = tokens.joinToString("")
             val primary = tokens[0]
             return elements.firstOrNull { el ->
-                if (el.bounds.top >= screenHeight * 0.44) return@firstOrNull false
+                if (el.bounds.top >= screenHeight * 0.44 || el.bounds.centerX() !in 18..maxCenterX) return@firstOrNull false
                 val label = labelOf(el)
                 if (!label.contains("story")) return@firstOrNull false
                 if (label.contains("your story") && !tokens.contains("your") && !tokens.contains("my")) return@firstOrNull false

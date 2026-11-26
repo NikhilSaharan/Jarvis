@@ -160,68 +160,77 @@ class GeminiBrain(
      */
     suspend fun decideUIAction(prompt: String): UIActionDecision = withContext(Dispatchers.IO) {
         if (apiKey.isBlank() || apiKey.startsWith("your_")) {
-            return@withContext UIActionDecision("done", null, null, null)
+            return@withContext UIActionDecision("error", null, null, null, "Gemini API Key missing")
         }
 
-        for (model in models) {
-            val t0 = System.currentTimeMillis()
-            try {
-                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
-                val requestPayload = JsonObject().apply {
-                    val contents = com.google.gson.JsonArray().apply {
-                        add(JsonObject().apply {
-                            val parts = com.google.gson.JsonArray().apply {
-                                add(JsonObject().apply { addProperty("text", prompt) })
-                            }
-                            add("parts", parts)
-                        })
+        var lastError = "AI service unavailable"
+        for (attempt in 0..1) {
+            var shouldRetryTransient = false
+            for (model in models) {
+                val t0 = System.currentTimeMillis()
+                try {
+                    val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+                    val requestPayload = JsonObject().apply {
+                        val contents = com.google.gson.JsonArray().apply {
+                            add(JsonObject().apply {
+                                val parts = com.google.gson.JsonArray().apply {
+                                    add(JsonObject().apply { addProperty("text", prompt) })
+                                }
+                                add("parts", parts)
+                            })
+                        }
+                        add("contents", contents)
+
+                        val genConfig = JsonObject().apply {
+                            addProperty("temperature", 0.1)
+                            addProperty("response_mime_type", "application/json")
+                        }
+                        add("generation_config", genConfig)
                     }
-                    add("contents", contents)
 
-                    val genConfig = JsonObject().apply {
-                        addProperty("temperature", 0.1)
-                        addProperty("response_mime_type", "application/json")
+                    val request = Request.Builder()
+                        .url(url)
+                        .post(requestPayload.toString().toRequestBody(jsonMediaType))
+                        .build()
+
+                    val response = client.newCall(request).execute()
+                    val elapsed = System.currentTimeMillis() - t0
+                    val body = response.body?.string() ?: ""
+
+                    if (response.isSuccessful) {
+                        val jsonResponse = gson.fromJson(body, JsonObject::class.java)
+                        val candidates = jsonResponse.getAsJsonArray("candidates")
+                        val firstCandidate = candidates?.get(0)?.asJsonObject
+                        val textContent = firstCandidate?.getAsJsonObject("content")
+                            ?.getAsJsonArray("parts")?.get(0)?.asJsonObject?.get("text")?.asString ?: ""
+
+                        val parsed = gson.fromJson(textContent, JsonObject::class.java)
+                        val action = parsed.get("action")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString ?: "done"
+                        val tag = parsed.get("tag")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asInt
+                        val text = parsed.get("text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+                        val dir = parsed.get("direction")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+                        val summary = parsed.get("summary")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+                        val reasoning = parsed.get("reasoning")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+                        JarvisLogStore.log(
+                            "GEMINI_UI",
+                            "model=$model latency=${elapsed}ms raw=$textContent | action=$action tag=$tag text='${text ?: ""}' dir=$dir reason='${reasoning ?: ""}' summary='${summary ?: ""}'"
+                        )
+                        return@withContext UIActionDecision(action, tag, text, dir, summary, reasoning)
+                    } else {
+                        lastError = "HTTP ${response.code}"
+                        if (response.code == 429 || response.code == 503) shouldRetryTransient = true
+                        JarvisLogStore.log("GEMINI_UI_ERR", "model=$model latency=${elapsed}ms http=${response.code} body=${body.take(240)}")
                     }
-                    add("generation_config", genConfig)
+                } catch (e: Exception) {
+                    lastError = e.message ?: "Network error"
+                    Log.w("GeminiBrain", "UI action decision error on $model: $lastError")
+                    JarvisLogStore.log("GEMINI_UI_ERR", "model=$model exception=$lastError")
                 }
-
-                val request = Request.Builder()
-                    .url(url)
-                    .post(requestPayload.toString().toRequestBody(jsonMediaType))
-                    .build()
-
-                val response = client.newCall(request).execute()
-                val elapsed = System.currentTimeMillis() - t0
-                val body = response.body?.string() ?: ""
-
-                if (response.isSuccessful) {
-                    val jsonResponse = gson.fromJson(body, JsonObject::class.java)
-                    val candidates = jsonResponse.getAsJsonArray("candidates")
-                    val firstCandidate = candidates?.get(0)?.asJsonObject
-                    val textContent = firstCandidate?.getAsJsonObject("content")
-                        ?.getAsJsonArray("parts")?.get(0)?.asJsonObject?.get("text")?.asString ?: ""
-
-                    val parsed = gson.fromJson(textContent, JsonObject::class.java)
-                    val action = parsed.get("action")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString ?: "done"
-                    val tag = parsed.get("tag")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asInt
-                    val text = parsed.get("text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
-                    val dir = parsed.get("direction")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
-                    val summary = parsed.get("summary")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
-                    val reasoning = parsed.get("reasoning")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
-                    JarvisLogStore.log(
-                        "GEMINI_UI",
-                        "model=$model latency=${elapsed}ms raw=$textContent | action=$action tag=$tag text='${text ?: ""}' dir=$dir reason='${reasoning ?: ""}' summary='${summary ?: ""}'"
-                    )
-                    return@withContext UIActionDecision(action, tag, text, dir, summary, reasoning)
-                } else {
-                    JarvisLogStore.log("GEMINI_UI_ERR", "model=$model latency=${elapsed}ms http=${response.code} body=${body.take(240)}")
-                }
-            } catch (e: Exception) {
-                Log.w("GeminiBrain", "UI action decision error on $model: ${e.message}")
-                JarvisLogStore.log("GEMINI_UI_ERR", "model=$model exception=${e.message}")
             }
+            if (!shouldRetryTransient || attempt >= 1) break
+            kotlinx.coroutines.delay(550)
         }
-        UIActionDecision("done", null, null, null, null)
+        UIActionDecision("error", null, null, null, lastError)
     }
 
     /**

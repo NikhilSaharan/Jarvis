@@ -180,23 +180,36 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="LIVE CONSOLE LOGS (DETAILED TRACE):"
+            android:text="LIVE LOGS:"
             android:textColor="@color/text_secondary"
             android:textSize="11sp"
             android:textStyle="bold" />
 
         <Button
+            android:id="@+id/btnDownloadLogs"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:text="⬇ Save .txt"
+            android:textSize="10sp"
+            android:textColor="@color/jarvis_dark_bg"
+            android:backgroundTint="@color/green_active"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:minHeight="0dp"
+            android:layout_marginEnd="5dp" />
+
+        <Button
             android:id="@+id/btnCopyLogs"
             android:layout_width="wrap_content"
             android:layout_height="32dp"
-            android:text="📋 Copy Logs"
+            android:text="📋 Copy"
             android:textSize="10sp"
             android:textColor="@color/jarvis_dark_bg"
             android:backgroundTint="@color/jarvis_cyan"
-            android:paddingStart="10dp"
-            android:paddingEnd="10dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
             android:minHeight="0dp"
-            android:layout_marginEnd="6dp" />
+            android:layout_marginEnd="5dp" />
 
         <Button
             android:id="@+id/btnClearLogs"
@@ -206,8 +219,8 @@
             android:textSize="10sp"
             android:textColor="@color/white"
             android:backgroundTint="@color/jarvis_card_bg"
-            android:paddingStart="10dp"
-            android:paddingEnd="10dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
             android:minHeight="0dp" />
     </LinearLayout>
 

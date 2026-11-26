@@ -331,8 +331,15 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                         actionHistory.add("Pressed back button")
                         delay(450)
                     }
+                    "error" -> {
+                        isCompleted = false
+                        finalMsg = "Sir, AI server abhi busy hai (${decision.summary ?: "error"}), isliye action complete nahi ho paya — kripya thodi der mein dobara bolein."
+                        break
+                    }
                     else -> {
-                        isCompleted = true
+                        isCompleted = false
+                        finalMsg = "Sir, screen step samajh nahi aaya — kripya dobara try karein."
+                        break
                     }
                 }
             }

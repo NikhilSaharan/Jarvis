@@ -17,8 +17,8 @@ import java.util.concurrent.Executors
  */
 object JarvisLogStore {
 
-    private const val MAX_LINES = 1500
-    private const val DISPLAY_TAIL_LINES = 400
+    private const val MAX_LINES = 5000
+    private const val DISPLAY_TAIL_LINES = 450
     private const val LOG_FILE_NAME = "jarvis_trace.log"
 
     private val lock = Any()
@@ -111,8 +111,18 @@ object JarvisLogStore {
         return "tag=${el.tag} ${el.className} txt='${el.text.replace("\n", " ").take(55)}' cd='${el.contentDescription.replace("\n", " ").take(55)}' id='$res' [${b.left},${b.top},${b.right},${b.bottom}] click=${el.isClickable} edit=${el.isEditable}"
     }
 
-    fun getFullLogText(): String = synchronized(lock) {
-        lines.joinToString("\n")
+    fun getFullLogText(): String {
+        synchronized(lock) {
+            if (lines.isNotEmpty()) {
+                return lines.joinToString("\n")
+            }
+        }
+        val f = logFile
+        return try {
+            if (f != null && f.exists()) f.readText() else ""
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     fun getDisplayLogText(): String = synchronized(lock) {
@@ -142,7 +152,7 @@ object JarvisLogStore {
         val f = logFile ?: return
         fileExecutor.execute {
             try {
-                if (f.exists() && f.length() > 400_000L) {
+                if (f.exists() && f.length() > 1_200_000L) {
                     val snapshot = synchronized(lock) { lines.joinToString("\n") }
                     f.writeText(if (snapshot.isNotEmpty()) "$snapshot\n" else "")
                 } else {

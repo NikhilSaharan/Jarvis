@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -14,8 +15,10 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.provider.Settings
 import android.text.InputType
 import android.util.Base64
@@ -80,10 +83,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnTalk: Button
     private lateinit var etCommandInput: EditText
     private lateinit var btnSendCommand: Button
+    private lateinit var btnDownloadLogs: Button
     private lateinit var btnCopyLogs: Button
     private lateinit var btnClearLogs: Button
     private lateinit var tvLogs: TextView
     private lateinit var scrollLogs: ScrollView
+    private var pendingExportLogText: String = ""
 
     private lateinit var systemController: SystemController
     private lateinit var telephonyHelper: TelephonyHelper
@@ -103,6 +108,27 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
         updatePermissionStatus()
+    }
+
+    private val createLogDocLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri ->
+        if (uri != null && pendingExportLogText.isNotEmpty()) {
+            try {
+                contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(pendingExportLogText.toByteArray(Charsets.UTF_8))
+                }
+                Toast.makeText(
+                    this,
+                    "Full logs saved (${JarvisLogStore.lineCount()} lines)!",
+                    Toast.LENGTH_LONG
+                ).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Save failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            } finally {
+                pendingExportLogText = ""
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -150,6 +176,7 @@ class MainActivity : AppCompatActivity() {
         btnTalk = findViewById(R.id.btnTalk)
         etCommandInput = findViewById(R.id.etCommandInput)
         btnSendCommand = findViewById(R.id.btnSendCommand)
+        btnDownloadLogs = findViewById(R.id.btnDownloadLogs)
         btnCopyLogs = findViewById(R.id.btnCopyLogs)
         btnClearLogs = findViewById(R.id.btnClearLogs)
         tvLogs = findViewById(R.id.tvLogs)
@@ -278,6 +305,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        btnDownloadLogs.setOnClickListener {
+            exportLogsToTxtFile()
+        }
+
         btnCopyLogs.setOnClickListener {
             val fullText = JarvisLogStore.getFullLogText()
             if (fullText.isBlank()) {
@@ -298,6 +329,48 @@ class MainActivity : AppCompatActivity() {
             refreshLogsView()
             Toast.makeText(this, "Logs cleared", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun exportLogsToTxtFile() {
+        val fullText = JarvisLogStore.getFullLogText()
+        if (fullText.isBlank()) {
+            Toast.makeText(this, "Abhi koi logs nahi hain.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val lineTotal = JarvisLogStore.lineCount()
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val fileName = "Jarvis_Logs_$stamp.txt"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                    put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Jarvis")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(fullText.toByteArray(Charsets.UTF_8))
+                    }
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    contentResolver.update(uri, values, null, null)
+                    Toast.makeText(
+                        this,
+                        "Saved Downloads/Jarvis/$fileName ($lineTotal lines)!",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return
+                }
+            } catch (e: Exception) {
+                Log.w("MainActivity", "MediaStore Downloads write failed: ${e.message}")
+            }
+        }
+
+        pendingExportLogText = fullText
+        createLogDocLauncher.launch(fileName)
     }
 
     override fun onResume() {
