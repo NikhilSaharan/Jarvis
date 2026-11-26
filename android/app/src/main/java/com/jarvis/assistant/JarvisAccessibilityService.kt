@@ -549,7 +549,8 @@ class JarvisAccessibilityService : AccessibilityService() {
      * Swipes horizontally inside a live container's bounds (e.g. horizontal Story tray).
      */
     suspend fun swipeHorizontalInRect(rect: Rect, toLeft: Boolean = true): Boolean {
-        if (rect.width() < 100 || rect.height() < 20) return false
+        val dm = resources.displayMetrics
+        if (rect.width() < (dm.widthPixels * 0.10f).toInt() || rect.height() < (dm.heightPixels * 0.01f).toInt()) return false
         val cy = rect.centerY().toFloat()
         val startX = if (toLeft) rect.right - rect.width() * 0.15f else rect.left + rect.width() * 0.15f
         val endX = if (toLeft) rect.left + rect.width() * 0.15f else rect.right - rect.width() * 0.15f

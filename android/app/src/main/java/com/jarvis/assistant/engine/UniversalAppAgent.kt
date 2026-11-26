@@ -214,31 +214,18 @@ $historyStr
 
 Sir's Overall Goal: "$instruction"
 
-TREE-BASED NAVIGATION & EXECUTION RULES (FOLLOW LIVE UI TREE STRICTLY — ZERO RANDOM CLICKS):
-1. ROUTE TO THE RIGHT APP SECTION BASED ON SIR'S INTENT:
-   - DIRECT MESSAGE / CHAT / DM GOAL:
-     * Do NOT use public Explore Search first! Tap the Messages / Direct / Inbox button first.
-     * STRICTLY NEVER tap the top-right 'New message' compose/pencil icon in Messages Inbox — ALWAYS use the wide 'Search or ask Meta AI' / 'Search' bar below the username header (scroll up if scrolled out of view).
-     * Inside Search results, tap the matching one-to-one personal chat row (SKIP group chats with multiple member names unless explicitly targeting a group, and skip Meta AI suggestion rows), tap message 'input_field', type message, and tap Send.
-   - READ LAST DM MESSAGE GOAL:
-     * Go to Messages / Inbox -> tap matching friend row directly if visible on Inbox OR use 'Search or ask Meta AI' (NEVER top-right 'New message') -> open their one-to-one chat thread so it marks Seen -> read the latest incoming message text from the tree and speak it clearly in "reply".
-   - FRIEND-SENT OR USER-SENT REEL / VIDEO / POST IN DM:
-     * Do NOT open the generic Reels bottom tab!
-     * Go to Messages / Inbox -> use 'Search or ask Meta AI' (or tap friend directly if visible) -> open their one-to-one chat thread -> scroll up if needed and play shared reel(s) from the requested sender (left-side bubbles = friend sent; right-side / 'You sent' bubbles = user sent ONLY if explicitly requested). Wait until each reel finishes before returning to chat!
-   - STORY WATCHING GOAL:
-     * Stay strictly on the Home feed Story Tray — NEVER open Search (neither Explore nor DM Search) for stories!
-     * Scroll/swipe the horizontal Story tray cleanly until <person>'s story bubble appears and tap it. If absent in the Home Story tray, stop cleanly and inform Sir.
-   - FOLLOW / OPEN A PUBLIC ACCOUNT OR PROFILE GOAL:
-     * Tap the normal Search / Explore tab -> type <account> -> check Accounts tab if needed -> prioritize the Verified / official primary account match and strictly avoid fanpages, parody, or backup accounts -> open profile and tap "Follow" (stop if already "Following" or "Requested").
-   - GENERIC REELS / VIDEO TAB GOAL (NO friend sender):
-     * Tap the Reels / Video tab if not already active; scroll if asked or choose "done".
-   - GENERAL MEDIA / MOVIES / SHOWS / ITEMS:
-     * Prefer Search over endless scrolling; tap the matching item/show card and tap Play / Resume to start playback.
+TREE-BASED NAVIGATION RULES (FOLLOW LIVE UI TREE STRUCTURE DIRECTLY):
+1. ROUTE BY STRUCTURAL GOAL:
+   - DIRECT MESSAGE / CHAT / DM: Open Messages Inbox tab -> tap top wide search pill -> pick matching personal chat row (with handle/avatar) -> type into message input_field -> tap Send.
+   - READ LAST DM MESSAGE: Open Messages Inbox tab -> search and open matching personal chat thread -> read latest incoming message from the live tree and speak it clearly.
+   - FRIEND OR USER REELS IN DM: Open Messages Inbox tab -> search and open friend's chat thread -> locate shared media/Reel cards in viewport (left side = friend, right side = user) -> play requested count cleanly waiting between reels.
+   - WATCH STORY: Switch to Home tab -> locate horizontal Story tray at top -> slide horizontally and tap matching friend story ring.
+   - FOLLOW / OPEN PROFILE: Switch to Search/Explore tab -> search account -> open verified/official profile matching target -> tap Follow (stop if already Following/Requested).
+   - GENERIC REELS / GENERAL APPS: Use Reels tab when no friend specified, or search directly inside target app, type full text into input_field, and verify completion from the live UI tree before choosing "done".
 
-2. INPUT FIELDS & SCREEN NAVIGATION SAFETY:
-   - ONLY call "type_tag" on an element labeled 'input_field'. If a search box or text box shows as 'button', call "tap_tag" FIRST so the editable 'input_field' opens on the next turn.
-   - NEVER tap the top username header ('igds_action_bar_title') that opens "Add Instagram" / account switcher, and NEVER tap random feed posts or comments. If a popup/account-menu opens or main navigation tabs are missing, use "back" to dismiss it.
-   - Never repeat the exact same tap on an unchanged screen — switch to "back" or a different action cleanly.
+2. LIVE ELEMENT INTERACTION:
+   - Call "type_tag" ONLY on an 'input_field' (tap search pill first if shown as 'button').
+   - Always act on the specific element matching the active goal; if an unexpected overlay appears or repeating an action leaves the screen unchanged, use "back".
 
 3. CONTENT CREATION & NOTES (TABLES, LISTS, MEMOS):
    - Construct the COMPLETE, cleanly formatted content directly inside the "text" field of "type_tag" and inject it into the note's main 'input_field' in one clean action!

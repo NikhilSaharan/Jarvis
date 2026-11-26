@@ -1,6 +1,6 @@
 {
-  "versionCode": 17,
-  "versionName": "1.1.6",
+  "versionCode": 20,
+  "versionName": "1.1.9",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Zero-fling exact scroll for instant tap accuracy, pure structural UI tree state detection (tab selection & section containers instead of fragile words), and tighter fast-path polling across AppLock & Instagram."
+  "changelog": "Pure relative Accessibility Tree comparisons across Search, Person matching, Bottom Tabs, Story tray, and Media cards — eliminated fixed screen width/height percentage cutoffs."
 }
