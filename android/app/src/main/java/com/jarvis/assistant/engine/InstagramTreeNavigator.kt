@@ -869,7 +869,7 @@ object InstagramTreeNavigator {
             editableBounds.set(opened.second)
             JarvisLogStore.log(
                 "INSTA_SEARCH_EDITABLE",
-                "Opened EditText cls=${editableNode.className?.substringAfterLast('.')} res='${editableNode.viewIdResourceName?.substringAfterLast('/') ?: ""}' bounds=[${editableBounds.left},${editableBounds.top},${editableBounds.right},${editableBounds.bottom}] focused=${editableNode.isFocused}"
+                "Opened EditText cls=${editableNode.className?.toString()?.substringAfterLast('.') ?: ""} res='${editableNode.viewIdResourceName?.substringAfterLast('/') ?: ""}' bounds=[${editableBounds.left},${editableBounds.top},${editableBounds.right},${editableBounds.bottom}] focused=${editableNode.isFocused}"
             )
         } else {
             editableNode = searchEl.node

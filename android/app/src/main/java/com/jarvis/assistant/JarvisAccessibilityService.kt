@@ -468,11 +468,12 @@ class JarvisAccessibilityService : AccessibilityService() {
         val bounds = Rect()
         chosen.getBoundsInScreen(bounds)
         val resId = chosen.viewIdResourceName?.substringAfterLast('/') ?: ""
-        val label = chosen.text?.toString()?.ifBlank { chosen.contentDescription?.toString() } ?: chosen.contentDescription?.toString() ?: ""
+        val cdStr = chosen.contentDescription?.toString() ?: ""
+        val label = (chosen.text?.toString() ?: "").ifBlank { cdStr }
 
         if (clickableTarget != null && clickableTarget.isClickable) {
             if (clickableTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                JarvisLogStore.log("ACC_ACTION", "clickNode(ACTION_CLICK) depth=$depth cls=${chosen.className?.substringAfterLast('.')} label='${label.take(40)}' res='$resId' bounds=[${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}]")
+                JarvisLogStore.log("ACC_ACTION", "clickNode(ACTION_CLICK) depth=$depth cls=${chosen.className?.toString()?.substringAfterLast('.') ?: ""} label='${label.take(40)}' res='$resId' bounds=[${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}]")
                 return true
             }
         } else if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
