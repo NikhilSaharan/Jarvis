@@ -235,7 +235,12 @@ class JarvisAccessibilityService : AccessibilityService() {
 
                 val t = n.text?.toString()?.trim() ?: ""
                 val c = n.contentDescription?.toString()?.trim() ?: ""
-                val chosen = if (t.isNotBlank()) t else c
+                val h = if (Build.VERSION.SDK_INT >= 26) n.hintText?.toString()?.trim() ?: "" else ""
+                val chosen = when {
+                    t.isNotBlank() -> t
+                    c.isNotBlank() -> c
+                    else -> h
+                }
                 if (chosen.isNotBlank() && parts.none { it.equals(chosen, ignoreCase = true) }) {
                     parts.add(chosen)
                 }
@@ -257,6 +262,8 @@ class JarvisAccessibilityService : AccessibilityService() {
 
             val text = node.text?.toString()?.trim() ?: ""
             val cd = node.contentDescription?.toString()?.trim() ?: ""
+            val hint = if (Build.VERSION.SDK_INT >= 26) node.hintText?.toString()?.trim() ?: "" else ""
+            val cdOrHint = cd.ifBlank { hint }
             val cls = node.className?.toString()?.substringAfterLast('.') ?: ""
             val resId = node.viewIdResourceName?.substringAfterLast('/') ?: ""
             val isClickable = node.isClickable
@@ -264,13 +271,13 @@ class JarvisAccessibilityService : AccessibilityService() {
             val isInteractive = isClickable || isEditable || node.isCheckable
 
             val nodeArea = bounds.width().toLong() * bounds.height().toLong()
-            val isHugeWrapper = !isEditable && nodeArea > (screenArea * 0.72) && text.isBlank() && cd.isBlank()
+            val isHugeWrapper = !isEditable && nodeArea > (screenArea * 0.72) && text.isBlank() && cdOrHint.isBlank()
 
             var emittedThisNode = false
             if (isInteractive && !isHugeWrapper) {
                 val aggregatedLabel = when {
                     text.isNotBlank() -> text
-                    cd.isNotBlank() -> cd
+                    cdOrHint.isNotBlank() -> cdOrHint
                     isClickable -> collectDescendantLabels(node)
                     else -> ""
                 }
@@ -279,7 +286,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                         ScreenElement(
                             tag = counter++,
                             text = if (text.isNotBlank()) text else aggregatedLabel,
-                            contentDescription = cd,
+                            contentDescription = cdOrHint,
                             className = cls,
                             isClickable = isClickable,
                             isEditable = isEditable,
@@ -289,12 +296,12 @@ class JarvisAccessibilityService : AccessibilityService() {
                     )
                     emittedThisNode = true
                 }
-            } else if (!insideClickableParent && !isHugeWrapper && (text.isNotBlank() || cd.isNotBlank())) {
+            } else if (!insideClickableParent && !isHugeWrapper && (text.isNotBlank() || cdOrHint.isNotBlank())) {
                 elements.add(
                     ScreenElement(
                         tag = counter++,
                         text = text,
-                        contentDescription = cd,
+                        contentDescription = cdOrHint,
                         className = cls,
                         isClickable = false,
                         isEditable = false,

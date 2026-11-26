@@ -1,6 +1,6 @@
 {
-  "versionCode": 11,
-  "versionName": "1.1.0",
+  "versionCode": 12,
+  "versionName": "1.1.1",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Dedicated fast Instagram tools, strict personal vs group DM matching, verified/official follow prioritization over fanpages, and deep N-reel DM playback."
+  "changelog": "Reads hintText for Search bar reliability, blocks New Message icon trap, separates friend vs self-sent DM reels strictly, waits full reel duration, and hardens Inbox DM reading."
 }

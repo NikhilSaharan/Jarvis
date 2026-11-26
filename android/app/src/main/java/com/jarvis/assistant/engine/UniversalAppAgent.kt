@@ -50,13 +50,15 @@ class UniversalAppAgent(
             "instagram_play_chat_reels" -> {
                 val sender = (args["sender"] as? String)?.trim() ?: ""
                 val count = (args["count"] as? Number)?.toInt() ?: 1
+                val fromMe = (args["from_me"] as? Boolean) == true
                 val actionType = if (count < 0) "chat_media_all" else "chat_media"
+                val ownerPhrase = if (fromMe) "sent by Sir" else "sent by '$sender'"
                 val desc = when {
-                    count < 0 -> "Open '$sender' chat on Instagram and play all shared reels from latest upward"
-                    count > 1 -> "Open '$sender' chat on Instagram and play the last $count shared reels from latest upward"
-                    else -> "Open '$sender' chat on Instagram and play the latest shared reel"
+                    count < 0 -> "Open '$sender' chat on Instagram and play all shared reels $ownerPhrase from latest upward"
+                    count > 1 -> "Open '$sender' chat on Instagram and play the last $count shared reels $ownerPhrase from latest upward"
+                    else -> "Open '$sender' chat on Instagram and play the latest shared reel $ownerPhrase"
                 }
-                SocialIntent(actionType, sender, "", count) to desc
+                SocialIntent(actionType, sender, "", count, fromMe) to desc
             }
             "instagram_play_reels" -> {
                 val next = (args["next"] as? Boolean) == true
@@ -196,12 +198,13 @@ TREE-BASED NAVIGATION & EXECUTION RULES (FOLLOW LIVE UI TREE STRICTLY — ZERO R
 1. ROUTE TO THE RIGHT APP SECTION BASED ON SIR'S INTENT:
    - DIRECT MESSAGE / CHAT / DM GOAL:
      * Do NOT use public Explore Search first! Tap the Messages / Direct / Inbox button first.
-     * Inside Messages, tap the Search bar first if labeled 'button' instead of 'input_field', type <recipient>, tap the matching one-to-one personal chat row (SKIP group chats with multiple member names unless explicitly targeting a group, and skip Meta AI suggestion rows), tap message 'input_field', type message, and tap Send.
+     * STRICTLY NEVER tap the top-right 'New message' compose/pencil icon in Messages Inbox — ALWAYS use the wide 'Search or ask Meta AI' / 'Search' bar below the username header (scroll up if scrolled out of view).
+     * Inside Search results, tap the matching one-to-one personal chat row (SKIP group chats with multiple member names unless explicitly targeting a group, and skip Meta AI suggestion rows), tap message 'input_field', type message, and tap Send.
    - READ LAST DM MESSAGE GOAL:
-     * Go to Messages / Inbox -> search <sender> -> open their one-to-one chat thread so it marks Seen -> read the latest incoming message text from the tree and speak it clearly in "reply".
-   - FRIEND-SENT REEL / VIDEO / POST IN DM:
+     * Go to Messages / Inbox -> tap matching friend row directly if visible on Inbox OR use 'Search or ask Meta AI' (NEVER top-right 'New message') -> open their one-to-one chat thread so it marks Seen -> read the latest incoming message text from the tree and speak it clearly in "reply".
+   - FRIEND-SENT OR USER-SENT REEL / VIDEO / POST IN DM:
      * Do NOT open the generic Reels bottom tab!
-     * Go to Messages / Inbox -> search <sender> -> open their one-to-one chat thread -> scroll up if needed and tap shared reel/video preview card(s) inside the chat.
+     * Go to Messages / Inbox -> use 'Search or ask Meta AI' (or tap friend directly if visible) -> open their one-to-one chat thread -> scroll up if needed and play shared reel(s) from the requested sender (left-side bubbles = friend sent; right-side / 'You sent' bubbles = user sent ONLY if explicitly requested). Wait until each reel finishes before returning to chat!
    - STORY WATCHING GOAL:
      * Stay strictly on the Home feed Story Tray — NEVER open Search (neither Explore nor DM Search) for stories!
      * Scroll/swipe the horizontal Story tray cleanly until <person>'s story bubble appears and tap it. If absent in the Home Story tray, stop cleanly and inform Sir.

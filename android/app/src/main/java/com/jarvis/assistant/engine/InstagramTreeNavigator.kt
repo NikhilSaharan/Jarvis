@@ -36,6 +36,7 @@ object InstagramTreeNavigator {
 
         val lower = rawInstruction.lowercase()
         val resolvedCount = resolveRequestedMediaCount(intent, lower)
+        val senderFilter = resolveMediaSenderFilter(intent, lower)
 
         return when (intent.actionType) {
             "dm" -> {
@@ -56,14 +57,14 @@ object InstagramTreeNavigator {
                 if (intent.target.isBlank()) {
                     FastNavResult(handled = false, stepsTaken = steps)
                 } else {
-                    executeChatMedia(service, intent.target, requestedCount = -1, steps = steps)
+                    executeChatMedia(service, intent.target, requestedCount = -1, senderFilter = senderFilter, steps = steps)
                 }
             }
             "chat_media" -> {
                 if (intent.target.isBlank()) {
                     FastNavResult(handled = false, stepsTaken = steps)
                 } else {
-                    executeChatMedia(service, intent.target, requestedCount = resolvedCount, steps = steps)
+                    executeChatMedia(service, intent.target, requestedCount = resolvedCount, senderFilter = senderFilter, steps = steps)
                 }
             }
             "story" -> {
@@ -85,13 +86,21 @@ object InstagramTreeNavigator {
                     (lower.contains("bhej") || lower.contains("sent") || lower.contains("share") ||
                         lower.contains("chat") || lower.contains("dm"))
                 if (looksLikeFriendSharedReel) {
-                    executeChatMedia(service, intent.target, requestedCount = resolvedCount, steps = steps)
+                    executeChatMedia(service, intent.target, requestedCount = resolvedCount, senderFilter = senderFilter, steps = steps)
                 } else {
                     executeReels(service, rawInstruction, steps)
                 }
             }
             else -> FastNavResult(handled = false, stepsTaken = steps)
         }
+    }
+
+    private fun resolveMediaSenderFilter(intent: SocialIntent, lower: String): MediaSenderFilter {
+        if (intent.fromMe) return MediaSenderFilter.FROM_ME
+        val explicitFromMe = lower.contains("meri bheji") || lower.contains("maine bheji") ||
+            lower.contains("maine jo bheji") || lower.contains("meri wali") ||
+            lower.contains("meri reels") || lower.contains("sent by me") || lower.contains("my sent")
+        return if (explicitFromMe) MediaSenderFilter.FROM_ME else MediaSenderFilter.FROM_FRIEND
     }
 
     private fun resolveRequestedMediaCount(intent: SocialIntent, lower: String): Int {
@@ -145,6 +154,7 @@ object InstagramTreeNavigator {
         service: JarvisAccessibilityService,
         target: String,
         requestedCount: Int,
+        senderFilter: MediaSenderFilter,
         steps: MutableList<String>
     ): FastNavResult {
         val dm = service.resources.displayMetrics
@@ -156,8 +166,9 @@ object InstagramTreeNavigator {
         }
 
         // Brief initial settle inside open chat thread
-        delay(200)
+        delay(220)
 
+        val ownerPhrase = if (senderFilter == MediaSenderFilter.FROM_ME) "aapki bheji hui" else "$target ki bheji hui"
         val playedSignatures = mutableSetOf<String>()
         var playedCount = 0
         var emptyScrolls = 0
@@ -167,11 +178,11 @@ object InstagramTreeNavigator {
         while (playedCount < maxReelsCap) {
             val els = service.dumpScreenElements()
             val (headerBottom, composerTop) = computeChatViewportBounds(els, h)
-            val cards = findSharedMediaCardsInChat(els, w, h, headerBottom, composerTop)
+            val cards = findSharedMediaCardsInChat(els, w, h, headerBottom, composerTop, senderFilter)
             val nextCard = cards.firstOrNull { buildMediaCardSignature(it, playedCount) !in playedSignatures }
 
             if (nextCard == null) {
-                // Climb upward deeply (up to 10 screens) so reels hidden above recent texts are still found
+                // Climb upward deeply (up to 10 screens) so sender's reels hidden above recent texts/own messages are still found
                 if (emptyScrolls >= 10 || sameScreenScrolls >= 2) break
                 val beforeSig = viewportMessagesSignature(els, headerBottom, composerTop)
                 service.scroll("up")
@@ -192,15 +203,15 @@ object InstagramTreeNavigator {
             playedSignatures.add(buildMediaCardSignature(nextCard, playedCount))
             openMediaCardViewer(service, nextCard, h)
             playedCount++
-            steps.add("Playing shared reel #$playedCount from $target")
+            steps.add("Playing shared reel #$playedCount ($ownerPhrase)")
 
             // For single latest reel OR the final requested Nth reel, keep it open playing on screen!
             val isFinalFixedTarget = requestedCount > 0 && playedCount >= requestedCount
             if (isFinalFixedTarget) {
                 val msg = if (requestedCount == 1) {
-                    "Instagram par $target ki latest bheji hui reel chala di hai Sir."
+                    "Instagram par $ownerPhrase latest reel chala di hai Sir."
                 } else {
-                    "$target ki chat mein bheji hui last $playedCount reels chala di hain Sir."
+                    "$target ki chat mein $ownerPhrase last $playedCount reels chala di hain Sir."
                 }
                 return FastNavResult(handled = true, success = true, message = msg, stepsTaken = steps)
             }
@@ -210,7 +221,7 @@ object InstagramTreeNavigator {
                 return FastNavResult(
                     handled = true,
                     success = true,
-                    message = "$target ki $playedCount reels play ki hain Sir.",
+                    message = "$ownerPhrase $playedCount reels play ki hain Sir.",
                     stepsTaken = steps
                 )
             }
@@ -228,22 +239,22 @@ object InstagramTreeNavigator {
                     }
                 }
                 if (!backInChat) break
-                delay(220)
+                delay(240)
             }
         }
 
         return if (playedCount > 0) {
             val summary = if (requestedCount > 1) {
-                "$target ki chat mein mili saari $playedCount reels play kar di hain Sir."
+                "$target ki chat mein $ownerPhrase saari $playedCount reels play kar di hain Sir."
             } else {
-                "$target ki chat mein bheji hui saari ($playedCount) reels play kar di hain Sir."
+                "$target ki chat mein $ownerPhrase saari ($playedCount) reels play kar di hain Sir."
             }
             FastNavResult(handled = true, success = true, message = summary, stepsTaken = steps)
         } else {
             FastNavResult(
                 handled = true,
                 success = false,
-                message = "$target ki chat mein koi shared reel nahi mili Sir.",
+                message = "$target ki chat mein $ownerPhrase koi reel nahi mili Sir.",
                 stepsTaken = steps
             )
         }
@@ -265,11 +276,17 @@ object InstagramTreeNavigator {
             return FastNavResult(handled = false, stepsTaken = steps)
         }
 
-        // Opening thread marks messages as Seen automatically; allow chat list to settle cleanly
-        delay(450)
-        val elements = service.dumpScreenElements()
-        val lastMsg = extractLatestMessageInChat(elements, w, h, target)
-            ?: return FastNavResult(handled = false, stepsTaken = steps)
+        // Opening thread marks messages as Seen automatically; poll cleanly until chat message bubbles settle
+        var lastMsg: String? = null
+        val deadline = System.currentTimeMillis() + 1600
+        while (System.currentTimeMillis() < deadline) {
+            lastMsg = extractLatestMessageInChat(service.dumpScreenElements(), w, h, target)
+            if (!lastMsg.isNullOrBlank()) break
+            delay(75)
+        }
+        if (lastMsg.isNullOrBlank()) {
+            return FastNavResult(handled = false, stepsTaken = steps)
+        }
 
         steps.add("Opened & marked $target's chat Seen; read latest message")
         return FastNavResult(
@@ -288,11 +305,16 @@ object InstagramTreeNavigator {
         screenHeight: Int,
         steps: MutableList<String>
     ): Boolean {
+        // If stuck inside top-right "New message" compose screen from an earlier turn, press Back first
+        if (isInNewMessageComposeScreen(service.dumpScreenElements())) {
+            service.performBack()
+            delay(320)
+        }
         if (isInMessagesInbox(service, screenHeight)) return true
 
         var inboxBtn = pollElement(service, timeoutMs = 1100, intervalMs = 60) { findInboxButton(it, screenHeight) }
         if (inboxBtn == null) {
-            // Maybe inside another screen/tab -> switch to Home tab first to surface top Messages icon
+            // Maybe inside another screen/tab -> switch to Home tab first to surface Messages icon
             val homeTab = findBottomNavTab(service, screenHeight, listOf("home", "feed"), listOf("feed_tab", "home_tab"))
             if (homeTab != null && !homeTab.node.isSelected) {
                 service.tapNodeSingleTouch(homeTab.node)
@@ -301,7 +323,11 @@ object InstagramTreeNavigator {
             }
             if (inboxBtn == null) {
                 service.performBack()
-                delay(350)
+                delay(340)
+                if (isInNewMessageComposeScreen(service.dumpScreenElements())) {
+                    service.performBack()
+                    delay(300)
+                }
                 if (isInMessagesInbox(service, screenHeight)) return true
                 inboxBtn = pollElement(service, timeoutMs = 1000, intervalMs = 60) { findInboxButton(it, screenHeight) }
             }
@@ -343,9 +369,13 @@ object InstagramTreeNavigator {
                 steps.add("Already inside chat with $target")
                 return true
             }
-            // Exit unrelated chat back to Inbox
+            // Exit unrelated chat back to Inbox (handle soft keyboard consuming the first Back press!)
             service.performBack()
-            delay(320)
+            delay(300)
+            if (findChatComposer(service, screenHeight) != null) {
+                service.performBack()
+                delay(300)
+            }
         }
 
         if (!openMessagesInbox(service, screenHeight, steps)) return false
@@ -363,7 +393,7 @@ object InstagramTreeNavigator {
             service.tapNodeSingleTouch(visibleChatRow.node)
             steps.add("Tapped visible chat '$target'")
         } else {
-            // Search inside Messages Inbox (NO IME_ENTER so live chat list stays open)
+            // Search inside Messages Inbox via "Search or ask Meta AI" bar (NO IME_ENTER!)
             val searchBottom = activateAndTypeInSearchBar(service, screenWidth, screenHeight, target, steps, pressEnter = false)
                 ?: return false
 
@@ -750,9 +780,18 @@ object InstagramTreeNavigator {
         steps: MutableList<String>,
         pressEnter: Boolean
     ): Int? {
-        val searchEl = pollElement(service, timeoutMs = 1200, intervalMs = 55) { elements ->
+        var searchEl = pollElement(service, timeoutMs = 1100, intervalMs = 55) { elements ->
             findSearchTriggerOrInput(elements, screenWidth, screenHeight)
-        } ?: return null
+        }
+        // If inside Inbox and user scrolled down hiding top Search pill, scroll up once to reveal it
+        if (searchEl == null && isInMessagesInbox(service, screenHeight)) {
+            service.scroll("up")
+            delay(320)
+            searchEl = pollElement(service, timeoutMs = 1000, intervalMs = 55) { elements ->
+                findSearchTriggerOrInput(elements, screenWidth, screenHeight)
+            }
+        }
+        if (searchEl == null) return null
 
         val editableNode: AccessibilityNodeInfo
         val editableBounds = Rect()
@@ -765,6 +804,7 @@ object InstagramTreeNavigator {
             editableNode = opened.first
             editableBounds.set(opened.second)
         } else {
+            // If pill itself reports isEditable on Inbox list, still tap to activate overlay before checking
             editableNode = searchEl.node
             editableBounds.set(searchEl.bounds)
         }
@@ -781,7 +821,7 @@ object InstagramTreeNavigator {
         val enteredOk = typed && (editableNode.text?.toString()?.contains(query.take(5), ignoreCase = true) == true)
         if (!enteredOk) {
             // Ensure IME InputConnection binds on freshly opened overlay, then retry typing once
-            val retryPair = pollEditableSearchNode(service, searchEl, screenHeight, timeoutMs = 450, intervalMs = 50)
+            val retryPair = pollEditableSearchNode(service, searchEl, screenHeight, timeoutMs = 550, intervalMs = 55)
             val retryNode = retryPair?.first ?: editableNode
             service.tapNodeSingleTouch(retryNode)
             delay(85)
@@ -804,23 +844,41 @@ object InstagramTreeNavigator {
 
             val isInvalid = label.contains("comment") || label.contains("share") || label.contains("voice") ||
                 label.contains("like") || label.contains("story") || label.contains("notification") ||
-                label == "message..." || label.contains("send message") || res.contains("notification")
+                label.contains("new message") || label == "message..." || label.contains("send message") ||
+                res.contains("notification") || res.contains("compose") || res.contains("create_thread")
             if (isInvalid) return@filter false
 
             val resMatch = res.contains("inbox") || res.contains("direct") || res.contains("messages_tab")
             val descMatch = label.contains("unread message") || label == "direct" || label == "messages" ||
-                label == "messaging" || label.contains("direct message") || label == "chats"
+                label == "messaging" || label.contains("direct message") || label == "chats" ||
+                label.startsWith("messages") || label.startsWith("direct") || label.startsWith("chats") ||
+                (label.contains("unread") && el.bounds.top > screenHeight * 0.72)
             (resMatch || descMatch) && hasClickableOrAncestor(el.node, maxDepth = 4)
         }.minByOrNull { el ->
             val res = resIdOf(el)
-            if (res.contains("inbox") || res.contains("direct") || res.contains("messages_tab")) 0 else 1
+            val label = labelOf(el)
+            when {
+                res.contains("inbox") || res.contains("direct") || res.contains("messages_tab") -> 0
+                label.startsWith("messages") || label.startsWith("direct") -> 1
+                else -> 2
+            }
         }
+    }
+
+    private fun isInNewMessageComposeScreen(elements: List<ScreenElement>): Boolean {
+        val summary = elements.joinToString(" | ") { labelOf(it) }
+        val hasTitle = summary.contains("new message")
+        val hasComposeSignals = summary.contains("to:") || summary.contains("create a group chat") || summary.contains("suggested")
+        val hasMainInboxMarkers = summary.contains("your note") || summary.contains("requests") ||
+            summary.contains("ask meta ai") || summary.contains("search or ask meta ai")
+        return hasTitle && hasComposeSignals && !hasMainInboxMarkers
     }
 
     private fun isInMessagesInbox(service: JarvisAccessibilityService, screenHeight: Int): Boolean {
         val elements = service.dumpScreenElements()
-        // Inside an active DM thread with composer is NOT Inbox list
+        // Inside an active DM thread or inside "New message" compose screen is NOT Inbox list
         if (elements.any { isChatComposerElement(it, screenHeight) }) return false
+        if (isInNewMessageComposeScreen(elements)) return false
 
         val summary = elements.joinToString(" | ") { labelOf(it) }
         val resSummary = elements.joinToString(" | ") { resIdOf(it) }
@@ -829,9 +887,10 @@ object InstagramTreeNavigator {
             resSummary.contains("direct_search") || resSummary.contains("thread_list") ||
             resSummary.contains("notes_tray") || resSummary.contains("row_inbox")
 
-        val hasStrongInboxText = summary.contains("ask meta ai") || summary.contains("your note") ||
-            summary.contains("leave a note") || summary.contains("new message") ||
+        val hasStrongInboxText = summary.contains("search or ask meta ai") || summary.contains("ask meta ai") ||
+            summary.contains("your note") || summary.contains("leave a note") ||
             summary.contains("requests") || summary.contains("chats") ||
+            (summary.contains("messages") && (summary.contains("requests") || summary.contains("primary") || summary.contains("general") || summary.contains("your note"))) ||
             (summary.contains("primary") && (summary.contains("general") || summary.contains("channels")))
 
         // Bottom Messages tab selected (do not reject just because bottom nav tabs stay visible on Inbox)
@@ -852,9 +911,10 @@ object InstagramTreeNavigator {
         if (!el.isEditable || el.bounds.bottom < screenHeight * 0.38) return false
         val label = labelOf(el)
         val res = resIdOf(el)
-        if (res.contains("search") || label == "search") return false
+        if (res.contains("search") || res.contains("comment") || label == "search" ||
+            label.contains("comment") || label.contains("reply to")) return false
         return res.contains("entry") || res.contains("message") || res.contains("composer") ||
-            label.contains("message") || el.bounds.top > screenHeight * 0.34
+            res.contains("row_thread") || label.contains("message") || el.bounds.top > screenHeight * 0.38
     }
 
     private fun isChatHeaderMatchingTarget(service: JarvisAccessibilityService, target: String, screenHeight: Int): Boolean {
@@ -898,14 +958,19 @@ object InstagramTreeNavigator {
         screenHeight: Int
     ): ScreenElement? {
         return elements.filter { el ->
-            if (el.bounds.top > screenHeight * 0.42) return@filter false
+            if (el.bounds.top > screenHeight * 0.44) return@filter false
             val label = labelOf(el)
             val res = resIdOf(el)
-            // Never tap standalone "Meta AI" icon unless it specifically is the "Ask Meta AI or search" pill or editable search box
+            // STRICTLY never pick "New message" / compose / create group buttons as a Search bar!
+            if (label.contains("new message") || label.contains("create group") ||
+                res.contains("compose") || res.contains("create_thread") || res.contains("new_message")
+            ) return@filter false
+
+            // Never tap standalone "Meta AI" icon unless it specifically says search ("Search or ask Meta AI") or is editable
             if (!el.isEditable && label.contains("meta ai") && !label.contains("search") && !res.contains("search")) {
                 return@filter false
             }
-            val isSearch = res.contains("search") || label.contains("search") || label.contains("ask meta ai")
+            val isSearch = res.contains("search") || label.contains("search") || label.contains("search or ask meta ai")
             isSearch && (el.isEditable || hasClickableOrAncestor(el.node, maxDepth = 4))
         }.minByOrNull { el ->
             val label = labelOf(el)
@@ -914,8 +979,8 @@ object InstagramTreeNavigator {
             when {
                 el.isEditable -> 0
                 (res.contains("search_bar") || res.contains("direct_search") || res.contains("action_bar_search")) && wide -> 1
-                label.contains("search") && wide -> 2
-                label.contains("ask meta ai or search") -> 3
+                label.contains("search or ask meta ai") && wide -> 2
+                label.contains("search") && wide -> 3
                 label.contains("search") || res.contains("search") -> 4
                 else -> 5
             }
@@ -1138,18 +1203,20 @@ object InstagramTreeNavigator {
         return Pair(headerBottom, composerTop)
     }
 
+    private enum class MediaSenderFilter { FROM_FRIEND, FROM_ME }
+
     private suspend fun openMediaCardViewer(
         service: JarvisAccessibilityService,
         mediaCard: ScreenElement,
         screenHeight: Int
     ) {
         service.tapNodeSingleTouch(mediaCard.node)
-        val opened = pollCondition(timeoutMs = 1100, intervalMs = 80) {
+        val opened = pollCondition(timeoutMs = 1600, intervalMs = 75) {
             service.dumpScreenElements().none { isChatComposerElement(it, screenHeight) }
         }
         if (!opened) {
             service.clickNode(mediaCard.node)
-            delay(350)
+            delay(400)
         }
     }
 
@@ -1161,32 +1228,70 @@ object InstagramTreeNavigator {
     ): ReelWaitOutcome {
         val start = System.currentTimeMillis()
         var maxSeekRatio = 0f
-        delay(900)
+        var sawSeekProgress = false
+        var seekSamples = 0
+        var maxTimerSec = -1
+        var prevTimerSec = -1
+        val timerRegex = Regex("^(\\d{1,2}):(\\d{2})$")
 
-        while (System.currentTimeMillis() - start < 17_500L) {
+        delay(1000)
+
+        while (System.currentTimeMillis() - start < 32_000L) {
+            val elapsed = System.currentTimeMillis() - start
             val activePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
             if (activePkg.isNotBlank() && !activePkg.contains("instagram")) {
                 return ReelWaitOutcome.USER_EXITED_APP
             }
 
             val els = service.dumpScreenElements()
-            // Check if replay prompt appeared or if user manually navigated back to chat
-            if (els.any { isChatComposerElement(it, screenHeight) } && System.currentTimeMillis() - start > 2000L) {
-                return ReelWaitOutcome.COMPLETED
-            }
-            if (els.any { labelOf(it).contains("watch again") || labelOf(it).contains("replay") }) {
+            // Only treat as back-in-chat if genuine DM composer is present (never a Reel comment field)
+            if (elapsed > 2500L && els.any { isChatComposerElement(it, screenHeight) }) {
                 return ReelWaitOutcome.COMPLETED
             }
 
-            // Detect live SeekBar completion / loop wrap dynamically when exposed
+            // Check exact end-of-video button text (avoid matching words inside reel captions/songs)
+            val hasReplayButton = els.any { el ->
+                val t = el.text.trim().lowercase()
+                val c = el.contentDescription.trim().lowercase()
+                t == "watch again" || c == "watch again" || t == "replay" || c == "replay"
+            }
+            if (hasReplayButton && elapsed > 2000L) {
+                return ReelWaitOutcome.COMPLETED
+            }
+
+            // Check live SeekBar progression + wrap/completion dynamically when exposed
             val seekBar = els.firstOrNull { it.className.contains("SeekBar", ignoreCase = true) }
             val range = seekBar?.node?.rangeInfo
             if (range != null && range.max > range.min) {
                 val ratio = ((range.current - range.min) / (range.max - range.min)).coerceIn(0f, 1f)
-                if ((maxSeekRatio >= 0.84f && ratio < 0.16f) || (ratio >= 0.94f && System.currentTimeMillis() - start >= 3500L)) {
-                    return ReelWaitOutcome.COMPLETED
+                if (ratio in 0.04f..0.85f) {
+                    seekSamples++
+                    if (seekSamples >= 2) sawSeekProgress = true
+                }
+                if (sawSeekProgress) {
+                    if ((maxSeekRatio >= 0.78f && ratio < 0.16f) || (ratio >= 0.93f && elapsed >= 3500L)) {
+                        return ReelWaitOutcome.COMPLETED
+                    }
                 }
                 if (ratio > maxSeekRatio) maxSeekRatio = ratio
+            }
+
+            // Check live MM:SS timer counter if exposed on Reel player
+            val timerMatch = els.asSequence()
+                .mapNotNull { el -> timerRegex.matchEntire(el.text.trim()) }
+                .firstOrNull()
+            if (timerMatch != null) {
+                val mins = timerMatch.groupValues[1].toIntOrNull() ?: 0
+                val secs = timerMatch.groupValues[2].toIntOrNull() ?: 0
+                val totalSec = mins * 60 + secs
+                if (totalSec > maxTimerSec) maxTimerSec = totalSec
+                // Count-up timer wrapped back to start OR count-down timer hit 0
+                if (elapsed >= 3500L && prevTimerSec >= 0) {
+                    val wrappedUp = maxTimerSec >= 5 && prevTimerSec >= 4 && totalSec <= 1
+                    val countdownDone = maxTimerSec >= 5 && totalSec == 0 && prevTimerSec == 1
+                    if (wrappedUp || countdownDone) return ReelWaitOutcome.COMPLETED
+                }
+                prevTimerSec = totalSec
             }
 
             delay(250)
@@ -1209,27 +1314,63 @@ object InstagramTreeNavigator {
             .joinToString("|") { labelOf(it).take(25) }
     }
 
-    private fun hasMediaDescendant(
+    private fun findInnerVisualMediaBounds(
         node: AccessibilityNodeInfo?,
         minMediaW: Int,
         minMediaH: Int,
         depth: Int = 0
-    ): Boolean {
-        if (node == null || depth > 5) return false
+    ): Rect? {
+        if (node == null || depth > 5) return null
         val cls = node.className?.toString()?.substringAfterLast('.')?.lowercase() ?: ""
         val res = node.viewIdResourceName?.substringAfterLast('/')?.lowercase() ?: ""
         val isVisualNode = cls == "imageview" || cls == "videoview" || cls == "textureview" || cls == "surfaceview" ||
             res.contains("image") || res.contains("video") || res.contains("reel") || res.contains("clip") ||
             res.contains("xma") || res.contains("thumbnail") || res.contains("media") || res.contains("cover")
+        var bestRect: Rect? = null
         if (depth > 0 && isVisualNode) {
             val r = Rect()
             node.getBoundsInScreen(r)
-            if (r.width() >= minMediaW && r.height() >= minMediaH) return true
+            if (r.width() >= minMediaW && r.height() >= minMediaH) {
+                bestRect = r
+            }
         }
         for (i in 0 until node.childCount) {
-            if (hasMediaDescendant(node.getChild(i), minMediaW, minMediaH, depth + 1)) return true
+            val childRect = findInnerVisualMediaBounds(node.getChild(i), minMediaW, minMediaH, depth + 1)
+            if (childRect != null) {
+                val bestArea = bestRect?.let { it.width().toLong() * it.height() } ?: 0L
+                val childArea = childRect.width().toLong() * childRect.height()
+                if (childArea > bestArea) bestRect = childRect
+            }
         }
-        return false
+        return bestRect
+    }
+
+    private fun isCardAlignedOrLabeledFromMe(
+        el: ScreenElement,
+        visualRect: Rect,
+        allElements: List<ScreenElement>,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Boolean? {
+        val label = labelOf(el)
+        if (label.contains("you sent") || label.contains("you shared") || label.startsWith("you:")) return true
+
+        // Inspect small sender caption right above the media card (Instagram puts "You sent" above right-aligned bubbles)
+        val tagBandTop = visualRect.top - (screenHeight * 0.055f).toInt()
+        val tagBandBottom = visualRect.top + 14
+        val aboveTag = allElements.any { other ->
+            other.bounds.centerY() in tagBandTop..tagBandBottom &&
+                other.bounds.height() < (screenHeight * 0.05f).toInt() &&
+                (labelOf(other).contains("you sent") || labelOf(other).contains("you shared"))
+        }
+        if (aboveTag) return true
+
+        val cx = visualRect.centerX()
+        return when {
+            cx > screenWidth * 0.53 && visualRect.left > screenWidth * 0.16 && visualRect.right >= screenWidth * 0.78 -> true
+            cx < screenWidth * 0.47 && visualRect.left < screenWidth * 0.26 && visualRect.right < screenWidth * 0.84 -> false
+            else -> null
+        }
     }
 
     private fun findSharedMediaCardsInChat(
@@ -1237,7 +1378,8 @@ object InstagramTreeNavigator {
         screenWidth: Int,
         screenHeight: Int,
         headerBottom: Int,
-        composerTop: Int
+        composerTop: Int,
+        senderFilter: MediaSenderFilter = MediaSenderFilter.FROM_FRIEND
     ): List<ScreenElement> {
         val viewportHeight = (composerTop - headerBottom).coerceAtLeast((screenHeight * 0.25f).toInt())
         val minW = (screenWidth * 0.24f).toInt()
@@ -1255,7 +1397,6 @@ object InstagramTreeNavigator {
         data class MediaCandidate(
             val el: ScreenElement,
             val isReelOrVideo: Boolean,
-            val isFromFriend: Boolean,
             val score: Int
         )
 
@@ -1274,6 +1415,7 @@ object InstagramTreeNavigator {
             val res = resIdOf(el)
             if (excludedTerms.any { label.contains(it) || res.contains(it) }) continue
 
+            val innerVisualRect = findInnerVisualMediaBounds(el.node, minMediaDescW, minMediaDescH)
             val isReelKeyword = label.contains("reel") || label.contains("clip") || res.contains("reel") || res.contains("clip")
             val isVideoOrXma = isReelKeyword || label.contains("video") || label.contains("watch") ||
                 label.contains("play") || res.contains("video") || res.contains("xma")
@@ -1285,26 +1427,38 @@ object InstagramTreeNavigator {
             val hasVisualPreviewChild = !isOtherMedia &&
                 el.bounds.height() >= (screenHeight * 0.14f).toInt() &&
                 el.bounds.width() >= (screenWidth * 0.26f).toInt() &&
-                (el.node.text.isNullOrBlank() || hasMediaDescendant(el.node, minMediaDescW, minMediaDescH))
+                (el.node.text.isNullOrBlank() || innerVisualRect != null)
 
             if (!isOtherMedia && !hasVisualPreviewChild) continue
 
-            val isFromFriend = !label.contains("you sent") && !label.startsWith("you:") &&
-                el.bounds.left < (screenWidth * 0.28f).toInt()
+            // Strictly separate friend-sent reels (left) vs user-sent reels (right / "You sent")
+            val effectiveVisualRect = innerVisualRect
+                ?: if (el.bounds.width() < (screenWidth * 0.85f).toInt()) el.bounds else Rect(el.bounds)
+            val fromMeFlag = isCardAlignedOrLabeledFromMe(el, effectiveVisualRect, elements, screenWidth, screenHeight)
 
-            val score = when {
+            val matchesRequestedSender = when (senderFilter) {
+                MediaSenderFilter.FROM_FRIEND -> fromMeFlag != true
+                MediaSenderFilter.FROM_ME -> fromMeFlag == true
+            }
+            if (!matchesRequestedSender) continue
+
+            val sideBonus = when {
+                senderFilter == MediaSenderFilter.FROM_FRIEND && fromMeFlag == false -> 40
+                senderFilter == MediaSenderFilter.FROM_ME && fromMeFlag == true -> 40
+                else -> 0
+            }
+            val score = sideBonus + when {
                 isReelKeyword -> 100
                 isVideoOrXma -> 70
                 isOtherMedia -> 45
                 else -> 30
             }
-            candidates.add(MediaCandidate(el, isVideoOrXma, isFromFriend, score))
+            candidates.add(MediaCandidate(el, isVideoOrXma, score))
         }
 
         if (candidates.isEmpty()) return emptyList()
-        // Prefer friend-sent cards and reel/video cards if available; return bottom-to-top (latest first)
-        val friendPool = candidates.filter { it.isFromFriend }.ifEmpty { candidates }
-        val pool = friendPool.filter { it.isReelOrVideo }.ifEmpty { friendPool }
+        // Prefer reel/video cards if available; return bottom-to-top (latest first) WITHOUT cross-sender fallback
+        val pool = candidates.filter { it.isReelOrVideo }.ifEmpty { candidates }
 
         val clustered = mutableListOf<ScreenElement>()
         val sortedDesc = pool.sortedWith(compareByDescending<MediaCandidate> { it.el.bounds.bottom }.thenByDescending { it.score })
@@ -1324,11 +1478,11 @@ object InstagramTreeNavigator {
         val (headerBottom, composerTop) = computeChatViewportBounds(elements, screenHeight)
         val ignoreExact = setOf(
             "seen", "seen just now", "delivered", "sending", "sent", "today", "yesterday",
-            "active now", "message...", "type a message", "reply", "unsend", "forward",
+            "active now", "just now", "now", "message...", "type a message", "reply", "unsend", "forward",
             "react", "double tap to like", "double tap to react", "tap to react", "hold to react",
             "view profile", "follow", "following", "voice", "camera", "gallery", "like", "audio call", "video call"
         )
-        val timeRegex = Regex("^(\\d{1,2}:\\d{2}(\\s?[ap]m)?|(mon|tue|wed|thu|fri|sat|sun)[,\\s]+\\d{1,2}:\\d{2}.*)$")
+        val timeRegex = Regex("^(\\d{1,2}[mhd](\\s?ago)?|\\d{1,2}:\\d{2}(\\s?[ap]m)?|(mon|tue|wed|thu|fri|sat|sun)[,\\s]+\\d{1,2}:\\d{2}.*)$")
         val targetLower = target.lowercase().trim()
 
         data class MsgItem(val el: ScreenElement, val text: String, val isFromFriend: Boolean)
@@ -1344,16 +1498,25 @@ object InstagramTreeNavigator {
             val lower = raw.lowercase()
             if (raw.isBlank() || lower == targetLower) continue
             if (lower in ignoreExact || timeRegex.matches(lower)) continue
-            if (lower.startsWith("seen ") || lower.startsWith("active ") || lower.contains("you both follow")) continue
-            // Skip tiny reaction counter pills on corners while keeping real short words like "Ok", "Ha"
+            if (lower.startsWith("seen") || lower.startsWith("sent ") || lower.startsWith("delivered") ||
+                lower.startsWith("active ") || lower.contains("typing") || lower.contains("you both follow") ||
+                lower.contains("follow each other") || lower.contains("following each other") ||
+                lower.contains("you're both") || lower == "view profile" ||
+                Regex("\\b\\d+\\s+followers?\\b").containsMatchIn(lower)
+            ) continue
+
+            // Skip tiny emoji reaction corner pills while preserving real short replies
             if (raw.none { it.isLetterOrDigit() } && el.bounds.height() < (screenHeight * 0.045f).toInt() &&
                 el.bounds.width() < (screenWidth * 0.12f).toInt()) continue
 
             val cleaned = cleanChatMessageLabel(raw)
             if (cleaned.isBlank()) continue
 
-            val isFromMe = lower.startsWith("you sent") || lower.startsWith("you:") || lower.startsWith("you replied") ||
-                (el.bounds.right >= (screenWidth * 0.87f).toInt() && el.bounds.left > (screenWidth * 0.26f).toInt())
+            val isFromMe = lower.startsWith("you sent") || lower.startsWith("you shared") ||
+                lower.startsWith("you:") || lower.startsWith("you replied") ||
+                (el.bounds.width() < (screenWidth * 0.85f).toInt() &&
+                    el.bounds.right >= (screenWidth * 0.86f).toInt() &&
+                    el.bounds.left > (screenWidth * 0.26f).toInt())
             items.add(MsgItem(el, cleaned, !isFromMe))
         }
 

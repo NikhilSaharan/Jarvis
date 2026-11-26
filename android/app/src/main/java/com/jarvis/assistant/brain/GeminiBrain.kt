@@ -30,7 +30,8 @@ data class SocialIntent(
     val actionType: String, // "dm", "read_dm", "chat_media", "chat_media_all", "story", "follow", "reels", "other"
     val target: String,
     val message: String,
-    val count: Int = 1 // 1 = latest, N = last N shared items, -1 = all available
+    val count: Int = 1, // 1 = latest, N = last N shared items, -1 = all available
+    val fromMe: Boolean = false // true ONLY when Sir explicitly requests reels sent by himself/herself
 )
 
 class GeminiBrain(
@@ -215,15 +216,15 @@ Extract the exact social app intent from Sir's command: "$clean"
 Classify "actionType":
 - "dm": sending a direct personal message/reply to a recipient.
 - "read_dm": opening a specific sender's DM chat to mark it seen and read aloud their latest incoming message.
-- "chat_media": opening or playing the latest reel/video (count=1), last N reels/videos (count=N), or all shared reels (count=-1) sent by a specific person inside their DM chat.
-- "chat_media_all": playing all available reels/videos sent by a specific person inside their DM chat (count=-1).
+- "chat_media": opening or playing the latest reel/video (count=1), last N reels/videos (count=N), or all shared reels (count=-1) in a person's DM chat. Set "fromMe": true ONLY if Sir explicitly asks for reels sent BY HIMSELF/HERSELF (otherwise false = friend's sent reels).
+- "chat_media_all": playing all available reels/videos sent by a specific person inside their DM chat (count=-1, respect "fromMe").
 - "story": watching someone's story by sliding the homepage story tray horizontally.
 - "follow": searching and following a public account/profile.
 - "reels": opening or scrolling the general Reels feed when NO specific sender is named.
 - "other": anything else.
 
 OUTPUT ONLY RAW JSON:
-{"actionType":"dm|read_dm|chat_media|chat_media_all|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text if dm, else empty string>","count":<integer 1 for latest, N for last N requested reels, or -1 for all>}
+{"actionType":"dm|read_dm|chat_media|chat_media_all|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text if dm, else empty string>","count":<integer 1 for latest, N for last N requested reels, or -1 for all>,"fromMe":<true or false>}
 """.trimIndent()
 
         for (model in models) {
@@ -263,13 +264,14 @@ OUTPUT ONLY RAW JSON:
                     val target = parsed.get("target")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim() ?: ""
                     val msg = parsed.get("message")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim() ?: ""
                     val count = parsed.get("count")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asInt ?: 1
-                    return@withContext SocialIntent(actionType, target, msg, count)
+                    val fromMe = parsed.get("fromMe")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asBoolean ?: false
+                    return@withContext SocialIntent(actionType, target, msg, count, fromMe)
                 }
             } catch (e: Exception) {
                 Log.w("GeminiBrain", "SocialIntent parse error on $model: ${e.message}")
             }
         }
-        SocialIntent("other", "", "", 1)
+        SocialIntent("other", "", "", 1, false)
     }
 
     /**
@@ -340,11 +342,12 @@ CORE OPERATING PRINCIPLES:
 1. NATURAL HUMAN CONVERSATION FIRST (EMPATHY & FRIENDSHIP):
    - When Sir shares emotions, mood, boredom, tiredness, headache, pain, or casual thoughts:
    - Reply warmly, naturally, and conversationally like a caring friend (e.g. ask what happened or tell Sir to relax in 1-2 short sentences).
-   - NEVER auto-trigger any tools, media, music, YouTube, DND, or apps unless Sir explicitly commands you to do so.
-   - For all casual conversations, questions, or feelings: set `tool_name`: null and `tool_args`: null, and reply directly in `speech`.
+   - NEVER auto-trigger any tools, media, music, YouTube, DND, or apps unless Sir explicitly commands or requests an action on a device/app.
+   - For general casual conversation, emotions, or general knowledge questions NOT asking about an app/message/contact: set `tool_name`: null and `tool_args`: null, and reply directly in `speech`.
+   - IMPORTANT: If Sir asks what message a contact sent or asks to check/read/open messages, stories, reels, or calls inside an app (even when phrased as a question), ALWAYS invoke the corresponding tool!
 
 2. CLEAN ACTION EXECUTION (NO ROBOTIC CLICHÉS OR STEP NARRATION):
-   - Invoke an action tool ONLY when Sir explicitly gives a direct command to do something.
+   - Invoke an action tool ONLY when Sir explicitly gives a direct command or asks to check/perform an in-app action.
    - For multi-step in-app tasks (universal_app_action or instagram_*):
      - Set `speech`: null. Jarvis will execute the actions and confirm once completed.
    - For direct single-action system tools (e.g. set_dnd, set_alarm, make_phone_call):
@@ -360,10 +363,10 @@ CORE OPERATING PRINCIPLES:
    - whatsapp_call(recipient: string, call_type: "voice"|"video"): Starts a WhatsApp audio/voice or video call.
    - send_whatsapp_message(recipient: string, message: string): Sends a WhatsApp message.
    - instagram_send_message(recipient: string, message: string): Sends a direct personal one-to-one DM message on Instagram to recipient.
-   - instagram_read_last_message(sender: string): Opens sender's Instagram DM chat so it is marked Seen and reads aloud their latest incoming message.
+   - instagram_read_last_message(sender: string): Opens sender's Instagram DM chat so it is marked Seen and reads aloud their latest incoming message (use even if phrased as a question asking what message someone sent).
    - instagram_watch_story(person: string): Opens Instagram homepage and slides the horizontal story tray to play person's active story without using Search.
    - instagram_follow_account(account: string): Searches Instagram accounts and follows the verified/official matching account (prioritizing genuine profiles over fanpages).
-   - instagram_play_chat_reels(sender: string, count: int): Opens sender's Instagram DM chat and plays shared reels starting from the latest upward (count=1 for latest, count=N for last N requested reels, count=-1 for all shared reels).
+   - instagram_play_chat_reels(sender: string, count: int, from_me: boolean): Opens sender's Instagram DM chat and plays shared reels starting from the latest upward (count=1 for latest, count=N for last N requested reels, count=-1 for all shared reels; from_me=false by default for reels sent by sender, set from_me=true ONLY if Sir explicitly asks for reels sent by himself/herself).
    - instagram_play_reels(next: boolean): Opens Instagram's general Reels feed (only when NO friend sender is named) and scrolls next if next=true.
    - send_sms(recipient: string, message: string): Sends a normal SMS text message.
    - play_youtube(query: string): ONLY when Sir explicitly asks to play a song, music, or video on YouTube.
