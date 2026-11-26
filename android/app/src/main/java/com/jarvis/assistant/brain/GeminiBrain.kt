@@ -3,6 +3,7 @@ package com.jarvis.assistant.brain
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -15,7 +16,8 @@ import java.util.concurrent.TimeUnit
 data class ActionDecision(
     val speech: String?,
     val toolName: String?,
-    val toolArgs: Map<String, Any>?
+    val toolArgs: Map<String, Any>?,
+    val reasoning: String? = null
 )
 
 data class UIActionDecision(
@@ -23,7 +25,8 @@ data class UIActionDecision(
     val tag: Int?,
     val text: String?,
     val direction: String?,
-    val summary: String? = null
+    val summary: String? = null,
+    val reasoning: String? = null
 )
 
 data class SocialIntent(
@@ -66,8 +69,10 @@ class GeminiBrain(
 
         val prompt = buildPrompt(trimmed, screenElementsSummary)
         var lastError = ""
+        JarvisLogStore.log("GEMINI_CMD", "Dispatching cmd='$trimmed' screenCtxLen=${screenElementsSummary.length}")
 
         for (model in models) {
+            val t0 = System.currentTimeMillis()
             try {
                 val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
                 val requestPayload = JsonObject().apply {
@@ -94,6 +99,7 @@ class GeminiBrain(
                     .build()
 
                 val response = client.newCall(request).execute()
+                val elapsed = System.currentTimeMillis() - t0
                 val body = response.body?.string() ?: ""
 
                 if (response.isSuccessful) {
@@ -106,6 +112,7 @@ class GeminiBrain(
                     val parsedDecision = gson.fromJson(textContent, JsonObject::class.java)
                     val toolName = parsedDecision.get("tool_name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
                     val rawSpeech = parsedDecision.get("speech")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
+                    val reasoning = parsedDecision.get("reasoning")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
                     val speech = if (toolName == null && rawSpeech == null) "Ji Sir?" else rawSpeech
                     val argsObj = parsedDecision.get("tool_args")?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
 
@@ -127,14 +134,20 @@ class GeminiBrain(
                         }
                     }
 
-                    return@withContext ActionDecision(speech, toolName, if (argsMap.isEmpty()) null else argsMap)
+                    JarvisLogStore.log(
+                        "GEMINI_CMD",
+                        "model=$model latency=${elapsed}ms raw=$textContent | parsed tool=$toolName args=$argsMap reason='${reasoning ?: ""}' speech='${speech ?: ""}'"
+                    )
+                    return@withContext ActionDecision(speech, toolName, if (argsMap.isEmpty()) null else argsMap, reasoning)
                 } else {
                     lastError = "Gemini $model HTTP ${response.code}"
                     Log.w("GeminiBrain", "$lastError: $body")
+                    JarvisLogStore.log("GEMINI_CMD_ERR", "model=$model latency=${elapsed}ms http=${response.code} body=${body.take(240)}")
                 }
             } catch (e: Exception) {
                 lastError = e.message ?: "Network error"
                 Log.w("GeminiBrain", "Gemini $model request failed: $lastError")
+                JarvisLogStore.log("GEMINI_CMD_ERR", "model=$model exception=$lastError")
             }
         }
 
@@ -151,6 +164,7 @@ class GeminiBrain(
         }
 
         for (model in models) {
+            val t0 = System.currentTimeMillis()
             try {
                 val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
                 val requestPayload = JsonObject().apply {
@@ -177,6 +191,7 @@ class GeminiBrain(
                     .build()
 
                 val response = client.newCall(request).execute()
+                val elapsed = System.currentTimeMillis() - t0
                 val body = response.body?.string() ?: ""
 
                 if (response.isSuccessful) {
@@ -192,10 +207,18 @@ class GeminiBrain(
                     val text = parsed.get("text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
                     val dir = parsed.get("direction")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
                     val summary = parsed.get("summary")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
-                    return@withContext UIActionDecision(action, tag, text, dir, summary)
+                    val reasoning = parsed.get("reasoning")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+                    JarvisLogStore.log(
+                        "GEMINI_UI",
+                        "model=$model latency=${elapsed}ms raw=$textContent | action=$action tag=$tag text='${text ?: ""}' dir=$dir reason='${reasoning ?: ""}' summary='${summary ?: ""}'"
+                    )
+                    return@withContext UIActionDecision(action, tag, text, dir, summary, reasoning)
+                } else {
+                    JarvisLogStore.log("GEMINI_UI_ERR", "model=$model latency=${elapsed}ms http=${response.code} body=${body.take(240)}")
                 }
             } catch (e: Exception) {
                 Log.w("GeminiBrain", "UI action decision error on $model: ${e.message}")
+                JarvisLogStore.log("GEMINI_UI_ERR", "model=$model exception=${e.message}")
             }
         }
         UIActionDecision("done", null, null, null, null)
@@ -227,6 +250,7 @@ OUTPUT ONLY RAW JSON:
 {"actionType":"dm|read_dm|chat_media|chat_media_all|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text if dm, else empty string>","count":<integer 1 for latest, N for last N requested reels, or -1 for all>,"fromMe":<true or false>}
 """.trimIndent()
 
+        val t0 = System.currentTimeMillis()
         for (model in models) {
             try {
                 val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
@@ -253,6 +277,7 @@ OUTPUT ONLY RAW JSON:
                     .build()
 
                 val response = client.newCall(request).execute()
+                val elapsed = System.currentTimeMillis() - t0
                 val body = response.body?.string() ?: ""
                 if (response.isSuccessful) {
                     val jsonResponse = gson.fromJson(body, JsonObject::class.java)
@@ -265,10 +290,12 @@ OUTPUT ONLY RAW JSON:
                     val msg = parsed.get("message")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim() ?: ""
                     val count = parsed.get("count")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asInt ?: 1
                     val fromMe = parsed.get("fromMe")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asBoolean ?: false
+                    JarvisLogStore.log("GEMINI_SOCIAL", "model=$model latency=${elapsed}ms raw=$textContent -> action=$actionType target='$target' count=$count fromMe=$fromMe")
                     return@withContext SocialIntent(actionType, target, msg, count, fromMe)
                 }
             } catch (e: Exception) {
                 Log.w("GeminiBrain", "SocialIntent parse error on $model: ${e.message}")
+                JarvisLogStore.log("GEMINI_SOCIAL_ERR", "model=$model err=${e.message}")
             }
         }
         SocialIntent("other", "", "", 1, false)
@@ -387,6 +414,7 @@ CORE OPERATING PRINCIPLES:
 OUTPUT FORMAT:
 Respond with ONLY a raw JSON object (no markdown, no backticks, no extra text):
 {
+  "reasoning": "<1 concise sentence explaining why this tool and parameters were selected>",
   "speech": "<Natural, short reply in everyday Hinglish, or null if calling universal_app_action or instagram_*>",
   "tool_name": "<tool_name or null>",
   "tool_args": { ... or null }

@@ -16,6 +16,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.voice.SpeakerHelper
@@ -56,6 +57,8 @@ class JarvisAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        JarvisLogStore.init(this)
+        JarvisLogStore.log("ACC_SERVICE", "Accessibility Service Connected")
         Log.d(TAG, "J.A.R.V.I.S. Accessibility Service Connected!")
     }
 
@@ -461,16 +464,23 @@ class JarvisAccessibilityService : AccessibilityService() {
             depth++
         }
 
+        val chosen = clickableTarget?.takeIf { it.isClickable } ?: node
+        val bounds = Rect()
+        chosen.getBoundsInScreen(bounds)
+        val resId = chosen.viewIdResourceName?.substringAfterLast('/') ?: ""
+        val label = chosen.text?.toString()?.ifBlank { chosen.contentDescription?.toString() } ?: chosen.contentDescription?.toString() ?: ""
+
         if (clickableTarget != null && clickableTarget.isClickable) {
-            if (clickableTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            if (clickableTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                JarvisLogStore.log("ACC_ACTION", "clickNode(ACTION_CLICK) depth=$depth cls=${chosen.className?.substringAfterLast('.')} label='${label.take(40)}' res='$resId' bounds=[${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}]")
+                return true
+            }
         } else if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            JarvisLogStore.log("ACC_ACTION", "clickNode(SELF_ACTION_CLICK) label='${label.take(40)}' res='$resId'")
             return true
         }
 
         // Gesture Tap fallback ONLY inside visible screen bounds
-        val bounds = Rect()
-        val targetForBounds = clickableTarget?.takeIf { it.isClickable } ?: node
-        targetForBounds.getBoundsInScreen(bounds)
         val dm = resources.displayMetrics
         val screenRect = Rect(0, 0, dm.widthPixels, dm.heightPixels)
         if (bounds.width() > 0 && bounds.height() > 0 && Rect.intersects(bounds, screenRect)) {
@@ -483,7 +493,9 @@ class JarvisAccessibilityService : AccessibilityService() {
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(clickPath, 0, 50))
                 .build()
-            return dispatchGesture(gesture, null, null)
+            val dispatched = dispatchGesture(gesture, null, null)
+            JarvisLogStore.log("ACC_ACTION", "clickNode(GESTURE) ($cx,$cy) label='${label.take(40)}' res='$resId' ok=$dispatched")
+            return dispatched
         }
         return false
     }
@@ -508,12 +520,18 @@ class JarvisAccessibilityService : AccessibilityService() {
         targetNode.getBoundsInScreen(bounds)
         val dm = resources.displayMetrics
         val screenRect = Rect(0, 0, dm.widthPixels, dm.heightPixels)
+        val resId = targetNode.viewIdResourceName?.substringAfterLast('/') ?: ""
+        val txt = node.text?.toString()?.take(35) ?: ""
+        val cd = node.contentDescription?.toString()?.take(35) ?: ""
 
         if (bounds.width() > 0 && bounds.height() > 0 && Rect.intersects(bounds, screenRect)) {
             val tapped = tapCoordinatesAwait(bounds.centerX().toFloat(), bounds.centerY().toFloat(), 45L)
+            JarvisLogStore.log("ACC_TAP", "tapSingleTouch (${bounds.centerX()},${bounds.centerY()}) depth=$depth txt='$txt' cd='$cd' res='$resId' bounds=[${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}] ok=$tapped")
             if (tapped) return true
         }
-        return targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        val fallbackClick = targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        JarvisLogStore.log("ACC_TAP", "tapSingleTouch fallback ACTION_CLICK txt='$txt' cd='$cd' res='$resId' ok=$fallbackClick")
+        return fallbackClick
     }
 
     /**
@@ -531,7 +549,9 @@ class JarvisAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 280L))
             .build()
-        return dispatchGestureAwait(gesture)
+        val ok = dispatchGestureAwait(gesture)
+        JarvisLogStore.log("ACC_SWIPE", "swipeHorizontal toLeft=$toLeft ($startX -> $endX, y=$cy) rect=[${rect.left},${rect.top},${rect.right},${rect.bottom}] ok=$ok")
+        return ok
     }
 
     /**
@@ -557,6 +577,7 @@ class JarvisAccessibilityService : AccessibilityService() {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         var success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        val method = if (success) "SET_TEXT" else "PASTE"
 
         // 3. Fallback to ACTION_PASTE if SET_TEXT is not accepted (e.g. rich canvas or custom text editors)
         if (!success) {
@@ -570,6 +591,10 @@ class JarvisAccessibilityService : AccessibilityService() {
                 node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
             } catch (e: Exception) {}
         }
+        val resId = node.viewIdResourceName?.substringAfterLast('/') ?: ""
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        JarvisLogStore.log("ACC_TYPE", "typeText('$text') method=$method enter=$shouldEnter res='$resId' bounds=[${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}] ok=$success")
         return success
     }
 
@@ -629,14 +654,18 @@ class JarvisAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(scrollPath, 0, 300))
             .build()
-        return dispatchGesture(gesture, null, null)
+        val ok = dispatchGesture(gesture, null, null)
+        JarvisLogStore.log("ACC_SCROLL", "scroll($direction) ($startX,$startY -> $endX,$endY) ok=$ok")
+        return ok
     }
 
     /**
      * Global Hardware Back button press.
      */
     fun performBack(): Boolean {
-        return performGlobalAction(GLOBAL_ACTION_BACK)
+        val ok = performGlobalAction(GLOBAL_ACTION_BACK)
+        JarvisLogStore.log("ACC_BACK", "performBack() ok=$ok")
+        return ok
     }
 
     /**

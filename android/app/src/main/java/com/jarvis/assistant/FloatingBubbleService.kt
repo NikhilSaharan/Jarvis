@@ -22,6 +22,7 @@ import android.view.WindowManager
 import android.widget.ImageView
 import androidx.core.app.NotificationCompat
 import com.jarvis.assistant.brain.GeminiBrain
+import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.engine.NodeActionEngine
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.engine.TelephonyHelper
@@ -57,6 +58,7 @@ class FloatingBubbleService : Service() {
     override fun onCreate() {
         super.onCreate()
         try {
+            JarvisLogStore.init(this)
             startForegroundServiceNotification()
 
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -192,17 +194,20 @@ class FloatingBubbleService : Service() {
 
     private fun handleVoiceCommand(userText: String) {
         serviceScope.launch {
+            JarvisLogStore.log("USER_BUBBLE", "Voice command: \"$userText\"")
             val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
             val decision = geminiBrain.processCommand(userText, screenContext)
             val speech = decision.speech?.takeIf { it.isNotBlank() && it != "null" }
             val alreadySpoken = speech != null
 
             if (speech != null) {
+                JarvisLogStore.log("JARVIS_SPEAK", speech)
                 speakerHelper.speak(speech)
             }
 
             val tool = decision.toolName?.takeIf { it.isNotBlank() && it != "null" } ?: return@launch
             val args = decision.toolArgs ?: emptyMap()
+            JarvisLogStore.log("TOOL_DISPATCH", "From FloatingBubble -> tool=$tool args=$args")
             executeTool(tool, args, alreadySpoken)
         }
     }
@@ -243,7 +248,8 @@ class FloatingBubbleService : Service() {
             "universal_app_action" -> {
                 val appName = (args["app_name"] as? String) ?: "Notes"
                 val instruction = (args["instruction"] as? String) ?: (args["text"] as? String) ?: (args["action"] as? String) ?: ""
-                universalAppAgent.performAppAction(appName, instruction, geminiBrain) { _, reply ->
+                universalAppAgent.performAppAction(appName, instruction, geminiBrain) { success, reply ->
+                    JarvisLogStore.log("APP_AGENT_DONE", "app=$appName ok=$success reply='$reply'")
                     if (!alreadySpoken && reply.isNotBlank()) {
                         speakerHelper.speak(reply)
                     }
@@ -372,7 +378,8 @@ class FloatingBubbleService : Service() {
             "instagram_follow_account",
             "instagram_play_chat_reels",
             "instagram_play_reels" -> {
-                universalAppAgent.performInstagramTool(tool, args, geminiBrain) { _, reply ->
+                universalAppAgent.performInstagramTool(tool, args, geminiBrain) { success, reply ->
+                    JarvisLogStore.log("INSTAGRAM_DONE", "tool=$tool ok=$success reply='$reply'")
                     if (!alreadySpoken && reply.isNotBlank()) {
                         speakerHelper.speak(reply)
                     }

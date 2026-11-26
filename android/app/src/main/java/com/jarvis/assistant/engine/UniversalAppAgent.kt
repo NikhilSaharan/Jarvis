@@ -5,6 +5,7 @@ import android.util.Log
 import com.jarvis.assistant.JarvisAccessibilityService
 import com.jarvis.assistant.brain.GeminiBrain
 import com.jarvis.assistant.brain.SocialIntent
+import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.security.AutoUnlockManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -92,8 +93,10 @@ class UniversalAppAgent(
         callback: (Boolean, String) -> Unit
     ) {
         mainScope.launch {
+            JarvisLogStore.log("AGENT_START", "app='$appName' directIntent=$directSocialIntent instruction='$instruction'")
             val service = JarvisAccessibilityService.instance
             if (service == null) {
+                JarvisLogStore.log("AGENT_ABORT", "Accessibility service null")
                 callback(false, "Accessibility Service active nahi hai Sir.")
                 return@launch
             }
@@ -101,6 +104,7 @@ class UniversalAppAgent(
             // 1. Check screen lock dynamically BEFORE launching app (no delay if already unlocked)
             val screenReady = AutoUnlockManager.ensureScreenUnlocked(context)
             if (!screenReady) {
+                JarvisLogStore.log("AGENT_ABORT", "Screen unlock failed")
                 callback(false, "Sir, phone screen unlock nahi ho saki.")
                 return@launch
             }
@@ -116,6 +120,7 @@ class UniversalAppAgent(
             }
 
             val openedMsg = systemController.openApp(appName)
+            JarvisLogStore.log("APP_LAUNCH", "openApp('$appName') -> '$openedMsg'")
             if (openedMsg.contains("nahi mila")) {
                 socialIntentJob?.cancel()
                 callback(false, openedMsg)
@@ -125,17 +130,20 @@ class UniversalAppAgent(
             // Poll fast every 70ms until target app (or App Lock) renders
             delay(120)
             val launchStart = System.currentTimeMillis()
+            var finalActivePkg = ""
             while (System.currentTimeMillis() - launchStart < 1800) {
                 if (AutoUnlockManager.isAppLockScreen(service)) break
-                val activePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
-                val appReady = activePkg.isNotBlank() && activePkg != context.packageName.lowercase() &&
-                    (!isInstagram || activePkg.contains("instagram"))
+                finalActivePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
+                val appReady = finalActivePkg.isNotBlank() && finalActivePkg != context.packageName.lowercase() &&
+                    (!isInstagram || finalActivePkg.contains("instagram"))
                 if (appReady && service.dumpScreenElements().isNotEmpty()) break
                 delay(70)
             }
+            JarvisLogStore.log("APP_READY", "pkg='$finalActivePkg' waitMs=${System.currentTimeMillis() - launchStart}")
 
             // 2. Auto-unlock App Lock if target app is protected
             if (AutoUnlockManager.isAppLockScreen(service)) {
+                JarvisLogStore.log("APPLOCK", "Detected AppLock; attempting unlock")
                 AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
                 delay(650)
             }
@@ -146,6 +154,10 @@ class UniversalAppAgent(
             val resolvedSocialIntent = directSocialIntent ?: socialIntentJob?.await()
             if (isInstagram && resolvedSocialIntent != null && resolvedSocialIntent.actionType != "other") {
                 val fastResult = InstagramTreeNavigator.execute(service, resolvedSocialIntent, instruction)
+                JarvisLogStore.log(
+                    "FAST_PATH",
+                    "handled=${fastResult.handled} success=${fastResult.success} steps=${fastResult.stepsTaken} msg='${fastResult.message}'"
+                )
                 if (fastResult.handled) {
                     callback(fastResult.success, fastResult.message)
                     return@launch
@@ -178,9 +190,11 @@ class UniversalAppAgent(
 
                 val screenSummary = service.dumpScreenElementsSummary()
                 if (screenSummary.isBlank() || screenSummary.contains("empty")) {
+                    JarvisLogStore.log("FALLBACK_TURN_$turn", "Empty screen; waiting")
                     delay(700)
                     continue
                 }
+                JarvisLogStore.log("FALLBACK_SCREEN_$turn", screenSummary)
 
                 val historyStr = if (actionHistory.isNotEmpty()) {
                     "\nActions taken so far:\n" + actionHistory.joinToString("\n") { "- $it" }
@@ -237,6 +251,7 @@ Decide the best next single action:
 
 OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 {
+  "reasoning": "<1 concise sentence explaining why this element/action was chosen from the screen tree>",
   "action": "tap_tag" | "type_tag" | "scroll_screen" | "back" | "done",
   "tag": <number or null>,
   "text": "<text to type, or full generated content, or null>",
@@ -247,6 +262,10 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 
                 val decision = geminiBrain.decideUIAction(prompt)
                 val summary = decision.summary ?: decision.text ?: decision.action
+                JarvisLogStore.log(
+                    "FALLBACK_DECISION_$turn",
+                    "action=${decision.action} tag=${decision.tag} dir=${decision.direction} reason='${decision.reasoning ?: ""}' summary='$summary'"
+                )
 
                 when (decision.action.lowercase().trim()) {
                     "done" -> {
@@ -263,12 +282,15 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     }
                     "tap_tag" -> {
                         val targetTag = decision.tag ?: 1
+                        val pickedEl = service.findTaggedElement(targetTag)
+                        JarvisLogStore.log("FALLBACK_PICKED_NODE", "tap_tag($targetTag) -> ${JarvisLogStore.describeElement(pickedEl)}")
                         var tapOk = false
                         var tapReply = ""
                         nodeActionEngine.tapByTag(targetTag) { ok, reply ->
                             tapOk = ok
                             tapReply = reply
                         }
+                        JarvisLogStore.log("FALLBACK_EXEC", "tap_tag($targetTag) ok=$tapOk reply='$tapReply'")
                         if (tapOk) {
                             actionHistory.add("Tapped element [$targetTag] ($summary)")
                         } else {
@@ -279,12 +301,15 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     "type_tag" -> {
                         val targetTag = decision.tag ?: 1
                         val textToType = decision.text ?: instruction
+                        val pickedEl = service.findTaggedElement(targetTag)
+                        JarvisLogStore.log("FALLBACK_PICKED_NODE", "type_tag($targetTag) -> ${JarvisLogStore.describeElement(pickedEl)}")
                         var typeOk = false
                         var typeReply = ""
                         nodeActionEngine.typeTextByTag(targetTag, textToType) { ok, reply ->
                             typeOk = ok
                             typeReply = reply
                         }
+                        JarvisLogStore.log("FALLBACK_EXEC", "type_tag($targetTag) ok=$typeOk reply='$typeReply'")
                         val preview = if (textToType.length > 40) textToType.take(40).replace("\n", " ") + "..." else textToType
                         if (typeOk) {
                             actionHistory.add("Typed '$preview' into element [$targetTag]")
@@ -295,12 +320,14 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     }
                     "scroll_screen" -> {
                         val dir = decision.direction ?: "down"
-                        service.scroll(dir)
+                        val ok = service.scroll(dir)
+                        JarvisLogStore.log("FALLBACK_EXEC", "scroll_screen($dir) ok=$ok")
                         actionHistory.add("Scrolled screen $dir")
                         delay(550)
                     }
                     "back" -> {
-                        service.performBack()
+                        val ok = service.performBack()
+                        JarvisLogStore.log("FALLBACK_EXEC", "back ok=$ok")
                         actionHistory.add("Pressed back button")
                         delay(450)
                     }

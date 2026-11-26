@@ -1,6 +1,6 @@
 {
-  "versionCode": 12,
-  "versionName": "1.1.1",
+  "versionCode": 13,
+  "versionName": "1.1.2",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Reads hintText for Search bar reliability, blocks New Message icon trap, separates friend vs self-sent DM reels strictly, waits full reel duration, and hardens Inbox DM reading."
+  "changelog": "Full A-to-Z execution, UI tree, Gemini reasoning & node selection telemetry logs with one-tap Copy Logs button, plus Clear Search History exclusion."
 }

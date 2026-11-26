@@ -36,6 +36,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.jarvis.assistant.brain.GeminiBrain
+import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.engine.NodeActionEngine
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.engine.TelephonyHelper
@@ -79,6 +80,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnTalk: Button
     private lateinit var etCommandInput: EditText
     private lateinit var btnSendCommand: Button
+    private lateinit var btnCopyLogs: Button
+    private lateinit var btnClearLogs: Button
     private lateinit var tvLogs: TextView
     private lateinit var scrollLogs: ScrollView
 
@@ -105,6 +108,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
+        JarvisLogStore.init(this)
 
         // Crash-proofing: Catch any uncaught exception and log it instead of dying
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
@@ -120,6 +124,14 @@ class MainActivity : AppCompatActivity() {
         initServices()
         setupListeners()
         requestAppPermissions()
+        refreshLogsView()
+        JarvisLogStore.setListener {
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    refreshLogsView()
+                }
+            }
+        }
 
         // Automatic In-App Update check on launch
         AppUpdateManager.checkForUpdates(this, isManual = false)
@@ -138,6 +150,8 @@ class MainActivity : AppCompatActivity() {
         btnTalk = findViewById(R.id.btnTalk)
         etCommandInput = findViewById(R.id.etCommandInput)
         btnSendCommand = findViewById(R.id.btnSendCommand)
+        btnCopyLogs = findViewById(R.id.btnCopyLogs)
+        btnClearLogs = findViewById(R.id.btnClearLogs)
         tvLogs = findViewById(R.id.tvLogs)
         scrollLogs = findViewById(R.id.scrollLogs)
     }
@@ -263,10 +277,32 @@ class MainActivity : AppCompatActivity() {
                 processUserCommand(cmd)
             }
         }
+
+        btnCopyLogs.setOnClickListener {
+            val fullText = JarvisLogStore.getFullLogText()
+            if (fullText.isBlank()) {
+                Toast.makeText(this, "Abhi koi logs nahi hain.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("jarvis_full_logs", fullText))
+            Toast.makeText(
+                this,
+                "Copied all logs (${JarvisLogStore.lineCount()} lines, ${fullText.length} chars)!",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        btnClearLogs.setOnClickListener {
+            JarvisLogStore.clear()
+            refreshLogsView()
+            Toast.makeText(this, "Logs cleared", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        refreshLogsView()
         if (BankingProtectionManager.isShieldActive) {
             BankingProtectionManager.reattachAccessibility(this)
         }
@@ -1036,14 +1072,29 @@ class MainActivity : AppCompatActivity() {
     private fun appendLog(message: String) {
         val time = timeFormat.format(Date())
         val logLine = "[$time] $message"
+        val category = when {
+            message.startsWith("User") -> "USER_UI"
+            message.startsWith("Jarvis:") -> "JARVIS_SPEAK"
+            message.startsWith("Executing Tool:") -> "TOOL_DISPATCH"
+            else -> "CORE"
+        }
+        JarvisLogStore.log(category, message)
+        sendRemoteLog(logLine)
+    }
+
+    private fun refreshLogsView() {
         runOnUiThread {
-            val current = tvLogs.text.toString()
-            tvLogs.text = if (current.isEmpty()) logLine else "$current\n$logLine"
+            if (!::tvLogs.isInitialized || !::scrollLogs.isInitialized) return@runOnUiThread
+            val displayText = JarvisLogStore.getDisplayLogText()
+            tvLogs.text = if (displayText.isNotEmpty()) {
+                displayText
+            } else {
+                "[System]: J.A.R.V.I.S. Core initialized.\n[System]: Ready for voice or text commands."
+            }
             scrollLogs.post {
                 scrollLogs.fullScroll(ScrollView.FOCUS_DOWN)
             }
         }
-        sendRemoteLog(logLine)
     }
 
     private fun sendRemoteLog(logMessage: String) {
@@ -1074,6 +1125,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        JarvisLogStore.setListener(null)
         if (instance == this) instance = null
         speechRecognizerHelper?.destroy()
         speakerHelper.shutdown()
