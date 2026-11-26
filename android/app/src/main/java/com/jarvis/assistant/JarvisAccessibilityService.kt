@@ -675,16 +675,20 @@ class JarvisAccessibilityService : AccessibilityService() {
      * Precision zero-fling scroll that pauses briefly before lifting finger and awaits OS completion.
      * Prevents RecyclerView drift so the very next tap lands accurately on cards/rows without wasted fling-stop taps.
      */
-    suspend fun scrollExact(direction: String = "down"): Boolean {
+    suspend fun scrollExact(
+        direction: String = "down",
+        upStartFraction: Float = 0.34f,
+        upEndFraction: Float = 0.70f
+    ): Boolean {
         val displayMetrics = resources.displayMetrics
         val width = displayMetrics.widthPixels.toFloat()
         val height = displayMetrics.heightPixels.toFloat()
 
         val cx = width / 2f
         val (startY, endY) = if (direction.lowercase() == "up") {
-            Pair(height * 0.34f, height * 0.70f)
+            Pair(height * upStartFraction, height * upEndFraction)
         } else {
-            Pair(height * 0.70f, height * 0.34f)
+            Pair(height * upEndFraction, height * upStartFraction)
         }
 
         val slidePath = Path().apply {

@@ -30,7 +30,7 @@ data class UIActionDecision(
 )
 
 data class SocialIntent(
-    val actionType: String, // "dm", "read_dm", "chat_media", "chat_media_all", "story", "follow", "reels", "other"
+    val actionType: String, // "dm", "read_dm", "chat_media", "chat_media_all", "story", "follow", "profile_info", "profile_post", "reels", "other"
     val target: String,
     val message: String,
     val count: Int = 1, // 1 = latest, N = last N shared items, -1 = all available
@@ -43,8 +43,8 @@ class GeminiBrain(
 ) {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
     private val gson = Gson()
@@ -258,15 +258,17 @@ Extract the exact social app intent from Sir's command: "$clean"
 Classify "actionType":
 - "dm": sending a direct personal message/reply to a recipient.
 - "read_dm": opening a specific sender's DM chat to mark it seen and read aloud their latest incoming message.
-- "chat_media": opening or playing the latest reel/video (count=1), last N reels/videos (count=N), or all shared reels (count=-1) in a person's DM chat. Set "fromMe": true ONLY if Sir explicitly asks for reels sent BY HIMSELF/HERSELF (otherwise false = friend's sent reels).
-- "chat_media_all": playing all available reels/videos sent by a specific person inside their DM chat (count=-1, respect "fromMe").
+- "chat_media": opening or playing the latest reel/video (count=1), last N reels/videos (count=N), or all shared reels (count=-1) shared INSIDE a DM chat ("bheji hui", "sent by", "chat mein"). Set "fromMe": true ONLY if Sir explicitly asks for reels sent BY HIMSELF/HERSELF (otherwise false = friend's sent reels).
+- "chat_media_all": playing all available reels/videos shared inside a specific person's DM chat (count=-1, respect "fromMe").
 - "story": watching someone's story by sliding the homepage story tray horizontally.
 - "follow": searching and following a public account/profile.
-- "reels": opening or scrolling the general Reels feed when NO specific sender is named.
+- "profile_info": checking an account's followers count, following count, post count, bio, or opening their profile info when Sir asks for stats/followers/profile details (NO DM).
+- "profile_post": opening or playing the latest uploaded post or reel ON an account's Instagram profile grid (e.g. "latest post", "new post", "recent upload" — NOT shared in DM).
+- "reels": opening or scrolling the general Reels feed when NO specific sender or profile target is named.
 - "other": anything else.
 
 OUTPUT ONLY RAW JSON:
-{"actionType":"dm|read_dm|chat_media|chat_media_all|story|follow|reels|other","target":"<person or account name, or empty string>","message":"<exact message text if dm, else empty string>","count":<integer 1 for latest, N for last N requested reels, or -1 for all>,"fromMe":<true or false>}
+{"actionType":"dm|read_dm|chat_media|chat_media_all|story|follow|profile_info|profile_post|reels|other","target":"<person or account name, or empty string>","message":"<exact message text if dm, else empty string>","count":<integer 1 for latest, N for last N requested reels, or -1 for all>,"fromMe":<true or false>}
 """.trimIndent()
 
         val t0 = System.currentTimeMillis()

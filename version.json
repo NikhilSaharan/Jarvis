@@ -1,6 +1,6 @@
 {
-  "versionCode": 20,
-  "versionName": "1.1.9",
+  "versionCode": 21,
+  "versionName": "1.2.0",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Pure relative Accessibility Tree comparisons across Search, Person matching, Bottom Tabs, Story tray, and Media cards — eliminated fixed screen width/height percentage cutoffs."
+  "changelog": "Fixed DM multi-reel duplicate replays with viewport-rect and scroll-invariant card attribution signatures, added instant DM search-row click retry, fast profile info/latest post navigation, and halved HTTP stall timeout."
 }

@@ -88,6 +88,20 @@ object InstagramTreeNavigator {
                     executeFollowAccount(service, intent.target, steps)
                 }
             }
+            "profile_info" -> {
+                if (intent.target.isBlank()) {
+                    FastNavResult(handled = false, stepsTaken = steps)
+                } else {
+                    executeProfileInfo(service, intent.target, steps)
+                }
+            }
+            "profile_post" -> {
+                if (intent.target.isBlank()) {
+                    FastNavResult(handled = false, stepsTaken = steps)
+                } else {
+                    executeProfilePost(service, intent.target, lower, steps)
+                }
+            }
             "reels" -> {
                 val looksLikeFriendSharedReel = intent.target.isNotBlank() &&
                     (lower.contains("bhej") || lower.contains("sent") || lower.contains("share") ||
@@ -182,9 +196,11 @@ object InstagramTreeNavigator {
 
         val ownerPhrase = if (senderFilter == MediaSenderFilter.FROM_ME) "aapki bheji hui" else "$target ki bheji hui"
         val playedSignatures = mutableSetOf<String>()
+        val playedViewportRects = mutableSetOf<String>()
         var playedCount = 0
         var emptyScrolls = 0
         var sameScreenScrolls = 0
+        var scrollEpoch = 0
         var retriedInitialRender = false
         val maxReelsCap = if (requestedCount > 0) requestedCount else 20
 
@@ -194,22 +210,33 @@ object InstagramTreeNavigator {
             val scanReasons = mutableListOf<String>()
             val cards = findSharedMediaCardsInChat(els, w, h, headerBottom, composerTop, senderFilter, scanReasons)
             val seenBaseOnScreen = mutableMapOf<String, Int>()
-            var nextCard: ScreenElement? = null
-            var nextCardSig: String? = null
+            val unplayed = mutableListOf<Triple<ScreenElement, String, String>>()
             for (card in cards) {
-                val baseKey = "${labelOf(card).take(40)}|${resIdOf(card)}|${card.bounds.width()}x${card.bounds.height()}"
+                val rk = "${card.bounds.left},${card.bounds.top},${card.bounds.right},${card.bounds.bottom}"
+                val baseKey = "${labelOf(card).take(40)}|${resIdOf(card)}|${card.bounds.width()}"
                 val occIdx = seenBaseOnScreen.getOrDefault(baseKey, 0)
                 seenBaseOnScreen[baseKey] = occIdx + 1
-                val sig = buildMediaCardSignature(card, els, occIdx, h)
+                if (rk in playedViewportRects) continue
+                val sig = buildMediaCardSignature(card, els, occIdx, headerBottom, composerTop, scrollEpoch)
                 if (sig !in playedSignatures) {
-                    nextCard = card
-                    nextCardSig = sig
-                    break
+                    unplayed.add(Triple(card, sig, rk))
                 }
             }
+            // If only a top-clipped unlabeled card remains at headerBottom, scroll it down into full view first so its full creator attribution is read before playing
+            val candidate = unplayed.firstOrNull()
+            val shouldScrollTopClippedFirst = candidate != null &&
+                unplayed.size == 1 &&
+                candidate.second.startsWith("unlabeled_") &&
+                candidate.first.bounds.top <= headerBottom + 2 &&
+                emptyScrolls < 16 &&
+                sameScreenScrolls == 0
+            val pickedTriple = if (shouldScrollTopClippedFirst) null else candidate
+            val nextCard = pickedTriple?.first
+            val nextCardSig = pickedTriple?.second
+            val nextCardRect = pickedTriple?.third
             JarvisLogStore.log(
                 "DM_MEDIA_SCAN",
-                "filter=$senderFilter played=$playedCount emptyScrolls=$emptyScrolls headerB=$headerBottom composerT=$composerTop foundCards=${cards.size} picked=${JarvisLogStore.describeElement(nextCard)} cands=$scanReasons"
+                "filter=$senderFilter played=$playedCount epoch=$scrollEpoch emptyScrolls=$emptyScrolls headerB=$headerBottom composerT=$composerTop foundCards=${cards.size} picked=${JarvisLogStore.describeElement(nextCard)} sig='$nextCardSig' cands=$scanReasons"
             )
             if (nextCard == null && emptyScrolls <= 2) {
                 JarvisLogStore.logScreenTree("DM_MEDIA_TREE", els)
@@ -224,13 +251,15 @@ object InstagramTreeNavigator {
                 // Climb upward deeply so sender's older reels above recent texts/own messages are still found
                 if (emptyScrolls >= 16 || sameScreenScrolls >= 2) break
                 val beforeSig = viewportMessagesSignature(els, headerBottom, composerTop)
-                service.scrollExact("up")
-                delay(120)
+                service.scrollExact("up", upStartFraction = 0.25f, upEndFraction = 0.76f)
+                delay(140)
                 val afterEls = service.dumpScreenElements()
                 val afterSig = viewportMessagesSignature(afterEls, headerBottom, composerTop)
                 if (beforeSig == afterSig) {
                     sameScreenScrolls++
                 } else {
+                    playedViewportRects.clear()
+                    scrollEpoch++
                     sameScreenScrolls = 0
                     emptyScrolls++
                 }
@@ -239,6 +268,7 @@ object InstagramTreeNavigator {
 
             emptyScrolls = 0
             sameScreenScrolls = 0
+            if (nextCardRect != null) playedViewportRects.add(nextCardRect)
             if (nextCardSig != null) playedSignatures.add(nextCardSig)
             val openedViewer = openMediaCardViewer(service, nextCard, els, headerBottom, composerTop, h)
             if (!openedViewer) {
@@ -477,8 +507,20 @@ object InstagramTreeNavigator {
         service.tapNodeSingleTouch(chosenRow.node)
         steps.add("Selected chat '${chosenRow.text.ifBlank { target }}'")
 
-        val composer = pollElement(service, timeoutMs = 1800, intervalMs = 55) { elements ->
+        var composer = pollElement(service, timeoutMs = 1300, intervalMs = 55) { elements ->
             elements.firstOrNull { isChatComposerElement(it, screenHeight) }
+        }
+        if (composer == null) {
+            val midEls = service.dumpScreenElements()
+            val retryRow = findBestPersonMatch(midEls, target, searchBottom, screenHeight, screenWidth, mode = matchMode)
+            if (retryRow != null) {
+                val clicked = service.clickNode(retryRow.node)
+                if (!clicked) service.tapNodeSingleTouch(retryRow.node)
+                steps.add("Retried chat '${retryRow.text.ifBlank { target }}'")
+                composer = pollElement(service, timeoutMs = 1500, intervalMs = 55) { elements ->
+                    elements.firstOrNull { isChatComposerElement(it, screenHeight) }
+                }
+            }
         }
         JarvisLogStore.log("DM_COMPOSER", "Loaded composer=${JarvisLogStore.describeElement(composer)}")
         if (composer == null) JarvisLogStore.logScreenTree("DM_COMPOSER_MISS", service.dumpScreenElements())
@@ -718,6 +760,186 @@ object InstagramTreeNavigator {
         return FastNavResult(true, true, "Instagram par $target ko follow kar diya hai Sir.", steps)
     }
 
+    // ═════════════════════════════════════════════════════════════════
+    // 3B. PROFILE INFO (FOLLOWERS / FOLLOWING / POSTS) & LATEST POST
+    // ═════════════════════════════════════════════════════════════════
+    private suspend fun executeProfileInfo(
+        service: JarvisAccessibilityService,
+        target: String,
+        steps: MutableList<String>
+    ): FastNavResult {
+        val dm = service.resources.displayMetrics
+        val w = dm.widthPixels
+        val h = dm.heightPixels
+
+        val openedProfile = navigateToUserProfileViaSearch(service, w, h, target, steps)
+        if (!openedProfile) {
+            return FastNavResult(handled = false, stepsTaken = steps)
+        }
+
+        val ready = pollCondition(timeoutMs = 1500, intervalMs = 60) {
+            val els = service.dumpScreenElements()
+            els.any { resIdOf(it).contains("profile_header_followers") || labelOf(it).contains("followers") }
+        }
+        val els = service.dumpScreenElements()
+        val displayName = els.firstOrNull {
+            val r = resIdOf(it)
+            r == "profile_header_full_name_above_vanity" || r.contains("profile_header_full_name") || r == "action_bar_title"
+        }?.text?.trim().orEmpty().ifBlank { target }
+
+        fun formatStat(raw: String): String = raw
+            .replace(Regex("(\\d)\\s*(posts?|followers?|following)", RegexOption.IGNORE_CASE), "$1 $2")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        val followersRaw = els.firstOrNull {
+            resIdOf(it).contains("profile_header_followers") ||
+                (labelOf(it).contains("followers") && it.bounds.top < bottomNavBarTop(els, h))
+        }?.let { it.text.ifBlank { it.contentDescription } }?.trim().orEmpty()
+
+        val followingRaw = els.firstOrNull {
+            resIdOf(it).contains("profile_header_following") ||
+                (labelOf(it).contains("following") && !labelOf(it).equals("following", true) && it.bounds.top < bottomNavBarTop(els, h))
+        }?.let { it.text.ifBlank { it.contentDescription } }?.trim().orEmpty()
+
+        val postsRaw = els.firstOrNull {
+            resIdOf(it).contains("profile_header_post_count") ||
+                (Regex("\\d+.*posts?", RegexOption.IGNORE_CASE).containsMatchIn(labelOf(it)) && it.bounds.top < bottomNavBarTop(els, h))
+        }?.let { it.text.ifBlank { it.contentDescription } }?.trim().orEmpty()
+
+        JarvisLogStore.log("INSTA_PROFILE_INFO", "ready=$ready name='$displayName' followers='$followersRaw' following='$followingRaw' posts='$postsRaw'")
+        if (followersRaw.isBlank() && postsRaw.isBlank()) {
+            return FastNavResult(handled = false, stepsTaken = steps)
+        }
+
+        val parts = listOfNotNull(
+            followersRaw.takeIf { it.isNotBlank() }?.let { formatStat(it) },
+            followingRaw.takeIf { it.isNotBlank() }?.let { formatStat(it) },
+            postsRaw.takeIf { it.isNotBlank() }?.let { formatStat(it) }
+        )
+        steps.add("Read profile stats for $displayName")
+        return FastNavResult(
+            handled = true,
+            success = true,
+            message = "Instagram par $displayName ke ${parts.joinToString(", ")} hain Sir.",
+            stepsTaken = steps
+        )
+    }
+
+    private suspend fun executeProfilePost(
+        service: JarvisAccessibilityService,
+        target: String,
+        lowerInstruction: String,
+        steps: MutableList<String>
+    ): FastNavResult {
+        val dm = service.resources.displayMetrics
+        val w = dm.widthPixels
+        val h = dm.heightPixels
+
+        val openedProfile = navigateToUserProfileViaSearch(service, w, h, target, steps)
+        if (!openedProfile) {
+            return FastNavResult(handled = false, stepsTaken = steps)
+        }
+
+        pollCondition(timeoutMs = 1500, intervalMs = 60) {
+            val els = service.dumpScreenElements()
+            findProfileGridTiles(els, h).isNotEmpty()
+        }
+
+        val wantsReelsTab = lowerInstruction.contains("reel") && !lowerInstruction.contains("post")
+        if (wantsReelsTab) {
+            val reelsTab = service.dumpScreenElements().firstOrNull { el ->
+                val r = resIdOf(el)
+                val l = labelOf(el)
+                (r == "profile_tab_icon_view" && l.contains("reel")) || l == "reels"
+            }
+            if (reelsTab != null) {
+                service.tapNodeSingleTouch(reelsTab.node)
+                steps.add("Switched to Reels tab on $target profile")
+                delay(320)
+            }
+        }
+
+        var tiles = findProfileGridTiles(service.dumpScreenElements(), h)
+        if (tiles.isEmpty()) {
+            service.scrollExact("down")
+            delay(220)
+            tiles = findProfileGridTiles(service.dumpScreenElements(), h)
+        }
+        val latestTile = tiles.firstOrNull { !labelOf(it).contains("pinned") } ?: tiles.firstOrNull()
+        JarvisLogStore.log("INSTA_PROFILE_POST", "tiles=${tiles.size} picked=${JarvisLogStore.describeElement(latestTile)}")
+        if (latestTile == null) {
+            return FastNavResult(handled = false, stepsTaken = steps)
+        }
+
+        service.tapNodeSingleTouch(latestTile.node)
+        steps.add("Opened latest post '${latestTile.contentDescription.ifBlank { target }}'")
+        var leftProfile = pollCondition(timeoutMs = 1400, intervalMs = 60) {
+            !isOnProfileScreen(service.dumpScreenElements(), h)
+        }
+        if (!leftProfile) {
+            val liveTile = findProfileGridTiles(service.dumpScreenElements(), h)
+                .let { list -> list.firstOrNull { !labelOf(it).contains("pinned") } ?: list.firstOrNull() }
+            if (liveTile != null) {
+                val clicked = service.clickNode(liveTile.node)
+                if (!clicked) service.tapNodeSingleTouch(liveTile.node)
+                leftProfile = pollCondition(timeoutMs = 1200, intervalMs = 60) {
+                    !isOnProfileScreen(service.dumpScreenElements(), h)
+                }
+            }
+        }
+        if (!leftProfile) {
+            return FastNavResult(handled = false, stepsTaken = steps)
+        }
+        return FastNavResult(
+            handled = true,
+            success = true,
+            message = "Instagram par $target ki latest post khol di hai Sir.",
+            stepsTaken = steps
+        )
+    }
+
+    private fun isOnProfileScreen(elements: List<ScreenElement>, screenHeight: Int): Boolean {
+        val hasProfileHeader = elements.any { resIdOf(it).startsWith("profile_header_") }
+        val hasProfileTabs = elements.any { resIdOf(it) == "profile_tab_icon_view" }
+        return hasProfileHeader || (hasProfileTabs && findFollowOrFollowingButton(elements, screenHeight) != null)
+    }
+
+    private fun isOnProfileForTarget(elements: List<ScreenElement>, target: String, screenHeight: Int): Boolean {
+        if (!isOnProfileScreen(elements, screenHeight)) return false
+        val tokens = target.lowercase().trim().split(Regex("\\s+")).filter { it.length >= 2 }
+        if (tokens.isEmpty()) return false
+        val compactTarget = target.lowercase().replace(Regex("[^a-z0-9]"), "")
+        val headerNodes = elements.filter { el ->
+            val r = resIdOf(el)
+            r.startsWith("profile_header_full_name") || r == "action_bar_title" || r.contains("vanity")
+        }
+        return headerNodes.any { el ->
+            val l = labelOf(el)
+            val compactL = l.replace(Regex("[^a-z0-9]"), "")
+            tokens.all { l.contains(it) } || (compactTarget.length >= 3 && compactL.contains(compactTarget))
+        }
+    }
+
+    private fun findProfileGridTiles(elements: List<ScreenElement>, screenHeight: Int): List<ScreenElement> {
+        val navTop = bottomNavBarTop(elements, screenHeight)
+        val tabBottom = elements.filter { resIdOf(it) == "profile_tab_icon_view" }
+            .maxOfOrNull { it.bounds.bottom }
+            ?: elements.filter { resIdOf(it).startsWith("profile_header_") }
+                .maxOfOrNull { it.bounds.bottom }
+            ?: 0
+        return elements.filter { el ->
+            if (el.isEditable) return@filter false
+            val cy = el.bounds.centerY()
+            if (cy <= tabBottom || el.bounds.top >= navTop) return@filter false
+            val res = resIdOf(el)
+            val lbl = labelOf(el)
+            val looksLikeGridItem = res == "image_button" || lbl.contains("at row ") ||
+                res.contains("grid_card") || res.contains("media_set") || res.contains("clips_grid")
+            looksLikeGridItem && hasClickableOrAncestor(el.node, maxDepth = 4)
+        }.sortedWith(compareBy<ScreenElement> { it.bounds.top }.thenBy { it.bounds.left })
+    }
+
     private suspend fun navigateToUserProfileViaSearch(
         service: JarvisAccessibilityService,
         screenWidth: Int,
@@ -725,6 +947,9 @@ object InstagramTreeNavigator {
         target: String,
         steps: MutableList<String>
     ): Boolean {
+        if (isOnProfileForTarget(service.dumpScreenElements(), target, screenHeight)) {
+            return true
+        }
         // Check if Search tab is already selected or Search bar is already at top of Explore
         val searchBar = findSearchTriggerOrInput(service.dumpScreenElements(), screenWidth, screenHeight)
         val isSearchTabSelected = findBottomNavTab(service, screenHeight, listOf("search"), listOf("search_tab"))?.node?.isSelected == true
@@ -780,7 +1005,34 @@ object InstagramTreeNavigator {
         if (matchedAccount == null) return false
         service.tapNodeSingleTouch(matchedAccount.node)
         steps.add("Opened profile '${matchedAccount.text.ifBlank { target }}'")
-        return true
+
+        var onProfile = pollCondition(timeoutMs = 2000, intervalMs = 75) {
+            isOnProfileScreen(service.dumpScreenElements(), screenHeight)
+        }
+        // If tapping autocomplete landed on Search Results tab instead of opening Profile directly, tap top account row
+        if (!onProfile) {
+            val midEls = service.dumpScreenElements()
+            val accountsTab = midEls.firstOrNull { el ->
+                val l = labelOf(el)
+                (l == "accounts" || l == "users") && hasClickableOrAncestor(el.node, 3) && !el.node.isSelected
+            }
+            if (accountsTab != null) {
+                service.tapNodeSingleTouch(accountsTab.node)
+                delay(380)
+            }
+            val secondMatch = pollElement(service, timeoutMs = 1500, intervalMs = 75) { elements ->
+                findBestPersonMatch(elements, target, searchBottom, screenHeight, screenWidth, mode = PersonMatchMode.PUBLIC_ACCOUNT)
+            }
+            if (secondMatch != null) {
+                val clicked = service.clickNode(secondMatch.node)
+                if (!clicked) service.tapNodeSingleTouch(secondMatch.node)
+                steps.add("Confirmed profile '${secondMatch.text.ifBlank { target }}'")
+                onProfile = pollCondition(timeoutMs = 2200, intervalMs = 75) {
+                    isOnProfileScreen(service.dumpScreenElements(), screenHeight)
+                }
+            }
+        }
+        return onProfile
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -1495,23 +1747,41 @@ object InstagramTreeNavigator {
         el: ScreenElement,
         elements: List<ScreenElement>,
         occurrenceIdx: Int,
-        screenHeight: Int
+        headerBottom: Int,
+        composerTop: Int,
+        scrollEpoch: Int
     ): String {
         val raw = labelOf(el).replace(Regex("\\s+"), " ").take(60)
         val res = resIdOf(el)
-        if (raw.isNotBlank()) return "$raw|$res"
-        val bandPad = (screenHeight * 0.05f).toInt()
-        val nearby = elements.filter { other ->
+        if (raw.isNotBlank()) return "lbl:$raw|${el.bounds.width()}|$res"
+
+        val clipTop = maxOf(headerBottom + 1, el.bounds.top)
+        val clipBottom = minOf(composerTop - 1, el.bounds.bottom)
+        val timeRe = Regex("^\\d{1,2}:\\d{2}(\\s?[ap]m)?$")
+        val attrText = elements.filter { other ->
             other !== el &&
-                other.bounds.centerY() in (el.bounds.top - bandPad)..(el.bounds.bottom + bandPad) &&
-                (other.text.isNotBlank() || other.contentDescription.isNotBlank())
-        }.joinToString(",") {
-            it.text.ifBlank { it.contentDescription }.replace(Regex("\\s+"), " ").take(20)
-        }.take(50)
-        return if (nearby.isNotBlank()) {
-            "ctx_${nearby}|${el.bounds.width()}x${el.bounds.height()}|$res"
+                other.bounds.centerY() in clipTop..clipBottom &&
+                other.bounds.centerX() in el.bounds.left..el.bounds.right &&
+                (other.text.isNotBlank() || other.contentDescription.isNotBlank()) &&
+                resIdOf(other).let {
+                    it == "title_text" || it == "caption_title" || it == "subtitle_text" ||
+                        (other.bounds.height() < el.bounds.height() / 3 &&
+                            it != "sender_avatar" &&
+                            it != "profile_attribution_picture")
+                }
+        }.map {
+            it.text.ifBlank { it.contentDescription }.replace(Regex("\\s+"), " ").trim()
+        }.filter { txt ->
+            val lower = txt.lowercase()
+            txt.isNotBlank() && !timeRe.matches(lower) &&
+                lower != "seen" && lower != "sent" && lower != "delivered" &&
+                lower != "reel" && lower != "clip"
+        }.distinct().joinToString(",").take(60)
+
+        return if (attrText.isNotBlank()) {
+            "attr:$attrText|${el.bounds.width()}|$res"
         } else {
-            "unlabeled_${occurrenceIdx}_${el.bounds.width()}x${el.bounds.height()}|$res"
+            "unlabeled_${scrollEpoch}_${occurrenceIdx}_${el.bounds.width()}|$res"
         }
     }
 
@@ -1643,9 +1913,10 @@ object InstagramTreeNavigator {
 
             val label = labelOf(el)
             val res = resIdOf(el)
-            // Never treat inline avatars/attributions/shortcut icons themselves as playable Reel cards
+            // Never treat inline avatars/attributions/shortcut icons or standalone attribution labels themselves as playable Reel cards
             if (res == "sender_avatar" || res == "profile_attribution_picture" ||
-                res == "forwarding_shortcut_button" || res == "message_riff_cutout_shortcut_button") continue
+                res == "forwarding_shortcut_button" || res == "message_riff_cutout_shortcut_button" ||
+                res == "title_text" || res == "caption_title" || res == "subtitle_text") continue
 
             val innerVisualRect = findInnerVisualMediaBounds(el.node, minMediaSize, minMediaSize)
             val isVisualCls = cls.contains("imageview") || cls.contains("textureview") ||
@@ -1659,7 +1930,7 @@ object InstagramTreeNavigator {
                     }
             }
             val isMediaCardHeight = el.bounds.height() > minMediaSize && el.bounds.width() > minMediaSize
-            if (!isMediaCardHeight && innerVisualRect == null && !hasMediaCompanion) continue
+            if (!isMediaCardHeight && innerVisualRect == null) continue
 
             if (!hasClickableOrAncestor(el.node, maxDepth = 5) && !isVisualCls && innerVisualRect == null && !hasMediaCompanion) {
                 debugReasons?.add("SKIP(not_click ${el.bounds.width()}x${el.bounds.height()}): '${label.take(25)}'")
@@ -1720,7 +1991,12 @@ object InstagramTreeNavigator {
         val clustered = mutableListOf<ScreenElement>()
         val sortedDesc = pool.sortedWith(compareByDescending<MediaCandidate> { it.el.bounds.bottom }.thenByDescending { it.score })
         for (cand in sortedDesc) {
-            val overlapsExisting = clustered.any { kotlin.math.abs(it.bounds.centerY() - cand.el.bounds.centerY()) < (screenHeight * 0.05f).toInt() }
+            val overlapsExisting = clustered.any { existing ->
+                val ovTop = maxOf(existing.bounds.top, cand.el.bounds.top)
+                val ovBot = minOf(existing.bounds.bottom, cand.el.bounds.bottom)
+                val minH = minOf(existing.bounds.height(), cand.el.bounds.height()).coerceAtLeast(1)
+                ovBot > ovTop && (ovBot - ovTop) > minH / 2
+            }
             if (!overlapsExisting) clustered.add(cand.el)
         }
         return clustered
