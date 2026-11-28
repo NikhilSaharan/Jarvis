@@ -111,7 +111,10 @@ class AlwaysOnVoiceService : Service() {
             val appCtx = context.applicationContext
             if (!isEnabled(appCtx)) return
             JarvisLogStore.init(appCtx)
-            if (isRunning) return
+            if (isRunning) {
+                scheduleWatchdogAlarm(appCtx, WATCHDOG_INTERVAL_MS)
+                return
+            }
             JarvisLogStore.log("ALWAYS_ON", "Auto-restarting permanent mic ($reason)...")
             val intent = Intent(appCtx, AlwaysOnVoiceService::class.java).setAction(ACTION_START)
             try {
@@ -215,6 +218,8 @@ class AlwaysOnVoiceService : Service() {
 
     private var pendingDoubtDecision: com.jarvis.assistant.brain.ActionDecision? = null
     private var pendingDoubtTranscript: String = ""
+
+    @Volatile
     private var lastNotificationText = "Hotstar/Reels ke saath bina ruke sun raha hoon"
 
     private val resumeListenRunnable = Runnable { resumePassiveListeningNow() }
@@ -441,17 +446,34 @@ class AlwaysOnVoiceService : Service() {
     private fun resumePassiveListeningNow() {
         if (stopping || !isEnabled(this) || executingCommand || pausedForEnrollment) return
         if (SpeakerHelper.isAnySpeaking()) {
-            schedulePassiveResume(320L)
+            schedulePassiveResume(240L)
             return
         }
         if (needsMicTypeUpgrade) {
             promoteToForegroundNotification(lastNotificationText)
         }
+        voiceCaptureEngine?.setDispatchInFlight(false)
         voiceCaptureEngine?.startListening()
     }
 
+    private fun releaseMicDispatchLock(delayMs: Long = 80L) {
+        executingCommand = false
+        if (stopping || !isEnabled(this) || pausedForEnrollment) return
+        mainHandler.postDelayed({
+            if (!executingCommand && !stopping && isEnabled(this) && !pausedForEnrollment) {
+                voiceCaptureEngine?.setDispatchInFlight(false)
+                voiceCaptureEngine?.startListening()
+            }
+        }, delayMs)
+    }
+
     private fun onVerifiedSpeechCaptured(captured: PassiveVoiceCaptureEngine.CapturedUtterance) {
-        if (stopping || !isEnabled(this) || executingCommand || pausedForEnrollment) return
+        if (stopping || !isEnabled(this) || executingCommand || pausedForEnrollment) {
+            if (!executingCommand && !pausedForEnrollment) {
+                voiceCaptureEngine?.setDispatchInFlight(false)
+            }
+            return
+        }
 
         val audioMode = try {
             audioManager.mode
@@ -459,6 +481,7 @@ class AlwaysOnVoiceService : Service() {
             AudioManager.MODE_NORMAL
         }
         if (audioMode == AudioManager.MODE_IN_CALL || audioMode == AudioManager.MODE_IN_COMMUNICATION) {
+            voiceCaptureEngine?.setDispatchInFlight(false)
             schedulePassiveResume(1200L)
             return
         }
@@ -489,21 +512,15 @@ class AlwaysOnVoiceService : Service() {
                     JarvisLogStore.log("VOICE_LOCK", "Secret code VERIFIED ('${checkRes.heardText}')! Running held command: '$heldTranscript'")
                     updateNotificationText("Verified! Execute kar raha hoon...")
                     commandExecutor.executePreParsedDecision(held, heldTranscript, sourceTag = "USER_VOICE") {
-                        executingCommand = false
-                        if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
-                            schedulePassiveResume(380L)
-                        }
+                        releaseMicDispatchLock(220L)
                     }
                 } else {
                     JarvisLogStore.log("VOICE_LOCK", "Secret code REJECTED (heard='${checkRes.heardText}'). Held command blocked.")
                     val reply = checkRes.dynamicReply.ifBlank {
                         "Secret code match nahi hua — command cancel kar diya hai."
                     }
-                    executingCommand = false
                     commandExecutor.speakDynamic(reply)
-                    if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
-                        schedulePassiveResume(650L)
-                    }
+                    releaseMicDispatchLock(550L)
                 }
             }
             return
@@ -512,7 +529,6 @@ class AlwaysOnVoiceService : Service() {
         // 2. Normal 3-Tier routing
         when (captured.verification.tier) {
             VoiceprintManager.MatchTier.TRUSTED -> {
-                updateNotificationText("Samajh raha hoon...")
                 val speakerVerified = VoiceprintManager.isLockActive(this) && captured.verification.allowed
                 commandExecutor.executeAudioCommand(
                     wavBytes = captured.wavBytes,
@@ -521,13 +537,10 @@ class AlwaysOnVoiceService : Service() {
                     speakerVerified = speakerVerified,
                     sourceTag = "USER_VOICE"
                 ) { ignored, transcript ->
-                    executingCommand = false
                     if (!ignored && transcript.isNotBlank()) {
                         updateNotificationText("Executed: $transcript")
                     }
-                    if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
-                        schedulePassiveResume(if (ignored) 120L else 380L)
-                    }
+                    releaseMicDispatchLock(if (ignored) 20L else 180L)
                 }
             }
 
@@ -544,10 +557,7 @@ class AlwaysOnVoiceService : Service() {
                     if (!eval.isCommandAttempt || eval.heldDecision == null ||
                         (eval.heldDecision.toolName == null && eval.heldDecision.speech == null)
                     ) {
-                        executingCommand = false
-                        if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
-                            schedulePassiveResume(150L)
-                        }
+                        releaseMicDispatchLock(40L)
                         return@evaluateDoubtOrRejectedAudio
                     }
 
@@ -555,7 +565,6 @@ class AlwaysOnVoiceService : Service() {
                     pendingDoubtTranscript = eval.transcript
                     awaitingSecretCode = true
                     voiceCaptureEngine?.forceForwardForChallenge = true
-                    executingCommand = false
 
                     val askSpeech = eval.dynamicSpeech.ifBlank {
                         "Aawaz par thoda doubt lag raha hai — aage badhne ke liye apna secret code bataiye."
@@ -565,9 +574,7 @@ class AlwaysOnVoiceService : Service() {
 
                     mainHandler.removeCallbacks(secretChallengeTimeoutRunnable)
                     mainHandler.postDelayed(secretChallengeTimeoutRunnable, 16_000L)
-                    if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
-                        schedulePassiveResume(500L)
-                    }
+                    releaseMicDispatchLock(380L)
                 }
             }
 
@@ -580,7 +587,6 @@ class AlwaysOnVoiceService : Service() {
                     acceptThreshold = captured.verification.acceptThreshold,
                     isMediaPlaying = captured.isMediaPlaying
                 ) { eval ->
-                    executingCommand = false
                     if (eval.isCommandAttempt) {
                         val refusal = eval.dynamicSpeech.ifBlank {
                             "Aapki voice Sir se match nahi kar rahi hai, main yeh command nahi chala sakta."
@@ -589,9 +595,7 @@ class AlwaysOnVoiceService : Service() {
                         updateNotificationText("Voice match nahi hui — Blocked")
                         commandExecutor.speakDynamic(refusal)
                     }
-                    if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
-                        schedulePassiveResume(if (eval.isCommandAttempt) 700L else 150L)
-                    }
+                    releaseMicDispatchLock(if (eval.isCommandAttempt) 550L else 40L)
                 }
             }
         }

@@ -524,29 +524,42 @@ object VoiceprintManager {
         return sqrt(sumSq / count)
     }
 
-    fun trimTrailingSilencePcm(pcmBytes: ByteArray): ByteArray {
+    fun trimSilenceEdgesPcm(pcmBytes: ByteArray): ByteArray {
         if (pcmBytes.size <= 3200) return pcmBytes
-        val frameBytes = 640
+        val frameBytes = 640 // 20ms @ 16kHz mono PCM16
+        var startPos = 0
+        while (startPos + frameBytes < pcmBytes.size - 3200) {
+            if (computeSliceRms(pcmBytes, startPos, startPos + frameBytes) >= 240.0) break
+            startPos += frameBytes / 2
+        }
         var endPos = pcmBytes.size
-        while (endPos > 3200) {
-            val start = (endPos - frameBytes).coerceAtLeast(0)
-            val sliceLen = endPos - start
-            var sumSq = 0.0
-            var i = start
-            while (i + 1 < endPos) {
-                val lo = pcmBytes[i].toInt() and 0xFF
-                val hi = pcmBytes[i + 1].toInt()
-                val s = ((hi shl 8) or lo).toShort().toDouble()
-                sumSq += s * s
-                i += 2
-            }
-            val rms = sqrt(sumSq / (sliceLen / 2).coerceAtLeast(1))
-            if (rms >= 300.0) break
+        while (endPos > startPos + 3200) {
+            val s = (endPos - frameBytes).coerceAtLeast(startPos)
+            if (computeSliceRms(pcmBytes, s, endPos) >= 240.0) break
             endPos -= frameBytes / 2
         }
-        val paddedEnd = (endPos + 3200).coerceAtMost(pcmBytes.size) // keep 100ms tail cushion
-        val evenEnd = paddedEnd - (paddedEnd % 2)
-        return pcmBytes.copyOf(evenEnd)
+        val paddedStart = ((startPos - 2560).coerceAtLeast(0)) and -2 // 80ms lead cushion
+        val paddedEnd = ((endPos + 2560).coerceAtMost(pcmBytes.size)) and -2 // 80ms tail cushion
+        if (paddedEnd <= paddedStart) return pcmBytes
+        return pcmBytes.copyOfRange(paddedStart, paddedEnd)
+    }
+
+    private fun computeSliceRms(buf: ByteArray, start: Int, end: Int): Double {
+        val count = ((end - start) / 2).coerceAtLeast(1)
+        var sumSq = 0.0
+        var i = start
+        while (i + 1 < end) {
+            val lo = buf[i].toInt() and 0xFF
+            val hi = buf[i + 1].toInt()
+            val s = ((hi shl 8) or lo).toShort().toDouble()
+            sumSq += s * s
+            i += 2
+        }
+        return sqrt(sumSq / count)
+    }
+
+    fun trimTrailingSilencePcm(pcmBytes: ByteArray): ByteArray {
+        return trimSilenceEdgesPcm(pcmBytes)
     }
 
     fun pcm16ToWav(pcmBytes: ByteArray, sampleRate: Int = 16000): ByteArray {

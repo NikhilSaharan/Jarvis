@@ -67,11 +67,12 @@ class PassiveVoiceCaptureEngine(
     companion object {
         const val SAMPLE_RATE = 16000
         private const val CHUNK_BYTES = 1024 // 32ms @ 16kHz PCM16 mono
-        private const val PRE_ROLL_FRAMES = 12 // ~384ms pre-roll before VAD onset
-        private const val ONSET_FRAMES_REQUIRED = 4 // ~128ms continuous speech to start utterance
-        private const val END_SILENCE_MS = 640L
-        private const val MIN_UTTERANCE_MS = 420L
-        private const val MAX_UTTERANCE_MS = 8500L
+        private const val PRE_ROLL_FRAMES = 7 // ~224ms pre-roll before VAD onset
+        private const val ONSET_FRAMES_REQUIRED = 2 // ~64ms fast normal-voice trigger
+        private const val END_SILENCE_MS = 350L
+        private const val MIN_UTTERANCE_MS = 320L
+        private const val MAX_UTTERANCE_MS = 5500L
+        private const val MAX_UTTERANCE_MEDIA_MS = 3800L
         private const val BYTES_PER_MS = 32 // 16000 * 2 / 1000
 
         private const val ASR_DIR_NAME = "vosk-model-en-in"
@@ -323,6 +324,96 @@ class PassiveVoiceCaptureEngine(
             }
         }
 
+        class SpkAccumulator {
+            private var sumVec: DoubleArray? = null
+            private var totalFrames = 0
+            private val texts = mutableListOf<String>()
+
+            fun consume(jsonStr: String?) {
+                val (text, spkVec, frames) = parseVoskJson(jsonStr)
+                if (text.isNotBlank()) texts.add(text)
+                if (spkVec != null && spkVec.isNotEmpty() && frames > 0) {
+                    val acc = sumVec ?: DoubleArray(spkVec.size).also { sumVec = it }
+                    if (acc.size == spkVec.size) {
+                        val w = frames.toDouble()
+                        for (i in spkVec.indices) {
+                            acc[i] += spkVec[i] * w
+                        }
+                        totalFrames += frames
+                    }
+                }
+            }
+
+            fun hasFrames(): Int = totalFrames
+
+            fun build(): Triple<String, FloatArray?, Int> {
+                val joinedText = texts.joinToString(" ").trim()
+                val acc = sumVec
+                if (acc == null || totalFrames <= 0) return Triple(joinedText, null, 0)
+                val out = FloatArray(acc.size) { i -> (acc[i] / totalFrames.toDouble()).toFloat() }
+                return Triple(joinedText, out, totalFrames)
+            }
+        }
+
+        private fun feedRecognizerChunk(
+            recognizer: Recognizer,
+            bytes: ByteArray,
+            len: Int,
+            accumulator: SpkAccumulator
+        ): Boolean {
+            val hitEndpoint = recognizer.acceptWaveForm(bytes, len)
+            if (hitEndpoint) {
+                accumulator.consume(recognizer.result)
+            }
+            return hitEndpoint
+        }
+
+        /**
+         * Collapses long silent pauses (>96ms) inside an utterance so Vosk doesn't fragment
+         * a multi-pause sentence into <50-frame pieces when computing the final x-vector.
+         */
+        private fun extractDenseSpkFallback(
+            recognizer: Recognizer,
+            rawPcm: ByteArray,
+            noiseFloorHint: Double
+        ): Triple<String, FloatArray?, Int> {
+            return try {
+                recognizer.reset()
+                val acc = SpkAccumulator()
+                val gateThr = (noiseFloorHint * 1.18).coerceIn(190.0, 420.0)
+                var pos = 0
+                var quietRun = 0
+                val step = CHUNK_BYTES
+                var fedAny = false
+                while (pos + step <= rawPcm.size) {
+                    val slice = rawPcm.copyOfRange(pos, pos + step)
+                    val rms = VoiceprintManager.computePcmRms(slice, step)
+                    if (rms >= gateThr) {
+                        quietRun = 0
+                        feedRecognizerChunk(recognizer, slice, step, acc)
+                        fedAny = true
+                    } else if (quietRun < 2) { // preserve max 64ms pause cushion for phoneme transitions
+                        quietRun++
+                        feedRecognizerChunk(recognizer, slice, step, acc)
+                        fedAny = true
+                    }
+                    pos += step
+                }
+                if (pos < rawPcm.size) {
+                    val rem = rawPcm.copyOfRange(pos, rawPcm.size)
+                    feedRecognizerChunk(recognizer, rem, rem.size, acc)
+                    fedAny = true
+                }
+                if (fedAny) {
+                    acc.consume(recognizer.finalResult)
+                }
+                recognizer.reset()
+                acc.build()
+            } catch (_: Exception) {
+                Triple("", null, 0)
+            }
+        }
+
         data class EnrollmentRecording(
             val sample: VoiceprintManager.EnrollmentSample,
             val wavBytes: ByteArray,
@@ -330,21 +421,22 @@ class PassiveVoiceCaptureEngine(
         )
 
         /**
-         * Records one natural enrollment phrase (~1s..5.5s) from the device mic and extracts
+         * Records one natural enrollment phrase (~1s..7s) from the device mic and extracts
          * its 128-dim Vosk speaker x-vector, pitch (F0), WAV audio, and phonetic hint.
          */
         fun recordEnrollmentPhrase(
             context: Context,
             isCancelled: () -> Boolean,
-            onProgress: (status: String, levelPct: Int) -> Unit,
-            minSpkFrames: Int = 75,
-            minSpokenMs: Long = 1400L
+            finishRequested: () -> Boolean = { false },
+            onProgress: (status: String, levelPct: Int, startedSpeech: Boolean) -> Unit,
+            minSpkFrames: Int = 55,
+            minSpokenMs: Long = 1800L
         ): Result<EnrollmentRecording> {
             val appCtx = context.applicationContext
             val dirs = ensureModelsDownloadedSync(
                 context = appCtx,
                 isCancelled = isCancelled,
-                onProgress = { msg -> onProgress(msg, 0) }
+                onProgress = { msg -> onProgress(msg, 0, false) }
             ) ?: return Result.failure(IOException("Offline voice models download nahi ho sake (internet check karein)."))
 
             val (asrDir, spkDir) = dirs
@@ -356,7 +448,7 @@ class PassiveVoiceCaptureEngine(
             var ns: NoiseSuppressor? = null
 
             return try {
-                onProgress("Engine ready ho raha hai...", 0)
+                onProgress("Engine ready ho raha hai...", 0, false)
                 model = Model(asrDir.absolutePath)
                 spkModel = SpeakerModel(spkDir.absolutePath)
                 recognizer = Recognizer(model, SAMPLE_RATE.toFloat()).apply {
@@ -394,62 +486,66 @@ class PassiveVoiceCaptureEngine(
                 val chunk = ByteArray(CHUNK_BYTES)
                 val preRoll = ArrayDeque<ByteArray>()
                 val pcmOut = ByteArrayOutputStream()
+                val spkAccumulator = SpkAccumulator()
                 var startedSpeech = false
                 var speechStartMs = 0L
                 var lastVoiceMs = 0L
                 val loopStartMs = System.currentTimeMillis()
-                var noiseFloor = 380.0
+                var noiseFloor = 260.0
                 var onsetCount = 0
 
                 activeRecord.startRecording()
-                onProgress("Ab bolein (2-4 second)...", 0)
+                onProgress("Ab bolein (2-4 second)...", 0, false)
 
                 while (!isCancelled()) {
                     val now = System.currentTimeMillis()
-                    if (!startedSpeech && (now - loopStartMs) > 9000L) {
+                    if (!startedSpeech && (now - loopStartMs) > 10_000L) {
                         return Result.failure(IOException("Koi aawaz nahi sunai di — kripya mic ke paas bolein."))
                     }
-                    if (startedSpeech && (now - speechStartMs) > 6500L) break
+                    if (startedSpeech && ((now - speechStartMs) > 7500L || (finishRequested() && (now - speechStartMs) >= 900L))) {
+                        break
+                    }
 
                     val read = activeRecord.read(chunk, 0, chunk.size)
                     if (read <= 0) break
 
                     val rms = VoiceprintManager.computePcmRms(chunk, read)
-                    val levelPct = ((rms / 3500.0) * 100.0).toInt().coerceIn(0, 100)
+                    val levelPct = ((rms / 3200.0) * 100.0).toInt().coerceIn(0, 100)
 
                     if (!startedSpeech) {
-                        noiseFloor = noiseFloor * 0.94 + rms * 0.06
-                        val onsetThr = maxOf(520.0, noiseFloor * 2.1)
+                        noiseFloor = (noiseFloor * 0.94 + rms * 0.06).coerceIn(140.0, 540.0)
+                        val onsetThr = maxOf(380.0, noiseFloor * 1.85)
                         preRoll.addLast(chunk.copyOf(read))
                         while (preRoll.size > PRE_ROLL_FRAMES) preRoll.removeFirst()
 
                         if (rms >= onsetThr) {
                             onsetCount++
-                            if (onsetCount >= ONSET_FRAMES_REQUIRED) {
+                            if (onsetCount >= 3) {
                                 startedSpeech = true
                                 speechStartMs = now
                                 lastVoiceMs = now
                                 for (pf in preRoll) {
                                     pcmOut.write(pf)
-                                    recognizer.acceptWaveForm(pf, pf.size)
+                                    feedRecognizerChunk(recognizer, pf, pf.size, spkAccumulator)
                                 }
                                 preRoll.clear()
-                                onProgress("Sun raha hoon...", levelPct)
+                                onProgress("Sun raha hoon...", levelPct, true)
                             }
                         } else {
                             onsetCount = 0
-                            onProgress("Ab bolein...", levelPct)
+                            onProgress("Ab bolein...", levelPct, false)
                         }
                     } else {
                         pcmOut.write(chunk, 0, read)
-                        recognizer.acceptWaveForm(chunk, read)
-                        val offsetThr = maxOf(340.0, noiseFloor * 1.45)
+                        feedRecognizerChunk(recognizer, chunk, read, spkAccumulator)
+                        val offsetThr = maxOf(220.0, minOf(noiseFloor * 1.25, 420.0))
                         if (rms >= offsetThr) {
                             lastVoiceMs = now
                         }
-                        onProgress("Recording voiceprint...", levelPct)
+                        val secStr = "%.1f".format((now - speechStartMs) / 1000.0)
+                        onProgress("Recording (${secStr}s)...", levelPct, true)
                         val spokenSoFar = now - speechStartMs
-                        if (spokenSoFar >= minSpokenMs && (now - lastVoiceMs) >= 850L) {
+                        if (spokenSoFar >= minSpokenMs && (now - lastVoiceMs) >= 1350L) {
                             break
                         }
                     }
@@ -457,14 +553,26 @@ class PassiveVoiceCaptureEngine(
 
                 if (isCancelled()) return Result.failure(IOException("Cancelled"))
 
-                val (voskText, spkVec, spkFrames) = parseVoskJson(recognizer.finalResult)
+                spkAccumulator.consume(recognizer.finalResult)
+                var (voskText, spkVec, spkFrames) = spkAccumulator.build()
+                val rawPcm = pcmOut.toByteArray()
+
+                if (spkVec == null || spkVec.isEmpty() || spkFrames < minSpkFrames) {
+                    val (denseText, denseVec, denseFrames) = extractDenseSpkFallback(recognizer, rawPcm, noiseFloor)
+                    if (denseVec != null && denseVec.isNotEmpty() && denseFrames > spkFrames) {
+                        spkVec = denseVec
+                        spkFrames = denseFrames
+                        if (voskText.isBlank()) voskText = denseText
+                    }
+                }
+
                 if (spkVec == null || spkVec.isEmpty() || spkFrames < minSpkFrames) {
                     return Result.failure(
                         IOException("Sample bahut chhota ya unclear tha (frames=$spkFrames). Thoda clear 2-3 sec bolein.")
                     )
                 }
 
-                val cleanPcm = VoiceprintManager.trimTrailingSilencePcm(pcmOut.toByteArray())
+                val cleanPcm = VoiceprintManager.trimTrailingSilencePcm(rawPcm)
                 val pitchHz = VoiceprintManager.extractPcmPitchHz(cleanPcm)
                 val wav = VoiceprintManager.pcm16ToWav(cleanPcm, SAMPLE_RATE)
                 Result.success(
@@ -508,7 +616,14 @@ class PassiveVoiceCaptureEngine(
     private var pausedForExecution = false
 
     @Volatile
+    private var dispatchInFlight = false
+
+    @Volatile
     var forceForwardForChallenge = false
+
+    fun setDispatchInFlight(inFlight: Boolean) {
+        dispatchInFlight = inFlight
+    }
 
     @Volatile
     private var released = false
@@ -704,13 +819,15 @@ class PassiveVoiceCaptureEngine(
         val chunk = ByteArray(CHUNK_BYTES)
         val preRoll = ArrayDeque<ByteArray>()
         val utterancePcm = ByteArrayOutputStream()
+        var spkAccumulator = SpkAccumulator()
 
         var inSpeech = false
         var onsetFrames = 0
         var lastVoiceMs = 0L
         var activeSpeechMs = 0L
         var peakRms = 0.0
-        var noiseFloorRms = 360.0
+        var quietFloorRms = 180.0
+        var consecutiveZeroFrames = 0
 
         return try {
             recognizer.reset()
@@ -737,12 +854,13 @@ class PassiveVoiceCaptureEngine(
                 if (readBytes < 0) break
                 if (readBytes == 0) continue
 
-                if (SpeakerHelper.isAnySpeaking()) {
+                if (SpeakerHelper.isAnySpeaking() || dispatchInFlight) {
                     if (inSpeech) {
                         inSpeech = false
                         onsetFrames = 0
                         activeSpeechMs = 0L
                         utterancePcm.reset()
+                        spkAccumulator = SpkAccumulator()
                         recognizer.reset()
                     }
                     preRoll.clear()
@@ -751,10 +869,24 @@ class PassiveVoiceCaptureEngine(
 
                 val now = System.currentTimeMillis()
                 val rms = VoiceprintManager.computePcmRms(chunk, readBytes)
+                if (rms < 0.5) {
+                    consecutiveZeroFrames++
+                    if (consecutiveZeroFrames >= 120) {
+                        JarvisLogStore.log("VOICE_ENGINE_WARN", "Mic stream muted (digital zero); restarting AudioRecord.")
+                        break
+                    }
+                } else {
+                    consecutiveZeroFrames = 0
+                }
 
                 if (!inSpeech) {
-                    noiseFloorRms = (noiseFloorRms * 0.96 + rms * 0.04).coerceIn(180.0, 2600.0)
-                    val onsetThreshold = maxOf(440.0, noiseFloorRms * 2.15)
+                    // Track true quiet ambient floor cleanly — NEVER climb high due to loud Reel music!
+                    quietFloorRms = if (rms < quietFloorRms * 1.4) {
+                        (quietFloorRms * 0.88 + rms * 0.12).coerceIn(85.0, 460.0)
+                    } else {
+                        (quietFloorRms * 0.992 + minOf(rms, 550.0) * 0.008).coerceIn(85.0, 460.0)
+                    }
+                    val onsetThreshold = maxOf(255.0, quietFloorRms * 1.50).coerceAtMost(660.0)
 
                     preRoll.addLast(chunk.copyOf(readBytes))
                     while (preRoll.size > PRE_ROLL_FRAMES) preRoll.removeFirst()
@@ -767,10 +899,11 @@ class PassiveVoiceCaptureEngine(
                             lastVoiceMs = now
                             activeSpeechMs = (onsetFrames * 32L)
                             utterancePcm.reset()
+                            spkAccumulator = SpkAccumulator()
                             recognizer.reset()
                             for (pf in preRoll) {
                                 utterancePcm.write(pf)
-                                recognizer.acceptWaveForm(pf, pf.size)
+                                feedRecognizerChunk(recognizer, pf, pf.size, spkAccumulator)
                             }
                             preRoll.clear()
                         }
@@ -783,32 +916,40 @@ class PassiveVoiceCaptureEngine(
 
                 // Inside active speech utterance
                 utterancePcm.write(chunk, 0, readBytes)
-                val voskFinal = recognizer.acceptWaveForm(chunk, readBytes)
+                val voskFinal = feedRecognizerChunk(recognizer, chunk, readBytes, spkAccumulator)
                 if (rms > peakRms) peakRms = rms
 
-                val offsetThreshold = maxOf(320.0, noiseFloorRms * 1.5)
+                val offsetThreshold = maxOf(190.0, quietFloorRms * 1.22).coerceAtMost(480.0)
                 if (rms >= offsetThreshold) {
                     lastVoiceMs = now
                     activeSpeechMs += (readBytes / BYTES_PER_MS).toLong()
                 }
 
+                val isMediaNow = try {
+                    audioManager.isMusicActive
+                } catch (_: Exception) {
+                    false
+                }
+                val maxCapMs = if (isMediaNow) MAX_UTTERANCE_MEDIA_MS else MAX_UTTERANCE_MS
                 val totalMs = (utterancePcm.size() / BYTES_PER_MS).toLong()
                 val silenceMs = now - lastVoiceMs
-                val endDetected = (totalMs >= (MIN_UTTERANCE_MS + 200L) && silenceMs >= END_SILENCE_MS) ||
-                    (voskFinal && totalMs >= 850L && silenceMs >= 320L) ||
-                    totalMs >= MAX_UTTERANCE_MS
+                val endDetected = (totalMs >= (MIN_UTTERANCE_MS + 140L) && silenceMs >= END_SILENCE_MS) ||
+                    (voskFinal && totalMs >= 580L && silenceMs >= 220L) ||
+                    totalMs >= maxCapMs
 
                 if (endDetected) {
-                    val rawPcm = VoiceprintManager.trimTrailingSilencePcm(utterancePcm.toByteArray())
-                    val finalResultJson = recognizer.finalResult
+                    val rawAllPcm = utterancePcm.toByteArray()
+                    val rawPcm = VoiceprintManager.trimSilenceEdgesPcm(rawAllPcm)
+                    spkAccumulator.consume(recognizer.finalResult)
                     recognizer.reset()
+                    var (voskText, spkVec, spkFrames) = spkAccumulator.build()
+                    spkAccumulator = SpkAccumulator()
                     utterancePcm.reset()
                     inSpeech = false
                     onsetFrames = 0
                     val capturedActiveMs = activeSpeechMs
                     activeSpeechMs = 0L
 
-                    val (voskText, spkVec, spkFrames) = parseVoskJson(finalResultJson)
                     val capturedMs = (rawPcm.size / BYTES_PER_MS).toLong()
                     val isMediaPlaying = try {
                         audioManager.isMusicActive
@@ -817,10 +958,20 @@ class PassiveVoiceCaptureEngine(
                     }
 
                     val hadMeaningfulSignal = capturedMs >= MIN_UTTERANCE_MS &&
-                        capturedActiveMs >= 260L &&
-                        peakRms >= 550.0
+                        capturedActiveMs >= 190L &&
+                        peakRms >= 350.0
                     peakRms = 0.0
                     if (!hadMeaningfulSignal) continue
+
+                    // Recover full x-vector cleanly if a mid-command pause fragmented Vosk segments
+                    if ((spkVec == null || spkFrames < 50) && capturedActiveMs >= 520L) {
+                        val (denseText, denseVec, denseFrames) = extractDenseSpkFallback(recognizer, rawPcm, quietFloorRms)
+                        if (denseVec != null && denseVec.isNotEmpty() && denseFrames > spkFrames) {
+                            spkVec = denseVec
+                            spkFrames = denseFrames
+                            if (voskText.isBlank()) voskText = denseText
+                        }
+                    }
 
                     val verification = VoiceprintManager.verifySpeaker(
                         context = appContext,
@@ -863,10 +1014,8 @@ class PassiveVoiceCaptureEngine(
                         "Forward tier=${verification.tier} (${verification.reason}) sim=${"%.2f".format(verification.similarity)} dur=${capturedMs}ms wav=${wavBytes.size / 1024}KB media=$isMediaPlaying vosk='$voskText'"
                     )
 
-                    // Pause passive dispatching while Gemini + tool execution run so next utterance stays clean
-                    pausedForExecution = true
-                    captureActive = false
-                    desiredListening = false
+                    // Gate duplicate dispatches while AudioRecord stays warm in memory (0ms reopen latency!)
+                    dispatchInFlight = true
                     val captured = CapturedUtterance(
                         wavBytes = wavBytes,
                         voskHint = voskText,
@@ -874,12 +1023,7 @@ class PassiveVoiceCaptureEngine(
                         durationMs = capturedMs,
                         isMediaPlaying = isMediaPlaying
                     )
-                    mainHandler.post {
-                        if (!released) {
-                            onUtteranceReady(captured)
-                        }
-                    }
-                    break
+                    onUtteranceReady(captured)
                 }
             }
         } catch (e: Exception) {

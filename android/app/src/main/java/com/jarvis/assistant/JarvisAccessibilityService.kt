@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.telecom.TelecomManager
 import android.util.Log
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -222,11 +223,25 @@ class JarvisAccessibilityService : AccessibilityService() {
      * Aggregates child labels into clickable rows, hides off-screen ViewPager/feed noise,
      * and caches the exact snapshot so tap_tag/type_tag always act on the inspected UI nodes.
      */
+    private fun getDynamicScreenRect(): Rect {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val wm = getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+                val bounds = wm?.maximumWindowMetrics?.bounds
+                if (bounds != null && bounds.width() > 0 && bounds.height() > 0) {
+                    return Rect(bounds)
+                }
+            } catch (_: Exception) {
+            }
+        }
+        val dm = resources.displayMetrics
+        return Rect(0, 0, dm.widthPixels.coerceAtLeast(1), dm.heightPixels.coerceAtLeast(1))
+    }
+
     fun dumpScreenElements(): List<ScreenElement> {
         val root = rootInActiveWindow ?: return emptyList()
-        val dm = resources.displayMetrics
-        val screenRect = Rect(0, 0, dm.widthPixels, dm.heightPixels)
-        val screenArea = dm.widthPixels.toLong() * dm.heightPixels.toLong()
+        val screenRect = getDynamicScreenRect()
+        val screenArea = screenRect.width().toLong() * screenRect.height().toLong()
         val elements = mutableListOf<ScreenElement>()
         var counter = 1
 
@@ -423,7 +438,7 @@ class JarvisAccessibilityService : AccessibilityService() {
      */
     suspend fun pollForNode(
         timeoutMs: Long = 3500,
-        intervalMs: Long = 250,
+        intervalMs: Long = 60,
         predicate: (AccessibilityNodeInfo) -> Boolean
     ): AccessibilityNodeInfo? {
         val startTime = System.currentTimeMillis()
@@ -493,8 +508,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
 
         // Gesture Tap fallback ONLY inside visible screen bounds
-        val dm = resources.displayMetrics
-        val screenRect = Rect(0, 0, dm.widthPixels, dm.heightPixels)
+        val screenRect = getDynamicScreenRect()
         if (bounds.width() > 0 && bounds.height() > 0 && Rect.intersects(bounds, screenRect)) {
             val cx = bounds.centerX().toFloat()
             val cy = bounds.centerY().toFloat()
@@ -530,8 +544,7 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         val bounds = Rect()
         targetNode.getBoundsInScreen(bounds)
-        val dm = resources.displayMetrics
-        val screenRect = Rect(0, 0, dm.widthPixels, dm.heightPixels)
+        val screenRect = getDynamicScreenRect()
         val resId = targetNode.viewIdResourceName?.substringAfterLast('/') ?: ""
         val txt = node.text?.toString()?.take(35) ?: ""
         val cd = node.contentDescription?.toString()?.take(35) ?: ""
@@ -550,8 +563,8 @@ class JarvisAccessibilityService : AccessibilityService() {
      * Swipes horizontally inside a live container's bounds (e.g. horizontal Story tray).
      */
     suspend fun swipeHorizontalInRect(rect: Rect, toLeft: Boolean = true): Boolean {
-        val dm = resources.displayMetrics
-        if (rect.width() < (dm.widthPixels * 0.10f).toInt() || rect.height() < (dm.heightPixels * 0.01f).toInt()) return false
+        val screenRect = getDynamicScreenRect()
+        if (rect.width() < (screenRect.width() * 0.10f).toInt() || rect.height() < (screenRect.height() * 0.01f).toInt()) return false
         val cy = rect.centerY().toFloat()
         val startX = if (toLeft) rect.right - rect.width() * 0.15f else rect.left + rect.width() * 0.15f
         val endX = if (toLeft) rect.left + rect.width() * 0.15f else rect.right - rect.width() * 0.15f
@@ -648,16 +661,16 @@ class JarvisAccessibilityService : AccessibilityService() {
      * Swipes / scrolls the screen up or down via hardware gesture (for reels, feeds, web).
      */
     fun scroll(direction: String = "down"): Boolean {
-        val displayMetrics = resources.displayMetrics
-        val width = displayMetrics.widthPixels.toFloat()
-        val height = displayMetrics.heightPixels.toFloat()
+        val screenRect = getDynamicScreenRect()
+        val width = screenRect.width().toFloat()
+        val height = screenRect.height().toFloat()
 
         val startX = width / 2f
         val endX = width / 2f
         val (startY, endY) = if (direction.lowercase() == "up") {
-            Pair(height * 0.3f, height * 0.75f)
+            Pair(height * 0.22f, height * 0.78f)
         } else {
-            Pair(height * 0.75f, height * 0.3f)
+            Pair(height * 0.78f, height * 0.22f)
         }
 
         val scrollPath = Path().apply {
@@ -665,10 +678,37 @@ class JarvisAccessibilityService : AccessibilityService() {
             lineTo(endX, endY)
         }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(scrollPath, 0, 300))
+            .addStroke(GestureDescription.StrokeDescription(scrollPath, 0, 195))
             .build()
         val ok = dispatchGesture(gesture, null, null)
         JarvisLogStore.log("ACC_SCROLL", "scroll($direction) ($startX,$startY -> $endX,$endY) ok=$ok")
+        return ok
+    }
+
+    /**
+     * Crisp full-page fling scroll tailored for ViewPager / Reels / Shorts (awaits gesture completion).
+     */
+    suspend fun flingScroll(direction: String = "down"): Boolean {
+        val screenRect = getDynamicScreenRect()
+        val width = screenRect.width().toFloat()
+        val height = screenRect.height().toFloat()
+
+        val cx = width / 2f
+        val (startY, endY) = if (direction.lowercase() == "up") {
+            Pair(height * 0.22f, height * 0.78f)
+        } else {
+            Pair(height * 0.78f, height * 0.22f)
+        }
+
+        val flingPath = Path().apply {
+            moveTo(cx, startY)
+            lineTo(cx, endY)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(flingPath, 0L, 190L))
+            .build()
+        val ok = dispatchGestureAwait(gesture)
+        JarvisLogStore.log("ACC_FLING", "flingScroll($direction) ($cx,$startY -> $cx,$endY) ok=$ok")
         return ok
     }
 
@@ -681,9 +721,9 @@ class JarvisAccessibilityService : AccessibilityService() {
         upStartFraction: Float = 0.34f,
         upEndFraction: Float = 0.70f
     ): Boolean {
-        val displayMetrics = resources.displayMetrics
-        val width = displayMetrics.widthPixels.toFloat()
-        val height = displayMetrics.heightPixels.toFloat()
+        val screenRect = getDynamicScreenRect()
+        val width = screenRect.width().toFloat()
+        val height = screenRect.height().toFloat()
 
         val cx = width / 2f
         val (startY, endY) = if (direction.lowercase() == "up") {
@@ -732,6 +772,16 @@ class JarvisAccessibilityService : AccessibilityService() {
      */
     fun performHome(): Boolean {
         return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    /**
+     * Instant OS-level Screen Lock (Android 9+ / API 28+, 0 UI hops, ~10ms).
+     */
+    fun lockScreen(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        val ok = performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+        JarvisLogStore.log("ACC_LOCK", "lockScreen() ok=$ok")
+        return ok
     }
 
     /**
@@ -982,32 +1032,38 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Wakes the screen via PowerManager and performs a dynamic vertical swipe-up to reveal lock prompt.
+     * Wakes the screen via PowerManager and performs a fast dynamic vertical swipe-up to reveal lock prompt.
      */
     suspend fun wakeScreenAndSwipeUp(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
         try {
-            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
-            @Suppress("DEPRECATION")
-            val wakeLock = pm?.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "Jarvis:ScreenUnlockWakeLock"
-            )
-            wakeLock?.acquire(4000L)
+            if (pm != null && !pm.isInteractive) {
+                @Suppress("DEPRECATION")
+                val wakeLock = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "Jarvis:ScreenUnlockWakeLock"
+                )
+                wakeLock?.acquire(3000L)
+                val waitStart = System.currentTimeMillis()
+                while (!pm.isInteractive && System.currentTimeMillis() - waitStart < 450L) {
+                    delay(25)
+                }
+                delay(75)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "WakeLock error: ${e.message}")
         }
 
-        delay(250)
-        val displayMetrics = resources.displayMetrics
-        val w = displayMetrics.widthPixels.toFloat()
-        val h = displayMetrics.heightPixels.toFloat()
+        val screenRect = getDynamicScreenRect()
+        val w = screenRect.width().toFloat()
+        val h = screenRect.height().toFloat()
 
         val path = Path().apply {
-            moveTo(w / 2f, h * 0.85f)
-            lineTo(w / 2f, h * 0.20f)
+            moveTo(w / 2f, h * 0.78f)
+            lineTo(w / 2f, h * 0.22f)
         }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 260))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 175))
             .build()
         return dispatchGestureAwait(gesture)
     }
@@ -1025,9 +1081,15 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     /**
      * Dynamically locates the 3x3 pattern dot coordinates from live Accessibility nodes across ALL windows.
-     * ZERO static screen percentages! Works across OnePlus, Samsung, Xiaomi, Pixel, LockScreen & AppLock.
+     * ZERO static screen sizes! Works across OnePlus, Samsung, Xiaomi, Pixel, LockScreen & AppLock.
      */
     fun findDynamicPatternPoints(): List<Pair<Float, Float>>? {
+        val screenRect = getDynamicScreenRect()
+        val minScreenDim = minOf(screenRect.width(), screenRect.height()).coerceAtLeast(320)
+        val dotMinSize = (minScreenDim * 0.015f).toInt().coerceAtLeast(8)
+        val dotMaxSize = (minScreenDim * 0.35f).toInt()
+        val boxMinSize = (minScreenDim * 0.16f).toInt()
+
         // Strategy 1: Parent pattern container exposing 9 child/virtual dot nodes
         val containerWith9Dots = findNodeAcrossWindows(resolveClickableParent = false) { node ->
             val cls = node.className?.toString()?.lowercase() ?: ""
@@ -1041,7 +1103,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 val c = node.getChild(i) ?: continue
                 val r = Rect()
                 c.getBoundsInScreen(r)
-                if (r.width() in 20..400 && r.height() in 20..400) validChildren++
+                if (r.width() in dotMinSize..dotMaxSize && r.height() in dotMinSize..dotMaxSize) validChildren++
             }
             validChildren == 9
         }
@@ -1052,7 +1114,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 val c = containerWith9Dots.getChild(i) ?: continue
                 val r = Rect()
                 c.getBoundsInScreen(r)
-                if (r.width() in 20..400 && r.height() in 20..400) dotRects.add(r)
+                if (r.width() in dotMinSize..dotMaxSize && r.height() in dotMinSize..dotMaxSize) dotRects.add(r)
             }
             if (dotRects.size == 9) {
                 val sortedByY = dotRects.sortedBy { it.centerY() }
@@ -1077,7 +1139,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 if (cls.contains("pattern") || resId.contains("pattern") || cd.contains("pattern")) {
                     val r = Rect()
                     node.getBoundsInScreen(r)
-                    if (r.width() >= 180 && r.height() >= 180) {
+                    if (r.width() >= boxMinSize && r.height() >= boxMinSize) {
                         val minDim = min(r.width(), r.height()).toFloat()
                         val maxDim = maxOf(r.width(), r.height()).toFloat()
                         val squareness = minDim / maxDim.coerceAtLeast(1f)
@@ -1162,6 +1224,10 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     private fun collectDynamicDigitNodes(): Map<Char, AccessibilityNodeInfo> {
+        val screenRect = getDynamicScreenRect()
+        val minScreenDim = minOf(screenRect.width(), screenRect.height()).coerceAtLeast(320)
+        val keyMinSize = (minScreenDim * 0.02f).toInt().coerceAtLeast(10)
+        val keyMaxSize = (minScreenDim * 0.55f).toInt()
         val bestCandidates = mutableMapOf<Char, Pair<Int, AccessibilityNodeInfo>>()
         val wordToDigit = mapOf(
             "zero" to '0', "one" to '1', "two" to '2', "three" to '3', "four" to '4',
@@ -1177,7 +1243,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 val bounds = Rect()
                 node.getBoundsInScreen(bounds)
 
-                if (bounds.width() in 25..600 && bounds.height() in 25..600) {
+                if (bounds.width() in keyMinSize..keyMaxSize && bounds.height() in keyMinSize..keyMaxSize) {
                     val resId = node.viewIdResourceName?.lowercase() ?: ""
                     if (ignoreIdWords.none { resId.contains(it) }) {
                         val rawText = node.text?.toString()?.trim() ?: ""
@@ -1256,6 +1322,8 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     private fun findKeypadContainerBounds(): Rect? {
+        val screenRect = getDynamicScreenRect()
+        val keypadMinSize = (minOf(screenRect.width(), screenRect.height()) * 0.22f).toInt().coerceAtLeast(100)
         val keypadNode = findNodeAcrossWindows(resolveClickableParent = false) { node ->
             val cls = node.className?.toString()?.lowercase() ?: ""
             val resId = node.viewIdResourceName?.lowercase() ?: ""
@@ -1265,12 +1333,12 @@ class JarvisAccessibilityService : AccessibilityService() {
             if (!isNumpad) return@findNodeAcrossWindows false
             val r = Rect()
             node.getBoundsInScreen(r)
-            r.width() >= 250 && r.height() >= 250
+            r.width() >= keypadMinSize && r.height() >= keypadMinSize
         } ?: return null
 
         val box = Rect()
         keypadNode.getBoundsInScreen(box)
-        return if (box.width() >= 250 && box.height() >= 250) box else null
+        return if (box.width() >= keypadMinSize && box.height() >= keypadMinSize) box else null
     }
 
     /**
@@ -1287,9 +1355,12 @@ class JarvisAccessibilityService : AccessibilityService() {
             for (ch in pin) {
                 val node = digitNodes[ch] ?: return false
                 tapNodeDynamically(node)
-                delay(140)
+                delay(40)
             }
-            delay(350)
+            val unlockWaitStart = System.currentTimeMillis()
+            while (stillLockedCheck() && System.currentTimeMillis() - unlockWaitStart < 280L) {
+                delay(40)
+            }
             if (stillLockedCheck()) {
                 val enterBtn = findNodeAcrossWindows(resolveClickableParent = true) { n ->
                     val res = n.viewIdResourceName?.lowercase() ?: ""
@@ -1314,7 +1385,10 @@ class JarvisAccessibilityService : AccessibilityService() {
             inputField.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
             val typed = typeText(inputField, pin)
             if (typed) {
-                delay(300)
+                val unlockWaitStart = System.currentTimeMillis()
+                while (stillLockedCheck() && System.currentTimeMillis() - unlockWaitStart < 240L) {
+                    delay(40)
+                }
                 if (stillLockedCheck()) {
                     val submitBtn = findNodeAcrossWindows(resolveClickableParent = true) { n ->
                         val res = n.viewIdResourceName?.lowercase() ?: ""
@@ -1332,7 +1406,7 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 3. Fallback ONLY from live keypad container node Rect (never hardcoded screen %)
+        // 3. Fallback ONLY from live keypad container node Rect (never hardcoded screen sizes)
         val keypadBox = findKeypadContainerBounds()
         if (keypadBox != null && pin.all { it.isDigit() }) {
             Log.d(TAG, "Entering PIN via live keypad container bounds: $keypadBox")
@@ -1354,12 +1428,15 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
             for (ch in pin) {
                 val pt = digitCoordInBox(ch)
-                tapCoordinatesAwait(pt.first, pt.second, 50L)
-                delay(140)
+                tapCoordinatesAwait(pt.first, pt.second, 45L)
+                delay(45)
             }
-            delay(350)
+            val unlockWaitStart = System.currentTimeMillis()
+            while (stillLockedCheck() && System.currentTimeMillis() - unlockWaitStart < 280L) {
+                delay(40)
+            }
             if (stillLockedCheck()) {
-                tapCoordinatesAwait(keypadBox.left + colW * 2.5f, keypadBox.top + rowH * 3.5f, 50L)
+                tapCoordinatesAwait(keypadBox.left + colW * 2.5f, keypadBox.top + rowH * 3.5f, 45L)
             }
             return true
         }

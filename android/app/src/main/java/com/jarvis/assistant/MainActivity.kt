@@ -1238,7 +1238,12 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss()
         }
 
+        var finishCaptureSignal = AtomicBoolean(false)
+        var recordingActive = false
+
         fun updateStepUi(justSavedCount: Int = 0) {
+            recordingActive = false
+            finishCaptureSignal = AtomicBoolean(false)
             tvStep.text = styleTitles[stepIdx]
             tvPhrase.text = stylePrompts[stepIdx]
             if (justSavedCount > 0) {
@@ -1282,27 +1287,36 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun startCurrentCapture() {
+            recordingActive = true
+            finishCaptureSignal = AtomicBoolean(false)
             btnAction.isEnabled = false
-            btnAction.text = "Sun raha hoon..."
+            btnAction.text = "Taiyaar ho raha hai..."
             tvStatus.setTextColor(cyan)
             tvStatus.text = "Taiyaar ho raha hai..."
 
+            val captureFinishRef = finishCaptureSignal
             val isSecretStep = (stepIdx == 4)
             CoroutineScope(Dispatchers.IO).launch {
                 val res = PassiveVoiceCaptureEngine.recordEnrollmentPhrase(
                     context = this@MainActivity,
                     isCancelled = { cancelled.get() || isFinishing || isDestroyed },
-                    onProgress = { status, levelPct ->
+                    finishRequested = { captureFinishRef.get() },
+                    onProgress = { status, levelPct, startedSpeech ->
                         runOnUiThread {
                             if (!cancelled.get()) {
                                 tvStatus.text = if (levelPct > 0) "$status (Mic level: $levelPct%)" else status
+                                if (recordingActive && startedSpeech && btnAction.text != "✅ Bol Diya — Done") {
+                                    btnAction.text = "✅ Bol Diya — Done"
+                                    btnAction.isEnabled = true
+                                }
                             }
                         }
                     },
-                    minSpkFrames = if (isSecretStep) 45 else 75,
-                    minSpokenMs = if (isSecretStep) 900L else 1400L
+                    minSpkFrames = if (isSecretStep) 40 else 50,
+                    minSpokenMs = if (isSecretStep) 900L else 1800L
                 )
                 withContext(Dispatchers.Main) {
+                    recordingActive = false
                     if (cancelled.get() || isFinishing || isDestroyed) return@withContext
                     res.onSuccess { recording ->
                         if (!isSecretStep) {
@@ -1313,6 +1327,7 @@ class MainActivity : AppCompatActivity() {
                             // Verify typed Secret Code == spoken Secret Code AND voice consistency against Samples 1..4
                             tvStatus.setTextColor(cyan)
                             tvStatus.text = "Typed code aur voice match check ho raha hai..."
+                            btnAction.isEnabled = false
                             commandExecutor.verifySecretCodeAudio(
                                 wavBytes = recording.wavBytes,
                                 expectedSecretCode = typedSecretCode,
@@ -1368,7 +1383,15 @@ class MainActivity : AppCompatActivity() {
             updateStepUi()
         }
 
-        btnAction.setOnClickListener { startCurrentCapture() }
+        btnAction.setOnClickListener {
+            if (recordingActive) {
+                finishCaptureSignal.set(true)
+                btnAction.isEnabled = false
+                btnAction.text = "Save ho raha hai..."
+            } else {
+                startCurrentCapture()
+            }
+        }
         dialog.show()
     }
 

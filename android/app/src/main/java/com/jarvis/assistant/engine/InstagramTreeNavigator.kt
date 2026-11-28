@@ -1128,7 +1128,26 @@ object InstagramTreeNavigator {
         val h = service.resources.displayMetrics.heightPixels
         val lower = rawInstruction.lowercase()
         val wantsNextScroll = lower.contains("next") || lower.contains("scroll") ||
-            lower.contains("agla") || lower.contains("dusra") || lower.contains("change") || lower.contains("neeche")
+            lower.contains("agla") || lower.contains("agli") || lower.contains("dusra") || lower.contains("change") || lower.contains("neeche")
+
+        val entryEls = service.dumpScreenElements()
+        val hasReelPlayer = entryEls.any {
+            it.viewId.contains("clips_video_container", ignoreCase = true) ||
+                it.viewId.contains("clips_media_component", ignoreCase = true)
+        }
+        val hasCommentsOpen = entryEls.any {
+            it.viewId.contains("comment_thread_edittext", ignoreCase = true) ||
+                it.viewId.contains("comment_composer", ignoreCase = true)
+        }
+        if (hasReelPlayer && wantsNextScroll) {
+            if (hasCommentsOpen) {
+                service.performBack()
+                delay(160)
+            }
+            service.flingScroll("down")
+            steps.add("Fling-scrolled to next Reel")
+            return FastNavResult(true, true, "", steps)
+        }
 
         var reelsTab = findBottomNavTab(service, h, listOf("reels", "clips"), listOf("clips_tab", "reels_tab"))
         if (reelsTab == null && isInMessagesInbox(service, h)) {
@@ -1144,10 +1163,10 @@ object InstagramTreeNavigator {
             if (!alreadyInReels) {
                 service.tapNodeSingleTouch(reelsTab.node)
                 steps.add("Opened Reels tab")
-                delay(500)
+                delay(450)
             }
             if (wantsNextScroll) {
-                service.scroll("down")
+                service.flingScroll("down")
                 steps.add("Scrolled to next Reel")
                 if (alreadyInReels) {
                     return FastNavResult(true, true, "", steps)

@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Shared command execution engine used by MainActivity, AlwaysOnVoiceService (24/7 background mic),
@@ -33,6 +34,7 @@ class JarvisCommandExecutor(
     private val universalAppAgent = UniversalAppAgent(appContext, systemController, nodeActionEngine)
     private val scheduledTaskManager = ScheduledTaskManager(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile
     var geminiBrain: GeminiBrain = createBrain()
@@ -63,6 +65,15 @@ class JarvisCommandExecutor(
         geminiBrain = createBrain()
     }
 
+    private fun buildScreenContextForBrain(): String {
+        val raw = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
+        return if (AutoUnlockManager.isScreenLockedOrOff(appContext)) {
+            "[DEVICE STATE: Screen is currently LOCKED / OFF. Hardware tools (lock_screen/media/volume/call) and auto-unlockable tools (WhatsApp, calls, apps) are ready.]\n$raw"
+        } else {
+            raw
+        }
+    }
+
     fun executeUserCommand(
         userText: String,
         sourceTag: String = "USER_UI",
@@ -81,7 +92,7 @@ class JarvisCommandExecutor(
         scope.launch {
             try {
                 JarvisLogStore.log("CORE", "Brain: Analyzing with Gemini AI...")
-                val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
+                val screenContext = buildScreenContextForBrain()
                 val decision = geminiBrain.processCommand(clean, screenContext)
                 dispatchDecision(decision)
             } catch (e: Exception) {
@@ -100,11 +111,11 @@ class JarvisCommandExecutor(
         sourceTag: String = "USER_VOICE",
         onFinished: ((ignored: Boolean, transcript: String) -> Unit)? = null
     ) {
-        scope.launch {
+        ioScope.launch {
             var ignored = false
             var transcript = ""
             try {
-                val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
+                val screenContext = buildScreenContextForBrain()
                 val decision = geminiBrain.processAudioCommand(
                     wavBytes = wavBytes,
                     voskHint = voskHint,
@@ -120,7 +131,9 @@ class JarvisCommandExecutor(
                 if (transcript.isNotBlank()) {
                     JarvisLogStore.log(sourceTag, "\"$transcript\"")
                 }
-                dispatchDecision(decision)
+                withContext(Dispatchers.Main) {
+                    dispatchDecision(decision)
+                }
             } catch (e: Exception) {
                 JarvisLogStore.log("EXEC_ERROR", "Audio command failed cleanly: ${e.message}")
             } finally {
@@ -138,9 +151,9 @@ class JarvisCommandExecutor(
         isMediaPlaying: Boolean,
         onResult: (com.jarvis.assistant.brain.GeminiBrain.UnauthorizedAudioEvaluation) -> Unit
     ) {
-        scope.launch {
+        ioScope.launch {
             val res = try {
-                val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
+                val screenContext = buildScreenContextForBrain()
                 geminiBrain.evaluateDoubtOrRejectedAudio(
                     wavBytes = wavBytes,
                     voskHint = voskHint,
@@ -154,7 +167,9 @@ class JarvisCommandExecutor(
                 JarvisLogStore.log("VOICE_GUARD_ERR", "Eval error: ${e.message}")
                 com.jarvis.assistant.brain.GeminiBrain.UnauthorizedAudioEvaluation(false, "", "")
             }
-            onResult(res)
+            withContext(Dispatchers.Main) {
+                onResult(res)
+            }
         }
     }
 
@@ -342,6 +357,11 @@ class JarvisCommandExecutor(
                 JarvisLogStore.log("APP_CONTROL", reply)
                 if (!alreadySpoken) speakerHelper.speak(reply)
             }
+            "lock_screen" -> {
+                val reply = systemController.lockScreen()
+                JarvisLogStore.log("LOCK_SCREEN", if (reply.isNotBlank()) reply else "Locked screen cleanly.")
+                if (!alreadySpoken && reply.isNotBlank()) speakerHelper.speak(reply)
+            }
             "media_control" -> {
                 val action = (args["action"] as? String) ?: "play_pause"
                 val reply = systemController.controlMedia(action)
@@ -406,23 +426,19 @@ class JarvisCommandExecutor(
                 }
             }
             "send_whatsapp_message" -> {
-                runAfterScreenUnlock {
-                    val rec = (args["recipient"] as? String) ?: ""
-                    val msg = (args["message"] as? String) ?: ""
-                    nodeActionEngine.sendWhatsAppMessage(rec, msg) { _, reply ->
-                        JarvisLogStore.log("WHATSAPP", reply)
-                        speakerHelper.speak(reply)
-                    }
+                val rec = (args["recipient"] as? String) ?: ""
+                val msg = (args["message"] as? String) ?: ""
+                nodeActionEngine.sendWhatsAppMessage(rec, msg) { _, reply ->
+                    JarvisLogStore.log("WHATSAPP", reply)
+                    speakerHelper.speak(reply)
                 }
             }
             "whatsapp_call" -> {
-                runAfterScreenUnlock {
-                    val rec = (args["recipient"] as? String) ?: ""
-                    val isVideo = (args["call_type"] as? String)?.lowercase() == "video"
-                    nodeActionEngine.callWhatsApp(rec, isVideo) { _, reply ->
-                        JarvisLogStore.log("WHATSAPP_CALL", reply)
-                        speakerHelper.speak(reply)
-                    }
+                val rec = (args["recipient"] as? String) ?: ""
+                val isVideo = (args["call_type"] as? String)?.lowercase() == "video"
+                nodeActionEngine.callWhatsApp(rec, isVideo) { _, reply ->
+                    JarvisLogStore.log("WHATSAPP_CALL", reply)
+                    speakerHelper.speak(reply)
                 }
             }
             "tap_tag" -> {

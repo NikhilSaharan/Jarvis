@@ -65,6 +65,22 @@ class SystemController(private val context: Context) {
     // LAYER 1: DIRECT ANDROID OS CONTROLS (Zero GUI, Instant 0.001s)
     // ═════════════════════════════════════════════════════════════════
 
+    fun doesPackageMatchAppName(activePkg: String, appName: String): Boolean {
+        val pkgLower = activePkg.lowercase().trim()
+        val q = appName.lowercase().trim()
+        if (pkgLower.isBlank() || q.isBlank()) return false
+        if (knownAppPackages[q]?.lowercase() == pkgLower) return true
+        if (pkgLower.contains(q)) return true
+        return try {
+            val pm = context.packageManager
+            val appInfo = pm.getApplicationInfo(activePkg, 0)
+            val label = pm.getApplicationLabel(appInfo).toString().lowercase()
+            label == q || label.contains(q) || q.contains(label)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /**
      * Enables or disables Do Not Disturb natively via NotificationManager in 0.001s.
      */
@@ -406,31 +422,39 @@ class SystemController(private val context: Context) {
     }
 
     /**
-     * Direct WhatsApp Chat Opener via WhatsApp API deep link.
-     * Optionally pre-fills message text so it appears in the input field automatically!
+     * Direct WhatsApp Chat Opener via native `whatsapp://send` URI (zero AppLinks web-check delay),
+     * falling back cleanly to HTTPS deep link if needed.
      */
     fun openChatWhatsApp(phoneNumber: String, prefillMessage: String = ""): Boolean {
         var cleanNumber = phoneNumber.replace(Regex("[^0-9]"), "")
         if (cleanNumber.length == 10) {
             cleanNumber = "91$cleanNumber"
         }
-        return try {
-            val url = if (prefillMessage.isNotBlank()) {
-                val encoded = Uri.encode(prefillMessage)
+        val encoded = if (prefillMessage.isNotBlank()) Uri.encode(prefillMessage) else ""
+        val uris = if (encoded.isNotBlank()) {
+            listOf(
+                "whatsapp://send?phone=$cleanNumber&text=$encoded",
                 "https://api.whatsapp.com/send?phone=$cleanNumber&text=$encoded"
-            } else {
+            )
+        } else {
+            listOf(
+                "whatsapp://send?phone=$cleanNumber",
                 "https://api.whatsapp.com/send?phone=$cleanNumber"
-            }
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                setPackage("com.whatsapp")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-            true
-        } catch (e: Exception) {
-            Log.e("SystemController", "WhatsApp open error: ${e.message}")
-            false
+            )
         }
+        for (url in uris) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                    setPackage("com.whatsapp")
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                context.startActivity(intent)
+                return true
+            } catch (e: Exception) {
+                Log.w("SystemController", "WhatsApp URI failed ($url): ${e.message}")
+            }
+        }
+        return false
     }
 
     /**
@@ -515,6 +539,16 @@ class SystemController(private val context: Context) {
 
         val nameToSpeak = if (!appName.isNullOrBlank()) appName else "App"
         return "$nameToSpeak band kar diya hai Sir."
+    }
+
+    /**
+     * Instantly locks the phone screen using Android Accessibility GLOBAL_ACTION_LOCK_SCREEN.
+     */
+    fun lockScreen(): String {
+        val service = com.jarvis.assistant.JarvisAccessibilityService.instance
+            ?: return "Screen lock karne ke liye Accessibility Service active chahiye Sir."
+        val ok = service.lockScreen()
+        return if (ok) "" else "Sir, screen lock Android 9+ par hi direct support hota hai."
     }
 
     /**

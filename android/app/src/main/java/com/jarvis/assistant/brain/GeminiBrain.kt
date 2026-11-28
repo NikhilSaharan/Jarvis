@@ -158,7 +158,7 @@ TASK: Listen closely to the attached Hinglish/Hindi/English audio clip and decid
    - If `tier` is "REJECTED": Set `"held_command": null` and generate `"dynamic_speech"` in natural conversational Hinglish stating clearly that their voice does not match Sir's enrolled voice so the command cannot be executed.
 
 TOOLS ALLOWED INSIDE `held_command` (when tier=DOUBT):
-- media_control(action), volume_control(action, percent), answer_call(), end_call(), close_app(app_name), make_phone_call(recipient), whatsapp_call(recipient, call_type), send_whatsapp_message(recipient, message), instagram_send_message(recipient, message), instagram_read_last_message(sender), instagram_watch_story(person), instagram_follow_account(account), instagram_play_chat_reels(sender, count, from_me), instagram_play_reels(next), send_sms(recipient, message), play_youtube(query), open_app(app_name), universal_app_action(app_name, instruction), tap_tag(tag), type_tag(tag, text), scroll_screen(direction), schedule_action(...), sleep_routine(minutes), manage_vip(...), learn_preference(...), set_dnd(enabled), set_brightness(level), set_alarm(hour, minute, message), set_timer(seconds, message)
+- lock_screen(), media_control(action), volume_control(action, percent), answer_call(), end_call(), close_app(app_name), make_phone_call(recipient), whatsapp_call(recipient, call_type), send_whatsapp_message(recipient, message), instagram_send_message(recipient, message), instagram_read_last_message(sender), instagram_watch_story(person), instagram_follow_account(account), instagram_play_chat_reels(sender, count, from_me), instagram_play_reels(next), send_sms(recipient, message), play_youtube(query), open_app(app_name), universal_app_action(app_name, instruction), tap_tag(tag), type_tag(tag, text), scroll_screen(direction), schedule_action(...), sleep_routine(minutes), manage_vip(...), learn_preference(...), set_dnd(enabled), set_brightness(level), set_alarm(hour, minute, message), set_timer(seconds, message)
 
 OUTPUT ONLY RAW JSON:
 {
@@ -381,7 +381,7 @@ OUTPUT ONLY RAW JSON:
         val asyncExecutionTools = setOf(
             "send_whatsapp_message", "whatsapp_call", "make_phone_call", "send_sms",
             "play_youtube", "open_app", "universal_app_action",
-            "media_control", "volume_control",
+            "media_control", "volume_control", "lock_screen",
             "instagram_send_message", "instagram_read_last_message", "instagram_watch_story",
             "instagram_follow_account", "instagram_play_chat_reels", "instagram_play_reels"
         )
@@ -643,7 +643,7 @@ CORE OPERATING PRINCIPLES:
 
 2. CLEAN ACTION EXECUTION (NO ROBOTIC CLICHÉS OR STEP NARRATION):
    - Invoke an action tool ONLY when Sir explicitly gives a direct command or asks to check/perform an in-app action.
-   - For app, calling, messaging, and media tools (universal_app_action, instagram_*, send_whatsapp_message, whatsapp_call, make_phone_call, send_sms, play_youtube):
+   - For app, calling, messaging, screen lock, and media tools (universal_app_action, instagram_*, send_whatsapp_message, whatsapp_call, make_phone_call, send_sms, play_youtube, lock_screen):
      - Set `speech`: null. Never say "Bhej diya" or "Kar diya" before the tool finishes executing!
    - For direct single-action device settings tools (set_dnd, set_brightness, set_alarm, set_timer):
      - Provide a short, natural confirmation in `speech` in everyday Hinglish.
@@ -656,9 +656,10 @@ CORE OPERATING PRINCIPLES:
    - answer_call(): Answers, accepts, or picks up an incoming call (phone or WhatsApp).
    - end_call(): Cuts, ends, or disconnects an ongoing call, or declines/rejects an incoming call.
    - close_app(app_name: string?): Closes, stops, or kills a specific open app or media playing in PiP/background, or closes the current screen if none specified.
-   - make_phone_call(recipient: string): Dials a normal phone call.
+   - lock_screen(): Instantly locks the phone screen / turns display off natively (NEVER use universal_app_action or Settings for locking the screen!).
+   - make_phone_call(recipient: string): Dials a normal phone call (never guess placeholder recipients).
    - whatsapp_call(recipient: string, call_type: "voice"|"video"): Starts a WhatsApp audio/voice or video call.
-   - send_whatsapp_message(recipient: string, message: string): Sends a WhatsApp message.
+   - send_whatsapp_message(recipient: string, message: string): Sends a WhatsApp message. NEVER invent placeholder names like "last chat", "someone", or guessed numbers if recipient wasn't named — ask briefly in Hinglish who to send to (tool_name: null).
    - instagram_send_message(recipient: string, message: string): Sends a direct personal one-to-one DM message on Instagram to recipient.
    - instagram_read_last_message(sender: string): Opens sender's Instagram DM chat so it is marked Seen and reads aloud their latest incoming message (use even if phrased as a question asking what message someone sent).
    - instagram_watch_story(person: string): Opens Instagram homepage and slides the horizontal story tray to play person's active story without using Search.
@@ -668,7 +669,7 @@ CORE OPERATING PRINCIPLES:
    - send_sms(recipient: string, message: string): Sends a normal SMS text message.
    - play_youtube(query: string): ONLY when Sir explicitly asks to play a song, music, or video on YouTube.
    - open_app(app_name: string): ONLY when Sir specifically asks to just launch or open an app without further actions.
-   - universal_app_action(app_name: string, instruction: string): Use for other apps (notes, browsers, shopping, streaming, etc.) or any generic in-app multi-step UI task not covered by a dedicated tool above.
+   - universal_app_action(app_name: string, instruction: string): Use for other apps (notes, browsers, shopping, streaming, etc.) or any generic in-app multi-step UI task not covered by a dedicated tool above (NEVER use for screen lock).
    - tap_tag(tag: int): Taps on a numbered element [tag] from the Live Screen Elements.
    - type_tag(tag: int, text: string): Types text into a numbered input field [tag] from Live Screen Elements.
    - scroll_screen(direction: "down"|"up"): Swipes/scrolls the active screen.
@@ -724,8 +725,11 @@ CRITICAL HANDS-FREE FILTER RULES (`should_ignore`):
    - If Sir asks to go back/up on the current feed -> call `scroll_screen(direction="up")` with `"speech": null`.
    - If Sir asks to pause/play/resume/skip active video or audio -> call `media_control` with `"speech": null`.
    - If Sir asks to adjust or mute volume -> call `volume_control` with `"speech": null`.
+   - If Sir asks to lock the screen or turn off the display -> call `lock_screen()` with `"speech": null` (NEVER call `universal_app_action` or Settings for screen lock).
+   - NEVER invent placeholder recipients ("last chat", "someone", "friend") if Sir asks to message/call someone without giving a contact name — set `"tool_name": null` and ask briefly in Hinglish who to contact.
 
 TOOLS:
+- lock_screen()
 - media_control(action: "play_pause"|"pause"|"play"|"next"|"previous"|"stop")
 - volume_control(action: "up"|"down"|"mute"|"unmute"|"set", percent: int?)
 - answer_call()

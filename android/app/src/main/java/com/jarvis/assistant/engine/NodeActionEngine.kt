@@ -1,8 +1,7 @@
 package com.jarvis.assistant.engine
 
 import android.graphics.Rect
-import android.os.Handler
-import android.os.Looper
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import com.jarvis.assistant.JarvisAccessibilityService
@@ -52,59 +51,64 @@ class NodeActionEngine(
                 return@launch
             }
 
-            // Wait briefly for WhatsApp or App Lock screen to render, then auto-unlock if protected
-            delay(850)
-            if (AutoUnlockManager.isAppLockScreen(service)) {
-                AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
-                delay(700)
-            }
-
-            // Dismiss any modal/privacy bottom-sheet if shown
-            delay(300)
-            val closeBtn = service.findClickableNode("Close") ?: service.findClickableNode("close")
-            if (closeBtn != null) {
-                service.clickNode(closeBtn)
-                delay(200)
-            }
-
-            // In WhatsApp chat toolbar:
-            // Video Call button: id has "video_call", cd is "Video call"
-            // Voice/Audio Call button: id has "voice_call", cd is "Voice call"
-            val callBtn = service.pollForNode(timeoutMs = 4500) { node ->
-                val resId = node.viewIdResourceName?.lowercase() ?: ""
-                val cd = node.contentDescription?.toString()?.lowercase() ?: ""
-                val text = node.text?.toString()?.lowercase() ?: ""
-
-                if (isVideo) {
-                    // MUST be a video call button
-                    resId.contains("video_call") || cd.contains("video call") || cd == "video" || text.contains("video call")
-                } else {
-                    // MUST be an audio/voice call button, and strictly NOT video!
-                    val isVoice = resId.contains("voice_call") || cd.contains("voice call") || cd.contains("audio call") ||
-                            resId.endsWith(":id/voice_call") || cd == "voice call" || text.contains("voice call")
-                    val isGenericCall = (cd == "call" || text == "call" || resId.endsWith(":id/call"))
-                    val isNotVideo = !resId.contains("video") && !cd.contains("video") && !text.contains("video")
-                    (isVoice || isGenericCall) && isNotVideo
+            // Fast event-driven wait (45ms ticks) handles App Lock, modal dismiss, and call button
+            var retriedLaunch = false
+            val waitStart = System.currentTimeMillis()
+            var callBtn: AccessibilityNodeInfo? = null
+            while (System.currentTimeMillis() - waitStart < 5200L) {
+                val elapsed = System.currentTimeMillis() - waitStart
+                if (AutoUnlockManager.isScreenLockedOrOff(systemController.appContext)) {
+                    AutoUnlockManager.ensureScreenUnlocked(systemController.appContext)
+                    continue
                 }
+                if (AutoUnlockManager.isAppLockScreen(service)) {
+                    AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
+                    delay(60)
+                    continue
+                }
+                val closeBtn = service.findClickableNode("Close") ?: service.findClickableNode("close")
+                if (closeBtn != null) {
+                    service.clickNode(closeBtn)
+                    delay(60)
+                    continue
+                }
+
+                callBtn = service.findNodeByPredicate { node ->
+                    val resId = node.viewIdResourceName?.lowercase() ?: ""
+                    val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+                    val text = node.text?.toString()?.lowercase() ?: ""
+
+                    if (isVideo) {
+                        resId.contains("video_call") || cd.contains("video call") || cd == "video" || text.contains("video call")
+                    } else {
+                        val isVoice = resId.contains("voice_call") || cd.contains("voice call") || cd.contains("audio call") ||
+                                resId.endsWith(":id/voice_call") || cd == "voice call" || text.contains("voice call")
+                        val isGenericCall = (cd == "call" || text == "call" || resId.endsWith(":id/call"))
+                        val isNotVideo = !resId.contains("video") && !cd.contains("video") && !text.contains("video")
+                        (isVoice || isGenericCall) && isNotVideo
+                    }
+                }
+                if (callBtn != null) break
+
+                val activePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase().orEmpty()
+                if (!retriedLaunch && elapsed > 1800L && !activePkg.contains("whatsapp")) {
+                    retriedLaunch = true
+                    systemController.openChatWhatsApp(number)
+                }
+                delay(45)
             }
 
             if (callBtn != null) {
                 val clicked = service.tapElement(callBtn)
                 if (clicked) {
-                    delay(700)
-                    // Auto-confirm if WhatsApp shows confirmation dialog:
-                    // Dialog can say "Start voice call? -> Call" or "Start video call? -> Video call"
-                    val confirmBtn = service.findNodeById("android:id/button1")
-                        ?: service.findClickableNode(if (isVideo) "Video call" else "Call")
-                        ?: service.findClickableNode("CALL")
-                        ?: service.findClickableNode("Call")
-                        ?: service.findNodeByPredicate { n ->
-                            val nText = n.text?.toString()?.lowercase() ?: ""
-                            val nCd = n.contentDescription?.toString()?.lowercase() ?: ""
-                            n.isClickable && n != callBtn && (nText.contains("call") || nCd.contains("call") || nText.contains("start"))
-                        }
-
-                    if (confirmBtn != null && confirmBtn != callBtn) {
+                    val confirmBtn = service.pollForNode(timeoutMs = 900L, intervalMs = 45L) { n ->
+                        val nId = n.viewIdResourceName?.lowercase() ?: ""
+                        val nText = n.text?.toString()?.lowercase() ?: ""
+                        val nCd = n.contentDescription?.toString()?.lowercase() ?: ""
+                        n != callBtn && (nId == "android:id/button1" ||
+                            (n.isClickable && (nText.contains("call") || nCd.contains("call") || nText.contains("start"))))
+                    }
+                    if (confirmBtn != null) {
                         service.tapElement(confirmBtn)
                     }
 
@@ -143,58 +147,76 @@ class NodeActionEngine(
                 return@launch
             }
 
-            // Pre-fill text via URL so WhatsApp loads with the message already in the input field!
+            // Pre-fill text via native whatsapp:// URI so chat opens immediately with text ready
             val opened = systemController.openChatWhatsApp(number, prefillMessage = message)
             if (!opened) {
                 callback(false, "WhatsApp open nahi ho saka Sir.")
                 return@launch
             }
 
-            delay(900)
-            if (AutoUnlockManager.isAppLockScreen(service)) {
-                AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
-                delay(700)
-            }
-
-            // Poll for genuine Send button (explicitly excluding Voice/Mic button) up to 5.0 seconds
-            val sendBtn = service.pollForNode(timeoutMs = 5000) { isWhatsAppSendButton(it) }
-
-            if (sendBtn != null) {
-                // Single click ONLY: never use dual-action tapElement() or double-tap here because WhatsApp
-                // swaps Send with the Voice Recording Mic button at the exact same coordinates upon sending!
-                service.clickNode(sendBtn)
-                delay(450)
-
-                // Re-query fresh UI tree: tap via coordinates ONLY if Send button genuinely didn't trigger
-                val stillSending = service.findNodeByPredicate { isWhatsAppSendButton(it) }
-                if (stillSending != null) {
-                    val b = Rect()
-                    stillSending.getBoundsInScreen(b)
-                    if (b.width() > 0 && b.height() > 0) {
-                        service.tapCoordinatesAwait(b.centerX().toFloat(), b.centerY().toFloat())
-                    }
+            // Unified 45ms dynamic loop: handles AppLock at ANY millisecond, retries dropped lockscreen intent,
+            // auto-types only if prefill text is absent, and clicks genuine Send button immediately.
+            var retriedLaunch = false
+            var typedFallback = false
+            val waitStart = System.currentTimeMillis()
+            while (System.currentTimeMillis() - waitStart < 5600L) {
+                val elapsed = System.currentTimeMillis() - waitStart
+                if (AutoUnlockManager.isScreenLockedOrOff(systemController.appContext)) {
+                    AutoUnlockManager.ensureScreenUnlocked(systemController.appContext)
+                    continue
+                }
+                if (AutoUnlockManager.isAppLockScreen(service)) {
+                    AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
+                    delay(60)
+                    continue
                 }
 
-                callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
-                return@launch
-            }
-
-            // Fallback: If not sent via pre-fill, type into input field and click Send once
-            val inputField = service.pollForNode(timeoutMs = 2500) { node ->
-                val resId = node.viewIdResourceName?.lowercase() ?: ""
-                val text = node.text?.toString() ?: ""
-                node.isEditable || resId.contains("entry") || text.contains("Message", ignoreCase = true)
-            }
-
-            if (inputField != null) {
-                service.typeText(inputField, message)
-                delay(400)
-                val retrySend = service.pollForNode(timeoutMs = 2500) { isWhatsAppSendButton(it) }
-                if (retrySend != null) {
-                    service.clickNode(retrySend)
+                val sendBtn = service.findNodeByPredicate { isWhatsAppSendButton(it) }
+                if (sendBtn != null) {
+                    // Single click ONLY: swaps with Voice/Mic button at same coordinates upon sending!
+                    service.clickNode(sendBtn)
+                    val sentStart = System.currentTimeMillis()
+                    while (System.currentTimeMillis() - sentStart < 300L) {
+                        if (service.findNodeByPredicate { isWhatsAppSendButton(it) } == null) break
+                        delay(45)
+                    }
+                    val stillSending = service.findNodeByPredicate { isWhatsAppSendButton(it) }
+                    if (stillSending != null) {
+                        val b = Rect()
+                        stillSending.getBoundsInScreen(b)
+                        if (b.width() > 0 && b.height() > 0) {
+                            service.tapCoordinatesAwait(b.centerX().toFloat(), b.centerY().toFloat(), 45L)
+                        }
+                    }
                     callback(true, "WhatsApp par $displayName ko message bhej diya hai Sir.")
                     return@launch
                 }
+
+                // If WhatsApp chat is open with empty input after 1200ms, inject message directly
+                if (!typedFallback && elapsed > 1200L) {
+                    val inputField = service.findNodeByPredicate { node ->
+                        val resId = node.viewIdResourceName?.lowercase() ?: ""
+                        node.isEditable && (resId.contains("entry") || (node.packageName?.toString()?.contains("whatsapp", true) == true))
+                    }
+                    if (inputField != null) {
+                        val entryText = inputField.text?.toString()?.trim().orEmpty()
+                        val isHintOnly = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && inputField.isShowingHintText
+                        if (entryText.isEmpty() || isHintOnly || entryText.equals("Message", ignoreCase = true)) {
+                            typedFallback = true
+                            service.typeText(inputField, message)
+                            delay(50)
+                            continue
+                        }
+                    }
+                }
+
+                val activePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase().orEmpty()
+                if (!retriedLaunch && elapsed > 1800L && !activePkg.contains("whatsapp")) {
+                    retriedLaunch = true
+                    systemController.openChatWhatsApp(number, prefillMessage = message)
+                }
+
+                delay(45)
             }
 
             callback(false, "WhatsApp me message send nahi ho saka Sir.")

@@ -15,7 +15,9 @@ class BootRestartReceiver : BroadcastReceiver() {
         val action = intent?.action ?: return
         if (!AlwaysOnVoiceService.isEnabled(context)) return
         JarvisLogStore.init(context)
-        JarvisLogStore.log("BOOT_RECEIVER", "Received '$action'; restoring permanent mic.")
+        if (!AlwaysOnVoiceService.isRunning) {
+            JarvisLogStore.log("BOOT_RECEIVER", "Received '$action'; restoring permanent mic.")
+        }
         AlwaysOnVoiceService.ensureRunningIfEnabled(context, action)
     }
 }

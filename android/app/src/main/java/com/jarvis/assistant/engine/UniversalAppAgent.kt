@@ -119,36 +119,47 @@ class UniversalAppAgent(
                 null
             }
 
-            val openedMsg = systemController.openApp(appName)
-            JarvisLogStore.log("APP_LAUNCH", "openApp('$appName') -> '$openedMsg'")
-            if (openedMsg.contains("nahi mila")) {
-                socialIntentJob?.cancel()
-                callback(false, openedMsg)
-                return@launch
-            }
+            // Skip redundant app launch Intent + 500ms wait when target app is already active on screen
+            val currentForegroundPkg = service.rootInActiveWindow?.packageName?.toString().orEmpty()
+            val alreadyInTargetApp = currentForegroundPkg.isNotBlank() &&
+                ((isInstagram && currentForegroundPkg.contains("instagram", ignoreCase = true)) ||
+                    (!isInstagram && systemController.doesPackageMatchAppName(currentForegroundPkg, appName))) &&
+                service.dumpScreenElements().isNotEmpty()
 
-            // Poll fast every 45ms until target app (or App Lock) renders
-            delay(50)
-            val launchStart = System.currentTimeMillis()
-            var finalActivePkg = ""
-            while (System.currentTimeMillis() - launchStart < 1500) {
-                if (AutoUnlockManager.isAppLockScreen(service)) break
-                finalActivePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
-                val appReady = finalActivePkg.isNotBlank() && finalActivePkg != context.packageName.lowercase() &&
-                    (!isInstagram || finalActivePkg.contains("instagram"))
-                if (appReady && service.dumpScreenElements().isNotEmpty()) break
-                delay(45)
-            }
-            JarvisLogStore.log("APP_READY", "pkg='$finalActivePkg' waitMs=${System.currentTimeMillis() - launchStart}")
+            if (alreadyInTargetApp) {
+                JarvisLogStore.log("APP_READY", "pkg='$currentForegroundPkg' waitMs=0 (already active)")
+            } else {
+                val openedMsg = systemController.openApp(appName)
+                JarvisLogStore.log("APP_LAUNCH", "openApp('$appName') -> '$openedMsg'")
+                if (openedMsg.contains("nahi mila")) {
+                    socialIntentJob?.cancel()
+                    callback(false, openedMsg)
+                    return@launch
+                }
 
-            // 2. Auto-unlock App Lock if target app is protected (poll immediately instead of blind 650ms sleep)
-            if (AutoUnlockManager.isAppLockScreen(service)) {
-                JarvisLogStore.log("APPLOCK", "Detected AppLock; attempting unlock")
-                AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
-                val unlockStart = System.currentTimeMillis()
-                while (System.currentTimeMillis() - unlockStart < 700) {
-                    if (!AutoUnlockManager.isAppLockScreen(service) && service.dumpScreenElements().isNotEmpty()) break
+                // Poll fast every 45ms until target app (or App Lock) renders
+                delay(50)
+                val launchStart = System.currentTimeMillis()
+                var finalActivePkg = ""
+                while (System.currentTimeMillis() - launchStart < 1500) {
+                    if (AutoUnlockManager.isAppLockScreen(service)) break
+                    finalActivePkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase() ?: ""
+                    val appReady = finalActivePkg.isNotBlank() && finalActivePkg != context.packageName.lowercase() &&
+                        (!isInstagram || finalActivePkg.contains("instagram"))
+                    if (appReady && service.dumpScreenElements().isNotEmpty()) break
                     delay(45)
+                }
+                JarvisLogStore.log("APP_READY", "pkg='$finalActivePkg' waitMs=${System.currentTimeMillis() - launchStart}")
+
+                // 2. Auto-unlock App Lock if target app is protected (poll immediately instead of blind 650ms sleep)
+                if (AutoUnlockManager.isAppLockScreen(service)) {
+                    JarvisLogStore.log("APPLOCK", "Detected AppLock; attempting unlock")
+                    AutoUnlockManager.unlockAppLockIfPresent(context, geminiBrain)
+                    val unlockStart = System.currentTimeMillis()
+                    while (System.currentTimeMillis() - unlockStart < 700) {
+                        if (!AutoUnlockManager.isAppLockScreen(service) && service.dumpScreenElements().isNotEmpty()) break
+                        delay(45)
+                    }
                 }
             }
 
@@ -329,10 +340,26 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                     }
                     "scroll_screen" -> {
                         val dir = decision.direction ?: "down"
-                        val ok = service.scrollExact(dir)
-                        JarvisLogStore.log("FALLBACK_EXEC", "scroll_screen($dir) ok=$ok")
+                        val screenEls = service.dumpScreenElements()
+                        val isFullPageVideoPager = screenEls.any {
+                            it.viewId.contains("clips_video_container", ignoreCase = true) ||
+                                it.viewId.contains("clips_media_component", ignoreCase = true) ||
+                                it.viewId.contains("scrubber", ignoreCase = true) ||
+                                it.label.contains("Reel by ", ignoreCase = true)
+                        }
+                        val ok = if (isFullPageVideoPager) {
+                            service.flingScroll(dir)
+                        } else {
+                            service.scrollExact(dir)
+                        }
+                        JarvisLogStore.log("FALLBACK_EXEC", "scroll_screen($dir fling=$isFullPageVideoPager) ok=$ok")
                         actionHistory.add("Scrolled screen $dir")
-                        delay(180)
+                        if (isFullPageVideoPager && ok && instruction.lowercase().contains("reel")) {
+                            isCompleted = true
+                            finalMsg = ""
+                        } else {
+                            delay(180)
+                        }
                     }
                     "back" -> {
                         val ok = service.performBack()

@@ -104,14 +104,26 @@ object AutoUnlockManager {
         // Only swipe up if screen is asleep or keypad/pattern isn't visible yet
         if (pm?.isInteractive == false || !service.hasVisibleUnlockPrompt()) {
             service.wakeScreenAndSwipeUp()
-            // Wait dynamically for keypad/pattern prompt (or swipe-only unlock to finish)
-            for (i in 0 until 10) {
-                delay(200)
+            // Poll fast (45ms) for keypad/pattern prompt or instant swipe/biometric unlock
+            val promptWaitStart = System.currentTimeMillis()
+            while (System.currentTimeMillis() - promptWaitStart < 750L) {
                 if (km?.isKeyguardLocked != true) {
                     Log.d(TAG, "Screen unlocked after swipe-up!")
                     return true
                 }
                 if (service.hasVisibleUnlockPrompt()) break
+                delay(45)
+            }
+
+            // One crisp retry swipe if screen just finished waking from Deep Sleep / AOD
+            if (km?.isKeyguardLocked == true && !service.hasVisibleUnlockPrompt()) {
+                service.wakeScreenAndSwipeUp()
+                val retryWaitStart = System.currentTimeMillis()
+                while (System.currentTimeMillis() - retryWaitStart < 700L) {
+                    if (km?.isKeyguardLocked != true) return true
+                    if (service.hasVisibleUnlockPrompt()) break
+                    delay(45)
+                }
             }
         }
 
@@ -136,13 +148,18 @@ object AutoUnlockManager {
             return false
         }
 
-        // Poll until Keyguard dismisses
-        for (i in 0 until 10) {
-            delay(200)
+        // Fast dynamic poll until Keyguard dismisses & SystemUI lock overlay clears
+        val dismissStart = System.currentTimeMillis()
+        while (System.currentTimeMillis() - dismissStart < 1200L) {
             if (km?.isKeyguardLocked != true) {
-                Log.d(TAG, "Screen successfully unlocked!")
+                val settleStart = System.currentTimeMillis()
+                while (service.hasVisibleUnlockPrompt() && System.currentTimeMillis() - settleStart < 380L) {
+                    delay(40)
+                }
+                Log.d(TAG, "Screen successfully unlocked in ${System.currentTimeMillis() - dismissStart}ms!")
                 return true
             }
+            delay(45)
         }
         return km?.isKeyguardLocked != true
     }
@@ -233,9 +250,10 @@ object AutoUnlockManager {
         if (!service.hasVisibleUnlockPrompt()) {
             val switched = trySwitchToPasswordEntry(service, geminiBrain)
             if (switched) {
-                for (i in 0 until 8) {
-                    delay(180)
-                    if (service.hasVisibleUnlockPrompt()) break
+                val switchWaitStart = System.currentTimeMillis()
+                while (System.currentTimeMillis() - switchWaitStart < 1000L) {
+                    if (service.hasVisibleUnlockPrompt() || !isAppLockScreen(service)) break
+                    delay(45)
                 }
             }
         }
@@ -257,12 +275,13 @@ object AutoUnlockManager {
             return false
         }
 
-        for (i in 0 until 8) {
-            delay(200)
+        val clearWaitStart = System.currentTimeMillis()
+        while (System.currentTimeMillis() - clearWaitStart < 1100L) {
             if (!isAppLockScreen(service)) {
                 Log.d(TAG, "App Lock unlocked successfully!")
                 return true
             }
+            delay(45)
         }
 
         val unlocked = !isAppLockScreen(service)
