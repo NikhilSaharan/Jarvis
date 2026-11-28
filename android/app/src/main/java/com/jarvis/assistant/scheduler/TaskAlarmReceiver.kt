@@ -31,6 +31,8 @@ class TaskAlarmReceiver : BroadcastReceiver() {
         val wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Jarvis:ScheduledTaskWakeLock")
         wakeLock.acquire(10_000L) // 10s max lock
 
+        com.jarvis.assistant.debug.JarvisLogStore.init(context)
+        com.jarvis.assistant.debug.JarvisLogStore.log("SCHEDULER_ALARM", "Executing scheduled task '$action' (ID: $taskId)...")
         Log.d("TaskAlarmReceiver", "Executing scheduled task '$action' (ID: $taskId)...")
 
         val gson = Gson()

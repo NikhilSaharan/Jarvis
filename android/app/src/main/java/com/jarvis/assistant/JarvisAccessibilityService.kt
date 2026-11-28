@@ -60,6 +60,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         JarvisLogStore.init(this)
         JarvisLogStore.log("ACC_SERVICE", "Accessibility Service Connected")
         Log.d(TAG, "J.A.R.V.I.S. Accessibility Service Connected!")
+        com.jarvis.assistant.voice.AlwaysOnVoiceService.ensureRunningIfEnabled(this, "ACCESSIBILITY_CONNECTED")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {

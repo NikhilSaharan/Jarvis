@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.jarvis.assistant.ScreenElement
 import java.io.File
+import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -12,38 +13,71 @@ import java.util.concurrent.Executors
 /**
  * Shared thread-safe execution trace store capturing A-to-Z runtime telemetry:
  * UI Accessibility tree dumps, picked nodes & scores, rejected candidates,
- * Gemini raw responses & reasoning, latency timings, and step outcomes.
- * Works identically across MainActivity, FloatingBubbleService, and background workers.
+ * Gemini raw responses & reasoning, voice commands, and step outcomes.
+ * Persists daily rolling logs across app closes, background runs, and device reboots (3-day retention).
  */
 object JarvisLogStore {
 
-    private const val MAX_LINES = 5000
+    private const val MAX_MEMORY_LINES = 2500
     private const val DISPLAY_TAIL_LINES = 450
-    private const val LOG_FILE_NAME = "jarvis_trace.log"
+    private const val RETENTION_DAYS = 3
+    private const val MAX_DAILY_FILE_BYTES = 8_000_000L
+    private const val LOGS_DIR_NAME = "logs"
+    private const val LEGACY_LOG_FILE_NAME = "jarvis_trace.log"
 
     private val lock = Any()
     private val lines = ArrayDeque<String>()
-    private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    private val timeFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+    private val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
     private val fileExecutor = Executors.newSingleThreadExecutor()
 
     @Volatile
-    private var logFile: File? = null
+    private var logsDir: File? = null
 
     @Volatile
     private var listener: (() -> Unit)? = null
 
     fun init(context: Context) {
-        val targetFile = File(context.applicationContext.filesDir, LOG_FILE_NAME)
+        val appCtx = context.applicationContext
+        val dir = try {
+            File(appCtx.filesDir, LOGS_DIR_NAME).apply { mkdirs() }
+        } catch (_: Exception) {
+            return
+        }
+
+        // One-time migration from legacy single jarvis_trace.log into today's daily log
+        try {
+            val legacy = File(appCtx.filesDir, LEGACY_LOG_FILE_NAME)
+            val todayFile = File(dir, dailyFileName(Date()))
+            if (legacy.exists() && legacy.length() > 0 && !todayFile.exists()) {
+                legacy.copyTo(todayFile, overwrite = false)
+                legacy.delete()
+            }
+        } catch (_: Exception) {
+        }
+
         val shouldLoad = synchronized(lock) {
-            if (logFile == null) logFile = targetFile
-            lines.isEmpty() && targetFile.exists()
+            if (logsDir == null) logsDir = dir
+            lines.isEmpty()
         }
         if (shouldLoad) {
             try {
-                val saved = targetFile.readLines().takeLast(MAX_LINES)
+                pruneOldLogFiles(dir)
+                val recentFiles = listSortedLogFiles(dir)
+                val loaded = ArrayDeque<String>()
+                for (f in recentFiles) {
+                    f.bufferedReader(Charsets.UTF_8).useLines { seq ->
+                        for (ln in seq) {
+                            loaded.addLast(ln)
+                            while (loaded.size > MAX_MEMORY_LINES) {
+                                loaded.removeFirst()
+                            }
+                        }
+                    }
+                }
                 synchronized(lock) {
                     if (lines.isEmpty()) {
-                        lines.addAll(saved)
+                        lines.addAll(loaded)
                     }
                 }
                 notifyListener()
@@ -57,19 +91,21 @@ object JarvisLogStore {
     }
 
     fun log(category: String, message: String) {
-        val stamp = synchronized(timeFmt) { timeFmt.format(Date()) }
+        val now = Date()
+        val stamp = synchronized(timeFmt) { timeFmt.format(now) }
+        val dayKey = synchronized(dayFmt) { dayFmt.format(now) }
         val sanitized = message.trimEnd()
         val formatted = "[$stamp] [$category] $sanitized"
         Log.d("JarvisTrace", formatted)
 
         synchronized(lock) {
             lines.addLast(formatted)
-            while (lines.size > MAX_LINES) {
+            while (lines.size > MAX_MEMORY_LINES) {
                 lines.removeFirst()
             }
         }
         notifyListener()
-        persistLineAsync(formatted)
+        persistLineAsync(dayKey, formatted)
     }
 
     fun logScreenTree(stage: String, elements: List<ScreenElement>, limit: Int = 65) {
@@ -112,17 +148,52 @@ object JarvisLogStore {
     }
 
     fun getFullLogText(): String {
-        synchronized(lock) {
-            if (lines.isNotEmpty()) {
-                return lines.joinToString("\n")
+        val dir = logsDir
+        if (dir != null && dir.exists()) {
+            try {
+                val files = listSortedLogFiles(dir)
+                if (files.isNotEmpty()) {
+                    val sb = StringBuilder()
+                    for (f in files) {
+                        if (sb.isNotEmpty()) sb.append('\n')
+                        sb.append(f.readText(Charsets.UTF_8))
+                    }
+                    if (sb.isNotEmpty()) return sb.toString()
+                }
+            } catch (_: Exception) {
             }
         }
-        val f = logFile
-        return try {
-            if (f != null && f.exists()) f.readText() else ""
-        } catch (_: Exception) {
-            ""
+        return synchronized(lock) { lines.joinToString("\n") }
+    }
+
+    fun writeFullLogsTo(out: OutputStream): Int {
+        var totalLines = 0
+        val dir = logsDir
+        if (dir != null && dir.exists()) {
+            val files = listSortedLogFiles(dir)
+            for (f in files) {
+                try {
+                    f.bufferedReader(Charsets.UTF_8).useLines { seq ->
+                        for (ln in seq) {
+                            out.write(ln.toByteArray(Charsets.UTF_8))
+                            out.write('\n'.code)
+                            totalLines++
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
         }
+        if (totalLines == 0) {
+            val snapshot = synchronized(lock) { lines.toList() }
+            for (ln in snapshot) {
+                out.write(ln.toByteArray(Charsets.UTF_8))
+                out.write('\n'.code)
+                totalLines++
+            }
+        }
+        out.flush()
+        return totalLines
     }
 
     fun getDisplayLogText(): String = synchronized(lock) {
@@ -130,17 +201,33 @@ object JarvisLogStore {
         lines.drop(start).joinToString("\n")
     }
 
-    fun lineCount(): Int = synchronized(lock) { lines.size }
+    fun lineCount(): Int {
+        val dir = logsDir
+        if (dir != null && dir.exists()) {
+            return try {
+                var count = 0
+                for (f in listSortedLogFiles(dir)) {
+                    f.bufferedReader(Charsets.UTF_8).useLines { seq ->
+                        count += seq.count()
+                    }
+                }
+                count
+            } catch (_: Exception) {
+                synchronized(lock) { lines.size }
+            }
+        }
+        return synchronized(lock) { lines.size }
+    }
 
     fun clear() {
         synchronized(lock) {
             lines.clear()
         }
-        val f = logFile
-        if (f != null) {
+        val dir = logsDir
+        if (dir != null) {
             fileExecutor.execute {
                 try {
-                    f.writeText("")
+                    dir.listFiles()?.forEach { it.delete() }
                 } catch (_: Exception) {
                 }
             }
@@ -148,16 +235,42 @@ object JarvisLogStore {
         log("SYSTEM", "Console trace logs cleared.")
     }
 
-    private fun persistLineAsync(entry: String) {
-        val f = logFile ?: return
+    private fun dailyFileName(date: Date): String {
+        val key = synchronized(dayFmt) { dayFmt.format(date) }
+        return "jarvis_$key.log"
+    }
+
+    private fun listSortedLogFiles(dir: File): List<File> {
+        return dir.listFiles { f -> f.isFile && f.name.startsWith("jarvis_") && f.name.endsWith(".log") }
+            ?.sortedBy { it.name }
+            ?: emptyList()
+    }
+
+    private fun pruneOldLogFiles(dir: File) {
+        val files = listSortedLogFiles(dir)
+        if (files.size > RETENTION_DAYS) {
+            files.dropLast(RETENTION_DAYS).forEach {
+                try {
+                    it.delete()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    private fun persistLineAsync(dayKey: String, entry: String) {
+        val dir = logsDir ?: return
         fileExecutor.execute {
             try {
-                if (f.exists() && f.length() > 1_200_000L) {
-                    val snapshot = synchronized(lock) { lines.joinToString("\n") }
-                    f.writeText(if (snapshot.isNotEmpty()) "$snapshot\n" else "")
-                } else {
-                    f.appendText("$entry\n")
+                if (!dir.exists()) dir.mkdirs()
+                val target = File(dir, "jarvis_$dayKey.log")
+                if (!target.exists()) {
+                    pruneOldLogFiles(dir)
+                } else if (target.length() > MAX_DAILY_FILE_BYTES) {
+                    val kept = target.readLines(Charsets.UTF_8).takeLast(MAX_MEMORY_LINES)
+                    target.writeText(if (kept.isNotEmpty()) "${kept.joinToString("\n")}\n" else "", Charsets.UTF_8)
                 }
+                target.appendText("$entry\n", Charsets.UTF_8)
             } catch (_: Exception) {
             }
         }

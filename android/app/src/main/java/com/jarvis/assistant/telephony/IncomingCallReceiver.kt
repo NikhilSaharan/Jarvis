@@ -25,6 +25,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
         val state = intent.getStringExtra(TelephonyManager.EXTRA_STATE) ?: return
         val incomingNumber = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER) ?: savedCallerNumber
 
+        com.jarvis.assistant.debug.JarvisLogStore.init(context)
         val memoryManager = JarvisMemoryManager(context)
         val telephonyHelper = TelephonyHelper(context)
         val speakerHelper = SpeakerHelper(context)
