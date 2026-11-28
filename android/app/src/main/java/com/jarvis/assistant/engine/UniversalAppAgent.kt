@@ -342,10 +342,12 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
                         val dir = decision.direction ?: "down"
                         val screenEls = service.dumpScreenElements()
                         val isFullPageVideoPager = screenEls.any {
-                            it.viewId.contains("clips_video_container", ignoreCase = true) ||
-                                it.viewId.contains("clips_media_component", ignoreCase = true) ||
-                                it.viewId.contains("scrubber", ignoreCase = true) ||
-                                it.label.contains("Reel by ", ignoreCase = true)
+                            val res = it.node.viewIdResourceName ?: ""
+                            res.contains("clips_video_container", ignoreCase = true) ||
+                                res.contains("clips_media_component", ignoreCase = true) ||
+                                res.contains("scrubber", ignoreCase = true) ||
+                                it.contentDescription.contains("Reel by ", ignoreCase = true) ||
+                                it.text.contains("Reel by ", ignoreCase = true)
                         }
                         val ok = if (isFullPageVideoPager) {
                             service.flingScroll(dir)

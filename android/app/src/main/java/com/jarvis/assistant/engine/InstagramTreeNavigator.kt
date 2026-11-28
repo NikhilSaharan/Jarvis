@@ -1132,12 +1132,17 @@ object InstagramTreeNavigator {
 
         val entryEls = service.dumpScreenElements()
         val hasReelPlayer = entryEls.any {
-            it.viewId.contains("clips_video_container", ignoreCase = true) ||
-                it.viewId.contains("clips_media_component", ignoreCase = true)
+            val res = it.node.viewIdResourceName ?: ""
+            res.contains("clips_video_container", ignoreCase = true) ||
+                res.contains("clips_media_component", ignoreCase = true) ||
+                res.contains("scrubber", ignoreCase = true) ||
+                it.contentDescription.contains("Reel by ", ignoreCase = true) ||
+                it.text.contains("Reel by ", ignoreCase = true)
         }
         val hasCommentsOpen = entryEls.any {
-            it.viewId.contains("comment_thread_edittext", ignoreCase = true) ||
-                it.viewId.contains("comment_composer", ignoreCase = true)
+            val res = it.node.viewIdResourceName ?: ""
+            res.contains("comment_thread_edittext", ignoreCase = true) ||
+                res.contains("comment_composer", ignoreCase = true)
         }
         if (hasReelPlayer && wantsNextScroll) {
             if (hasCommentsOpen) {
