@@ -123,7 +123,19 @@
         android:textSize="11sp"
         android:textColor="@color/white"
         android:backgroundTint="@color/jarvis_card_bg"
-        android:layout_marginBottom="8dp" />
+        android:layout_marginBottom="6dp" />
+
+    <!-- Personal Owner Voice Lock (Sirf Meri Awaaz) -->
+    <Button
+        android:id="@+id/btnVoiceLock"
+        android:layout_width="match_parent"
+        android:layout_height="40dp"
+        android:text="🎙️ MY VOICE LOCK: OFF (Tap to Train)"
+        android:textSize="11.5sp"
+        android:textStyle="bold"
+        android:textColor="@color/jarvis_cyan"
+        android:backgroundTint="@color/jarvis_card_bg"
+        android:layout_marginBottom="6dp" />
 
     <!-- Action Bar: Permanent 24/7 Mic Start/Stop Toggle -->
     <Button

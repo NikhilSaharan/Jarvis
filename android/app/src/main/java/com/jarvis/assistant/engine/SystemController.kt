@@ -516,4 +516,68 @@ class SystemController(private val context: Context) {
         val nameToSpeak = if (!appName.isNullOrBlank()) appName else "App"
         return "$nameToSpeak band kar diya hai Sir."
     }
+
+    /**
+     * Dispatches hardware media transport key events (play/pause/next/previous/stop) silently
+     * to whichever media player is currently active (Hotstar, YouTube, Spotify, etc.).
+     */
+    fun controlMedia(action: String): String {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val keyCode = when (action.lowercase().trim()) {
+            "pause" -> KeyEvent.KEYCODE_MEDIA_PAUSE
+            "play", "resume" -> KeyEvent.KEYCODE_MEDIA_PLAY
+            "play_pause", "toggle" -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            "next", "skip", "forward" -> KeyEvent.KEYCODE_MEDIA_NEXT
+            "previous", "prev", "back" -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            "stop" -> KeyEvent.KEYCODE_MEDIA_STOP
+            else -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+        }
+        return try {
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            ""
+        } catch (e: Exception) {
+            Log.w("SystemController", "Media key error: ${e.message}")
+            "Media control karne me dikkat aayi Sir."
+        }
+    }
+
+    /**
+     * Adjusts media stream volume directly without launching external UI.
+     */
+    fun controlVolume(action: String, percent: Int? = null): String {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return try {
+            val stream = AudioManager.STREAM_MUSIC
+            val maxVol = audioManager.getStreamMaxVolume(stream)
+            val norm = action.lowercase().trim()
+            when {
+                percent != null && (norm == "set" || norm == "level") -> {
+                    val target = ((percent.coerceIn(0, 100) * maxVol) / 100.0).toInt().coerceIn(0, maxVol)
+                    audioManager.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
+                }
+                norm == "mute" -> {
+                    audioManager.setStreamVolume(stream, 0, AudioManager.FLAG_SHOW_UI)
+                }
+                norm == "unmute" -> {
+                    val cur = audioManager.getStreamVolume(stream)
+                    if (cur == 0) {
+                        audioManager.setStreamVolume(stream, (maxVol / 3).coerceAtLeast(1), AudioManager.FLAG_SHOW_UI)
+                    }
+                }
+                norm == "up" || norm == "increase" || norm == "high" -> {
+                    audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+                    audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, 0)
+                }
+                else -> {
+                    audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                    audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, 0)
+                }
+            }
+            ""
+        } catch (e: Exception) {
+            Log.w("SystemController", "Volume control error: ${e.message}")
+            "Volume change nahi ho saka Sir."
+        }
+    }
 }

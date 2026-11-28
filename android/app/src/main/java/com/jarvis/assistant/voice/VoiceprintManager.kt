@@ -1,0 +1,590 @@
+package com.jarvis.assistant.voice
+
+import android.content.Context
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.sqrt
+
+/**
+ * Local, offline owner voiceprint storage and biometric verification engine.
+ * Uses Vosk SpeakerModel 128-dim x-vectors paired with voiced pitch (F0 Hz) sanity checks
+ * so Jarvis obeys only the enrolled user and ignores TV/Hotstar/Reels/strangers.
+ */
+object VoiceprintManager {
+
+    enum class Sensitivity(val label: String, val baseThreshold: Float, val selfMargin: Float) {
+        RELAXED("Relaxed", 0.49f, 0.20f),
+        BALANCED("Balanced", 0.56f, 0.14f),
+        STRICT("Strict", 0.64f, 0.08f)
+    }
+
+    enum class MatchTier {
+        TRUSTED,
+        DOUBT,
+        REJECTED
+    }
+
+    data class EnrollmentSample(
+        val spkVector: FloatArray,
+        val spkFrames: Int,
+        val pitchHz: Float?
+    )
+
+    data class VerificationResult(
+        val tier: MatchTier,
+        val allowed: Boolean,
+        val similarity: Float,
+        val acceptThreshold: Float,
+        val spkFrames: Int,
+        val detectedPitchHz: Float?,
+        val reason: String
+    )
+
+    private const val PREFS_NAME = "jarvis_voiceprint"
+    private const val KEY_ENABLED = "voice_lock_enabled"
+    private const val KEY_SENSITIVITY = "voice_lock_sensitivity"
+    private const val KEY_CENTROID = "voice_lock_centroid"
+    private const val KEY_SAMPLES = "voice_lock_samples"
+    private const val KEY_MEDIAN_F0 = "voice_lock_median_f0"
+    private const val KEY_MIN_F0 = "voice_lock_min_f0"
+    private const val KEY_MAX_F0 = "voice_lock_max_f0"
+    private const val KEY_SAMPLE_COUNT = "voice_lock_sample_count"
+    private const val KEY_SELF_FLOOR = "voice_lock_self_floor"
+    private const val KEY_SECRET_CODE = "voice_lock_secret_code"
+
+    private val gson = Gson()
+    private val lock = Any()
+
+    @Volatile
+    private var cachedLoaded = false
+    private var cachedEnabled = true
+    private var cachedSensitivity = Sensitivity.BALANCED
+    private var cachedCentroid: FloatArray? = null
+    private var cachedSamples: List<FloatArray> = emptyList()
+    private var cachedMedianF0: Float = 0f
+    private var cachedMinF0: Float = 0f
+    private var cachedMaxF0: Float = 0f
+    private var cachedSelfFloor: Float = 0f
+    private var cachedSecretCode: String = ""
+
+    private fun ensureLoaded(context: Context) {
+        if (cachedLoaded) return
+        synchronized(lock) {
+            if (cachedLoaded) return
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            cachedEnabled = prefs.getBoolean(KEY_ENABLED, true)
+            cachedSensitivity = try {
+                Sensitivity.valueOf(prefs.getString(KEY_SENSITIVITY, Sensitivity.BALANCED.name) ?: Sensitivity.BALANCED.name)
+            } catch (_: Exception) {
+                Sensitivity.BALANCED
+            }
+            cachedMedianF0 = prefs.getFloat(KEY_MEDIAN_F0, 0f)
+            cachedMinF0 = prefs.getFloat(KEY_MIN_F0, 0f)
+            cachedMaxF0 = prefs.getFloat(KEY_MAX_F0, 0f)
+            cachedSelfFloor = prefs.getFloat(KEY_SELF_FLOOR, 0f)
+            cachedSecretCode = prefs.getString(KEY_SECRET_CODE, "")?.trim().orEmpty()
+
+            val centroidJson = prefs.getString(KEY_CENTROID, null)
+            cachedCentroid = if (!centroidJson.isNullOrBlank()) {
+                try {
+                    gson.fromJson(centroidJson, FloatArray::class.java)?.let { l2Normalize(it) }
+                } catch (_: Exception) {
+                    null
+                }
+            } else null
+
+            val samplesJson = prefs.getString(KEY_SAMPLES, null)
+            cachedSamples = if (!samplesJson.isNullOrBlank()) {
+                try {
+                    val type = object : TypeToken<List<FloatArray>>() {}.type
+                    val parsed: List<FloatArray>? = gson.fromJson(samplesJson, type)
+                    parsed?.map { l2Normalize(it) }.orEmpty()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else emptyList()
+
+            cachedLoaded = true
+        }
+    }
+
+    fun isEnrolled(context: Context): Boolean {
+        ensureLoaded(context)
+        return cachedCentroid != null && cachedCentroid!!.isNotEmpty()
+    }
+
+    fun hasSecretCode(context: Context): Boolean {
+        ensureLoaded(context)
+        return cachedSecretCode.isNotBlank()
+    }
+
+    fun isFullyConfigured(context: Context): Boolean {
+        return isEnrolled(context) && hasSecretCode(context)
+    }
+
+    fun getSecretCode(context: Context): String {
+        ensureLoaded(context)
+        return cachedSecretCode
+    }
+
+    fun matchesSecretCodeTextOffline(spokenText: String, expectedCode: String): Boolean {
+        val a = spokenText.lowercase().replace(Regex("[^a-z0-9\\s]"), " ").trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        val b = expectedCode.lowercase().replace(Regex("[^a-z0-9\\s]"), " ").trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (a.isEmpty() || b.isEmpty()) return false
+        val joinedA = a.joinToString(" ")
+        val joinedB = b.joinToString(" ")
+        if (joinedA.contains(joinedB)) return true
+        val hits = b.count { tok -> a.any { it == tok || (tok.length >= 4 && (it.contains(tok) || tok.contains(it))) } }
+        return hits == b.size || (b.size >= 3 && hits >= b.size - 1)
+    }
+
+    fun isLockActive(context: Context): Boolean {
+        ensureLoaded(context)
+        return cachedEnabled && cachedCentroid != null && cachedCentroid!!.isNotEmpty()
+    }
+
+    fun isLockEnabledPref(context: Context): Boolean {
+        ensureLoaded(context)
+        return cachedEnabled
+    }
+
+    fun setLockEnabled(context: Context, enabled: Boolean) {
+        ensureLoaded(context)
+        synchronized(lock) {
+            cachedEnabled = enabled
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_ENABLED, enabled)
+                .apply()
+        }
+    }
+
+    fun getSensitivity(context: Context): Sensitivity {
+        ensureLoaded(context)
+        return cachedSensitivity
+    }
+
+    fun setSensitivity(context: Context, sensitivity: Sensitivity) {
+        ensureLoaded(context)
+        synchronized(lock) {
+            cachedSensitivity = sensitivity
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_SENSITIVITY, sensitivity.name)
+                .apply()
+        }
+    }
+
+    fun getStatusSummary(context: Context): String {
+        ensureLoaded(context)
+        val count = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_SAMPLE_COUNT, cachedSamples.size)
+        val calPct = (cachedSelfFloor * 100f).toInt()
+        val codeState = if (cachedSecretCode.isNotBlank()) "Secret Code SET" else "No Secret Code"
+        return when {
+            cachedCentroid == null -> "OFF (Voice Not Trained)"
+            !cachedEnabled -> "PAUSED ($count samples • $codeState)"
+            calPct > 0 -> "ACTIVE • ${cachedSensitivity.label} (Base: $calPct% • $codeState)"
+            else -> "ACTIVE • ${cachedSensitivity.label} ($count samples • $codeState)"
+        }
+    }
+
+    fun saveEnrollment(
+        context: Context,
+        samples: List<EnrollmentSample>,
+        secretCode: String
+    ): Boolean {
+        val valid = samples.filter { it.spkVector.isNotEmpty() }
+        val cleanSecret = secretCode.trim()
+        if (valid.isEmpty() || cleanSecret.isBlank()) return false
+
+        val dim = valid.first().spkVector.size
+        val normalizedSamples = valid
+            .filter { it.spkVector.size == dim }
+            .map { l2Normalize(it.spkVector) }
+        if (normalizedSamples.isEmpty()) return false
+
+        val sum = FloatArray(dim)
+        for (vec in normalizedSamples) {
+            for (i in 0 until dim) {
+                sum[i] += vec[i]
+            }
+        }
+        val centroid = l2Normalize(sum)
+
+        // Leave-one-out self-consistency floor derived from user's own multi-style samples
+        var selfFloor = 0f
+        if (normalizedSamples.size >= 2) {
+            var minSelfSim = 1.0f
+            for (idx in normalizedSamples.indices) {
+                val otherSum = FloatArray(dim)
+                for (j in normalizedSamples.indices) {
+                    if (j == idx) continue
+                    for (k in 0 until dim) otherSum[k] += normalizedSamples[j][k]
+                }
+                val otherCentroid = l2Normalize(otherSum)
+                val sim = cosineSimilarity(normalizedSamples[idx], otherCentroid)
+                if (sim < minSelfSim) minSelfSim = sim
+            }
+            selfFloor = minSelfSim.coerceIn(0f, 0.92f)
+        }
+
+        val pitches = valid.mapNotNull { it.pitchHz }.filter { it in 60f..380f }.sorted()
+        val medianPitch = if (pitches.isNotEmpty()) pitches[pitches.size / 2] else 0f
+        val minPitch = if (pitches.isNotEmpty()) (pitches.first() * 0.78f).coerceAtLeast(55f) else 0f
+        val maxPitch = if (pitches.isNotEmpty()) (pitches.last() * 1.28f).coerceAtMost(420f) else 0f
+
+        synchronized(lock) {
+            cachedLoaded = true
+            cachedEnabled = true
+            cachedCentroid = centroid
+            cachedSamples = normalizedSamples
+            cachedMedianF0 = medianPitch
+            cachedMinF0 = minPitch
+            cachedMaxF0 = maxPitch
+            cachedSelfFloor = selfFloor
+            cachedSecretCode = cleanSecret
+
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_ENABLED, true)
+                .putFloat(KEY_MEDIAN_F0, medianPitch)
+                .putFloat(KEY_MIN_F0, minPitch)
+                .putFloat(KEY_MAX_F0, maxPitch)
+                .putFloat(KEY_SELF_FLOOR, selfFloor)
+                .putInt(KEY_SAMPLE_COUNT, normalizedSamples.size)
+                .putString(KEY_CENTROID, gson.toJson(centroid))
+                .putString(KEY_SAMPLES, gson.toJson(normalizedSamples))
+                .putString(KEY_SECRET_CODE, cleanSecret)
+                .commit()
+        }
+        return true
+    }
+
+    fun clearEnrollment(context: Context) {
+        synchronized(lock) {
+            cachedLoaded = true
+            cachedCentroid = null
+            cachedSamples = emptyList()
+            cachedMedianF0 = 0f
+            cachedMinF0 = 0f
+            cachedMaxF0 = 0f
+            cachedSelfFloor = 0f
+            cachedSecretCode = ""
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_CENTROID)
+                .remove(KEY_SAMPLES)
+                .remove(KEY_MEDIAN_F0)
+                .remove(KEY_MIN_F0)
+                .remove(KEY_MAX_F0)
+                .remove(KEY_SELF_FLOOR)
+                .remove(KEY_SAMPLE_COUNT)
+                .remove(KEY_SECRET_CODE)
+                .commit()
+        }
+    }
+
+    fun verifySpeaker(
+        context: Context,
+        spkVector: FloatArray?,
+        spkFrames: Int,
+        pcmBytes: ByteArray,
+        isMediaPlaying: Boolean
+    ): VerificationResult {
+        ensureLoaded(context)
+        val centroid = cachedCentroid
+        if (!cachedEnabled || centroid == null || centroid.isEmpty()) {
+            return VerificationResult(
+                tier = MatchTier.TRUSTED,
+                allowed = true,
+                similarity = 1.0f,
+                acceptThreshold = 0f,
+                spkFrames = spkFrames,
+                detectedPitchHz = null,
+                reason = if (centroid == null) "voice_lock_untrained" else "voice_lock_disabled"
+            )
+        }
+
+        val detectedPitch = extractPcmPitchHz(pcmBytes)
+        val pitchInOwnerBand = when {
+            detectedPitch == null || cachedMedianF0 <= 0f -> true
+            cachedMinF0 > 0f && cachedMaxF0 > cachedMinF0 -> detectedPitch in cachedMinF0..cachedMaxF0
+            else -> (detectedPitch / cachedMedianF0) in 0.58f..1.68f
+        }
+
+        if (spkVector == null || spkVector.isEmpty() || spkFrames < 50) {
+            // Very short clips (<0.5s): never execute straight away; ask secret code only in quiet room if pitch plausible
+            if (!isMediaPlaying && pcmBytes.size >= 16_000 && pitchInOwnerBand && cachedSecretCode.isNotBlank()) {
+                return VerificationResult(
+                    tier = MatchTier.DOUBT,
+                    allowed = false,
+                    similarity = 0f,
+                    acceptThreshold = cachedSensitivity.baseThreshold,
+                    spkFrames = spkFrames,
+                    detectedPitchHz = detectedPitch,
+                    reason = "short_unverified_doubt(frames=$spkFrames<50)"
+                )
+            }
+            return VerificationResult(
+                tier = MatchTier.REJECTED,
+                allowed = false,
+                similarity = 0f,
+                acceptThreshold = cachedSensitivity.baseThreshold,
+                spkFrames = spkFrames,
+                detectedPitchHz = detectedPitch,
+                reason = "short_unverified_rejected(frames=$spkFrames)"
+            )
+        }
+
+        val normCandidate = l2Normalize(spkVector)
+        val centroidSim = cosineSimilarity(normCandidate, centroid)
+        val sortedSampleSims = cachedSamples
+            .map { cosineSimilarity(normCandidate, it) }
+            .sortedDescending()
+        val avgTopSamples = when {
+            sortedSampleSims.size >= 2 -> (sortedSampleSims[0] + sortedSampleSims[1]) * 0.5f
+            sortedSampleSims.size == 1 -> sortedSampleSims[0]
+            else -> centroidSim
+        }
+        val effectiveScore = (0.65f * centroidSim) + (0.35f * avgTopSamples)
+
+        // Dynamically combine user's enrolled multi-style baseline with sensitivity floor
+        val calibratedFloor = if (cachedSelfFloor > 0f) {
+            (cachedSelfFloor - cachedSensitivity.selfMargin).coerceAtMost(0.70f)
+        } else 0f
+        val baseThreshold = maxOf(cachedSensitivity.baseThreshold, calibratedFloor)
+
+        val acceptThreshold = when {
+            spkFrames >= 140 -> baseThreshold
+            spkFrames >= 90 -> (baseThreshold - 0.03f).coerceAtLeast(cachedSensitivity.baseThreshold - 0.03f)
+            else -> (baseThreshold - 0.05f).coerceAtLeast(cachedSensitivity.baseThreshold - 0.05f)
+        }
+        val doubtThreshold = (acceptThreshold - 0.14f).coerceAtLeast(0.40f)
+
+        if (!pitchInOwnerBand) {
+            val extremeMismatch = cachedMedianF0 > 0f && detectedPitch != null &&
+                ((detectedPitch / cachedMedianF0) < 0.45f || (detectedPitch / cachedMedianF0) > 2.05f)
+            return if (!extremeMismatch && effectiveScore >= acceptThreshold && cachedSecretCode.isNotBlank()) {
+                VerificationResult(
+                    tier = MatchTier.DOUBT,
+                    allowed = false,
+                    similarity = effectiveScore,
+                    acceptThreshold = acceptThreshold,
+                    spkFrames = spkFrames,
+                    detectedPitchHz = detectedPitch,
+                    reason = "pitch_doubt(${detectedPitch?.toInt()}Hz, sim=${"%.2f".format(effectiveScore)})"
+                )
+            } else {
+                VerificationResult(
+                    tier = MatchTier.REJECTED,
+                    allowed = false,
+                    similarity = effectiveScore,
+                    acceptThreshold = acceptThreshold,
+                    spkFrames = spkFrames,
+                    detectedPitchHz = detectedPitch,
+                    reason = "pitch_mismatch(${detectedPitch?.toInt()}Hz vs ${cachedMedianF0.toInt()}Hz)"
+                )
+            }
+        }
+
+        return when {
+            effectiveScore >= acceptThreshold -> VerificationResult(
+                tier = MatchTier.TRUSTED,
+                allowed = true,
+                similarity = effectiveScore,
+                acceptThreshold = acceptThreshold,
+                spkFrames = spkFrames,
+                detectedPitchHz = detectedPitch,
+                reason = "trusted(sim=${"%.2f".format(effectiveScore)}>=${"%.2f".format(acceptThreshold)})"
+            )
+            effectiveScore >= doubtThreshold && cachedSecretCode.isNotBlank() -> VerificationResult(
+                tier = MatchTier.DOUBT,
+                allowed = false,
+                similarity = effectiveScore,
+                acceptThreshold = acceptThreshold,
+                spkFrames = spkFrames,
+                detectedPitchHz = detectedPitch,
+                reason = "doubt(sim=${"%.2f".format(effectiveScore)} in ${"%.2f".format(doubtThreshold)}..${"%.2f".format(acceptThreshold)})"
+            )
+            else -> VerificationResult(
+                tier = MatchTier.REJECTED,
+                allowed = false,
+                similarity = effectiveScore,
+                acceptThreshold = acceptThreshold,
+                spkFrames = spkFrames,
+                detectedPitchHz = detectedPitch,
+                reason = "rejected(sim=${"%.2f".format(effectiveScore)}<thr=${"%.2f".format(doubtThreshold)})"
+            )
+        }
+    }
+
+    /**
+     * Extracts median fundamental vocal pitch (F0 Hz) from 16kHz 16-bit mono PCM bytes.
+     * Used alongside Vosk x-vectors to guard short utterances and reject non-matching voices.
+     */
+    fun extractPcmPitchHz(pcmBytes: ByteArray): Float? {
+        val sampleCount = pcmBytes.size / 2
+        if (sampleCount < 640) return null
+
+        val samples = ShortArray(sampleCount)
+        ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(samples)
+
+        val frameLen = 640 // 40ms @ 16kHz
+        val step = 320     // 20ms hop
+        val minLag = 45    // ~355Hz upper vocal limit
+        val maxLag = 228   // ~70Hz lower vocal limit
+        val frameF0s = mutableListOf<Float>()
+
+        var offset = 0
+        while (offset + frameLen <= sampleCount) {
+            var energy = 0.0
+            for (i in 0 until frameLen) {
+                val v = samples[offset + i].toDouble()
+                energy += v * v
+            }
+            val rms = sqrt(energy / frameLen)
+            if (rms >= 420.0) {
+                var bestCorr = 0.0
+                var bestLag = -1
+                for (tau in minLag..maxLag) {
+                    var cross = 0.0
+                    var normA = 0.0
+                    var normB = 0.0
+                    val limit = frameLen - tau
+                    for (i in 0 until limit) {
+                        val a = samples[offset + i].toDouble()
+                        val b = samples[offset + i + tau].toDouble()
+                        cross += a * b
+                        normA += a * a
+                        normB += b * b
+                    }
+                    val denom = sqrt(normA * normB)
+                    if (denom > 1.0) {
+                        val corr = cross / denom
+                        if (corr > bestCorr) {
+                            bestCorr = corr
+                            bestLag = tau
+                        }
+                    }
+                }
+                if (bestCorr >= 0.50 && bestLag > 0) {
+                    val f0 = 16000.0f / bestLag.toFloat()
+                    if (f0 in 65f..360f) {
+                        frameF0s.add(f0)
+                    }
+                }
+            }
+            offset += step
+        }
+
+        if (frameF0s.size < 3) return null
+        frameF0s.sort()
+        return frameF0s[frameF0s.size / 2]
+    }
+
+    fun cosineSimilarity(a: FloatArray, b: FloatArray): Float {
+        if (a.isEmpty() || a.size != b.size) return 0f
+        var dot = 0.0
+        var normA = 0.0
+        var normB = 0.0
+        for (i in a.indices) {
+            val va = a[i].toDouble()
+            val vb = b[i].toDouble()
+            dot += va * vb
+            normA += va * va
+            normB += vb * vb
+        }
+        val denom = sqrt(normA) * sqrt(normB)
+        return if (denom > 1e-8) (dot / denom).toFloat() else 0f
+    }
+
+    private fun l2Normalize(vec: FloatArray): FloatArray {
+        var sumSq = 0.0
+        for (v in vec) sumSq += v * v
+        val norm = sqrt(sumSq)
+        if (norm < 1e-8) return vec.copyOf()
+        return FloatArray(vec.size) { i -> (vec[i] / norm).toFloat() }
+    }
+
+    fun computePcmRms(pcmBytes: ByteArray, length: Int = pcmBytes.size): Double {
+        val count = length / 2
+        if (count <= 0) return 0.0
+        var sumSq = 0.0
+        var idx = 0
+        while (idx + 1 < length) {
+            val lo = pcmBytes[idx].toInt() and 0xFF
+            val hi = pcmBytes[idx + 1].toInt()
+            val sample = ((hi shl 8) or lo).toShort().toDouble()
+            sumSq += sample * sample
+            idx += 2
+        }
+        return sqrt(sumSq / count)
+    }
+
+    fun trimTrailingSilencePcm(pcmBytes: ByteArray): ByteArray {
+        if (pcmBytes.size <= 3200) return pcmBytes
+        val frameBytes = 640
+        var endPos = pcmBytes.size
+        while (endPos > 3200) {
+            val start = (endPos - frameBytes).coerceAtLeast(0)
+            val sliceLen = endPos - start
+            var sumSq = 0.0
+            var i = start
+            while (i + 1 < endPos) {
+                val lo = pcmBytes[i].toInt() and 0xFF
+                val hi = pcmBytes[i + 1].toInt()
+                val s = ((hi shl 8) or lo).toShort().toDouble()
+                sumSq += s * s
+                i += 2
+            }
+            val rms = sqrt(sumSq / (sliceLen / 2).coerceAtLeast(1))
+            if (rms >= 300.0) break
+            endPos -= frameBytes / 2
+        }
+        val paddedEnd = (endPos + 3200).coerceAtMost(pcmBytes.size) // keep 100ms tail cushion
+        val evenEnd = paddedEnd - (paddedEnd % 2)
+        return pcmBytes.copyOf(evenEnd)
+    }
+
+    fun pcm16ToWav(pcmBytes: ByteArray, sampleRate: Int = 16000): ByteArray {
+        val totalAudioLen = pcmBytes.size
+        val totalDataLen = totalAudioLen + 36
+        val byteRate = sampleRate * 2 // 16-bit mono
+        val wav = ByteArray(44 + totalAudioLen)
+
+        wav[0] = 'R'.code.toByte(); wav[1] = 'I'.code.toByte()
+        wav[2] = 'F'.code.toByte(); wav[3] = 'F'.code.toByte()
+        writeIntLE(wav, 4, totalDataLen)
+        wav[8] = 'W'.code.toByte(); wav[9] = 'A'.code.toByte()
+        wav[10] = 'V'.code.toByte(); wav[11] = 'E'.code.toByte()
+        wav[12] = 'f'.code.toByte(); wav[13] = 'm'.code.toByte()
+        wav[14] = 't'.code.toByte(); wav[15] = ' '.code.toByte()
+        writeIntLE(wav, 16, 16) // PCM chunk size
+        writeShortLE(wav, 20, 1) // AudioFormat = 1 (PCM)
+        writeShortLE(wav, 22, 1) // NumChannels = 1
+        writeIntLE(wav, 24, sampleRate)
+        writeIntLE(wav, 28, byteRate)
+        writeShortLE(wav, 32, 2) // BlockAlign
+        writeShortLE(wav, 34, 16) // BitsPerSample
+        wav[36] = 'd'.code.toByte(); wav[37] = 'a'.code.toByte()
+        wav[38] = 't'.code.toByte(); wav[39] = 'a'.code.toByte()
+        writeIntLE(wav, 40, totalAudioLen)
+        System.arraycopy(pcmBytes, 0, wav, 44, totalAudioLen)
+        return wav
+    }
+
+    private fun writeIntLE(buf: ByteArray, offset: Int, value: Int) {
+        buf[offset] = (value and 0xFF).toByte()
+        buf[offset + 1] = ((value shr 8) and 0xFF).toByte()
+        buf[offset + 2] = ((value shr 16) and 0xFF).toByte()
+        buf[offset + 3] = ((value shr 24) and 0xFF).toByte()
+    }
+
+    private fun writeShortLE(buf: ByteArray, offset: Int, value: Int) {
+        buf[offset] = (value and 0xFF).toByte()
+        buf[offset + 1] = ((value shr 8) and 0xFF).toByte()
+    }
+}

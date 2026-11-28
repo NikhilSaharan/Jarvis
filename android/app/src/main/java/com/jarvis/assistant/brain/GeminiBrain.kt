@@ -1,7 +1,9 @@
 package com.jarvis.assistant.brain
 
+import android.util.Base64
 import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.memory.JarvisMemoryManager
@@ -17,7 +19,9 @@ data class ActionDecision(
     val speech: String?,
     val toolName: String?,
     val toolArgs: Map<String, Any>?,
-    val reasoning: String? = null
+    val reasoning: String? = null,
+    val transcript: String? = null,
+    val shouldIgnore: Boolean = false
 )
 
 data class UIActionDecision(
@@ -68,26 +72,252 @@ class GeminiBrain(
         }
 
         val prompt = buildPrompt(trimmed, screenElementsSummary)
-        var lastError = ""
+        val parts = JsonArray().apply {
+            add(JsonObject().apply { addProperty("text", prompt) })
+        }
         JarvisLogStore.log("GEMINI_CMD", "Dispatching cmd='$trimmed' screenCtxLen=${screenElementsSummary.length}")
+        executeCommandParts(parts, isAudioMode = false)
+    }
 
+    /**
+     * Multimodal native Hinglish/English audio command understanding without Android SpeechRecognizer
+     * (preserves Hotstar/Reels audio with zero AudioFocus steals and requires no wake word).
+     */
+    suspend fun processAudioCommand(
+        wavBytes: ByteArray,
+        voskHint: String = "",
+        screenElementsSummary: String = "",
+        isMediaPlaying: Boolean = false,
+        speakerVerified: Boolean = true
+    ): ActionDecision = withContext(Dispatchers.IO) {
+        if (wavBytes.size <= 44) {
+            return@withContext ActionDecision(null, null, null, shouldIgnore = true)
+        }
+        if (apiKey.isBlank() || apiKey.startsWith("your_")) {
+            return@withContext ActionDecision("Sir, Gemini API Key configure nahi hai.", null, null)
+        }
+
+        val prompt = buildAudioPrompt(voskHint, screenElementsSummary, isMediaPlaying, speakerVerified)
+        val b64Audio = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+        val parts = JsonArray().apply {
+            add(JsonObject().apply { addProperty("text", prompt) })
+            add(JsonObject().apply {
+                add("inline_data", JsonObject().apply {
+                    addProperty("mime_type", "audio/wav")
+                    addProperty("data", b64Audio)
+                })
+            })
+        }
+        JarvisLogStore.log("GEMINI_AUDIO", "Dispatching audio=${wavBytes.size / 1024}KB media=$isMediaPlaying verified=$speakerVerified hint='$voskHint'")
+        executeCommandParts(parts, isAudioMode = true)
+    }
+
+    /**
+     * Evaluates an incoming utterance whose biometric Voice Lock score fell into DOUBT or REJECTED.
+     * - Ignores background TV, Reels, or normal conversations between friends silently.
+     * - If the speaker clearly attempted an assistant/phone command:
+     *   - For DOUBT: returns both the parsed ActionDecision (held safely) + a dynamic Hinglish prompt asking for the Secret Code.
+     *   - For REJECTED: returns ONLY a polite dynamic Hinglish refusal explaining the voice does not match Sir's voice.
+     */
+    data class UnauthorizedAudioEvaluation(
+        val isCommandAttempt: Boolean,
+        val transcript: String,
+        val dynamicSpeech: String,
+        val heldDecision: ActionDecision? = null
+    )
+
+    suspend fun evaluateDoubtOrRejectedAudio(
+        wavBytes: ByteArray,
+        voskHint: String,
+        screenElementsSummary: String,
+        tier: String, // "DOUBT" or "REJECTED"
+        similarity: Float,
+        acceptThreshold: Float,
+        isMediaPlaying: Boolean
+    ): UnauthorizedAudioEvaluation = withContext(Dispatchers.IO) {
+        if (wavBytes.size <= 44 || apiKey.isBlank() || apiKey.startsWith("your_")) {
+            return@withContext UnauthorizedAudioEvaluation(false, "", "")
+        }
+
+        val isDoubt = tier.equals("DOUBT", ignoreCase = true)
+        val livingMemory = memoryManager?.getLivingMemoryContext() ?: ""
+        val cleanHint = voskHint.replace("\"", "'").trim()
+        val prompt = """
+You are J.A.R.V.I.S., protecting Sir's phone via Voice Lock.
+Biometric check status: tier=$tier (similarity=${"%.2f".format(similarity)} vs owner_threshold=${"%.2f".format(acceptThreshold)}), isMediaPlaying=$isMediaPlaying
+Offline phonetic hint: "$cleanHint"
+${if (livingMemory.isNotBlank()) "MEMORY:\n$livingMemory\n" else ""}
+Live Screen Elements:
+$screenElementsSummary
+
+TASK: Listen closely to the attached Hinglish/Hindi/English audio clip and decide:
+1. Is someone EXPLICITLY trying to give an imperative phone/app/media/settings command to Jarvis (or addressing "Jarvis"), OR is this just casual room conversation among friends / TV / movie / Reel dialogue / ambient noise?
+   - If it is casual human-to-human talk ("bhai chai le aa", "kal milte hain", "Instagram pe maine woh dekha"), singing, background media, or unclear speech -> set `"is_command_attempt": false` and `"dynamic_speech": ""`.
+2. If `"is_command_attempt": true`:
+   - If `tier` is "DOUBT": Parse the requested command (`tool_name`, `tool_args`, `speech`) into `held_command` WITHOUT running it, and generate `"dynamic_speech"` in natural conversational Hinglish saying their voice sounds slightly uncertain/similar and asking for Sir's **secret code** before proceeding.
+   - If `tier` is "REJECTED": Set `"held_command": null` and generate `"dynamic_speech"` in natural conversational Hinglish stating clearly that their voice does not match Sir's enrolled voice so the command cannot be executed.
+
+TOOLS ALLOWED INSIDE `held_command` (when tier=DOUBT):
+- media_control(action), volume_control(action, percent), answer_call(), end_call(), close_app(app_name), make_phone_call(recipient), whatsapp_call(recipient, call_type), send_whatsapp_message(recipient, message), instagram_send_message(recipient, message), instagram_read_last_message(sender), instagram_watch_story(person), instagram_follow_account(account), instagram_play_chat_reels(sender, count, from_me), instagram_play_reels(next), send_sms(recipient, message), play_youtube(query), open_app(app_name), universal_app_action(app_name, instruction), tap_tag(tag), type_tag(tag, text), scroll_screen(direction), schedule_action(...), sleep_routine(minutes), manage_vip(...), learn_preference(...), set_dnd(enabled), set_brightness(level), set_alarm(hour, minute, message), set_timer(seconds, message)
+
+OUTPUT ONLY RAW JSON:
+{
+  "transcript": "<exact words heard>",
+  "is_command_attempt": true|false,
+  "dynamic_speech": "<1 short natural Hinglish sentence or empty string if false>",
+  "held_command": { "reasoning": "...", "speech": null, "tool_name": "...", "tool_args": { ... } }
+}
+""".trimIndent()
+
+        val b64Audio = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+        val parts = JsonArray().apply {
+            add(JsonObject().apply { addProperty("text", prompt) })
+            add(JsonObject().apply {
+                add("inline_data", JsonObject().apply {
+                    addProperty("mime_type", "audio/wav")
+                    addProperty("data", b64Audio)
+                })
+            })
+        }
+
+        for (model in models) {
+            try {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+                val payload = JsonObject().apply {
+                    add("contents", JsonArray().apply { add(JsonObject().apply { add("parts", parts) }) })
+                    add("generation_config", JsonObject().apply {
+                        addProperty("temperature", 0.2)
+                        addProperty("response_mime_type", "application/json")
+                    })
+                }
+                val req = Request.Builder().url(url).post(payload.toString().toRequestBody(jsonMediaType)).build()
+                val res = client.newCall(req).execute()
+                val body = res.body?.string() ?: ""
+                if (res.isSuccessful) {
+                    val jsonRes = gson.fromJson(body, JsonObject::class.java)
+                    val rawText = jsonRes.getAsJsonArray("candidates")?.get(0)?.asJsonObject
+                        ?.getAsJsonObject("content")?.getAsJsonArray("parts")?.get(0)?.asJsonObject
+                        ?.get("text")?.asString ?: ""
+                    val obj = gson.fromJson(rawText, JsonObject::class.java)
+                    val isAttempt = obj.get("is_command_attempt")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asBoolean ?: false
+                    val transcript = obj.get("transcript")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim().orEmpty()
+                    val dynSpeech = obj.get("dynamic_speech")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim().orEmpty()
+                    val heldObj = obj.get("held_command")?.takeIf { isDoubt && !it.isJsonNull && it.isJsonObject }?.asJsonObject
+                    val heldDecision = heldObj?.let { parseDecisionObject(it, isAudioMode = true) }
+                    JarvisLogStore.log("VOICE_GUARD", "tier=$tier model=$model attempt=$isAttempt transcript='$transcript' speech='$dynSpeech'")
+                    return@withContext UnauthorizedAudioEvaluation(isAttempt, transcript, dynSpeech, heldDecision)
+                }
+            } catch (e: Exception) {
+                JarvisLogStore.log("VOICE_GUARD_ERR", "model=$model err=${e.message}")
+            }
+        }
+        UnauthorizedAudioEvaluation(false, "", "")
+    }
+
+    /**
+     * Verifies whether the speaker in wavBytes accurately spoke the configured Secret Code passphrase.
+     */
+    data class SecretCodeCheckResult(
+        val matched: Boolean,
+        val heardText: String,
+        val dynamicReply: String
+    )
+
+    suspend fun verifySecretCodeAudio(
+        wavBytes: ByteArray,
+        expectedSecretCode: String,
+        voskHint: String = "",
+        offlineFallbackMatch: (String, String) -> Boolean
+    ): SecretCodeCheckResult = withContext(Dispatchers.IO) {
+        val cleanExpected = expectedSecretCode.trim()
+        if (wavBytes.size <= 44 || cleanExpected.isBlank()) {
+            return@withContext SecretCodeCheckResult(false, "", "")
+        }
+        if (apiKey.isBlank() || apiKey.startsWith("your_")) {
+            val ok = offlineFallbackMatch(voskHint, cleanExpected)
+            return@withContext SecretCodeCheckResult(ok, voskHint, "")
+        }
+
+        val cleanHint = voskHint.replace("\"", "'").trim()
+        val prompt = """
+You are verifying a spoken voice secret passphrase for J.A.R.V.I.S.
+Expected Secret Code (written text): "$cleanExpected"
+Offline rough phonetic hint: "$cleanHint"
+
+Listen carefully to the attached audio clip.
+Accept equivalent number words / spellings / slight Indian English or Hindi pronunciation variations of "$cleanExpected" (for example "9" == "nine" == "nau", case-insensitive), EVEN IF embedded in a short phrase like "mera secret code hai $cleanExpected".
+Reject if a different code, unclear gibberish, or unrelated speech was spoken.
+Also provide a very short, natural Hinglish `"dynamic_reply"` (1 sentence: warm confirmation if matched, polite refusal if failed).
+
+OUTPUT ONLY RAW JSON:
+{
+  "heard_text": "<what the speaker actually said>",
+  "matched": true|false,
+  "dynamic_reply": "<1 short everyday Hinglish sentence>"
+}
+""".trimIndent()
+
+        val b64Audio = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
+        val parts = JsonArray().apply {
+            add(JsonObject().apply { addProperty("text", prompt) })
+            add(JsonObject().apply {
+                add("inline_data", JsonObject().apply {
+                    addProperty("mime_type", "audio/wav")
+                    addProperty("data", b64Audio)
+                })
+            })
+        }
+
+        for (model in models) {
+            try {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+                val payload = JsonObject().apply {
+                    add("contents", JsonArray().apply { add(JsonObject().apply { add("parts", parts) }) })
+                    add("generation_config", JsonObject().apply {
+                        addProperty("temperature", 0.0)
+                        addProperty("response_mime_type", "application/json")
+                    })
+                }
+                val req = Request.Builder().url(url).post(payload.toString().toRequestBody(jsonMediaType)).build()
+                val res = client.newCall(req).execute()
+                val body = res.body?.string() ?: ""
+                if (res.isSuccessful) {
+                    val jsonRes = gson.fromJson(body, JsonObject::class.java)
+                    val rawText = jsonRes.getAsJsonArray("candidates")?.get(0)?.asJsonObject
+                        ?.getAsJsonObject("content")?.getAsJsonArray("parts")?.get(0)?.asJsonObject
+                        ?.get("text")?.asString ?: ""
+                    val obj = gson.fromJson(rawText, JsonObject::class.java)
+                    val heard = obj.get("heard_text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim().orEmpty()
+                    val matched = obj.get("matched")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asBoolean ?: false
+                    val reply = obj.get("dynamic_reply")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim().orEmpty()
+                    JarvisLogStore.log("SECRET_CHECK", "model=$model matched=$matched heard='$heard'")
+                    return@withContext SecretCodeCheckResult(matched, heard, reply)
+                }
+            } catch (e: Exception) {
+                JarvisLogStore.log("SECRET_CHECK_ERR", "model=$model err=${e.message}")
+            }
+        }
+
+        val fallbackOk = offlineFallbackMatch(voskHint, cleanExpected)
+        SecretCodeCheckResult(fallbackOk, voskHint, "")
+    }
+
+    private fun executeCommandParts(parts: JsonArray, isAudioMode: Boolean): ActionDecision {
+        var lastError = ""
         for (model in models) {
             val t0 = System.currentTimeMillis()
             try {
                 val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
                 val requestPayload = JsonObject().apply {
-                    val contents = com.google.gson.JsonArray().apply {
+                    val contents = JsonArray().apply {
                         add(JsonObject().apply {
-                            val parts = com.google.gson.JsonArray().apply {
-                                add(JsonObject().apply { addProperty("text", prompt) })
-                            }
                             add("parts", parts)
                         })
                     }
                     add("contents", contents)
 
                     val genConfig = JsonObject().apply {
-                        addProperty("temperature", 0.3)
+                        addProperty("temperature", if (isAudioMode) 0.15 else 0.3)
                         addProperty("response_mime_type", "application/json")
                     }
                     add("generation_config", genConfig)
@@ -110,45 +340,12 @@ class GeminiBrain(
                         ?.getAsJsonArray("parts")?.get(0)?.asJsonObject?.get("text")?.asString ?: ""
 
                     val parsedDecision = gson.fromJson(textContent, JsonObject::class.java)
-                    val toolName = parsedDecision.get("tool_name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
-                    val rawSpeech = parsedDecision.get("speech")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
-                    val reasoning = parsedDecision.get("reasoning")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
-                    val asyncExecutionTools = setOf(
-                        "send_whatsapp_message", "whatsapp_call", "make_phone_call", "send_sms",
-                        "play_youtube", "open_app", "universal_app_action",
-                        "instagram_send_message", "instagram_read_last_message", "instagram_watch_story",
-                        "instagram_follow_account", "instagram_play_chat_reels", "instagram_play_reels"
-                    )
-                    val speech = when {
-                        toolName != null && toolName in asyncExecutionTools -> null
-                        toolName == null && rawSpeech == null -> "Ji Sir?"
-                        else -> rawSpeech
-                    }
-                    val argsObj = parsedDecision.get("tool_args")?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
-
-                    val argsMap = mutableMapOf<String, Any>()
-                    argsObj?.entrySet()?.forEach { (k, v) ->
-                        if (!v.isJsonNull && v.isJsonPrimitive) {
-                            val prim = v.asJsonPrimitive
-                            when {
-                                prim.isBoolean -> argsMap[k] = prim.asBoolean
-                                prim.isNumber -> argsMap[k] = prim.asInt
-                                else -> argsMap[k] = prim.asString
-                            }
-                        } else if (!v.isJsonNull && v.isJsonObject) {
-                            val subMap = mutableMapOf<String, Any>()
-                            v.asJsonObject.entrySet().forEach { (sk, sv) ->
-                                if (!sv.isJsonNull && sv.isJsonPrimitive) subMap[sk] = sv.asString
-                            }
-                            argsMap[k] = subMap
-                        }
-                    }
-
+                    val decision = parseDecisionObject(parsedDecision, isAudioMode)
                     JarvisLogStore.log(
-                        "GEMINI_CMD",
-                        "model=$model latency=${elapsed}ms raw=$textContent | parsed tool=$toolName args=$argsMap reason='${reasoning ?: ""}' speech='${speech ?: ""}'"
+                        if (isAudioMode) "GEMINI_AUDIO" else "GEMINI_CMD",
+                        "model=$model latency=${elapsed}ms ignored=${decision.shouldIgnore} transcript='${decision.transcript ?: ""}' tool=${decision.toolName} args=${decision.toolArgs ?: emptyMap()} reason='${decision.reasoning ?: ""}' speech='${decision.speech ?: ""}'"
                     )
-                    return@withContext ActionDecision(speech, toolName, if (argsMap.isEmpty()) null else argsMap, reasoning)
+                    return decision
                 } else {
                     lastError = "Gemini $model HTTP ${response.code}"
                     Log.w("GeminiBrain", "$lastError: $body")
@@ -161,8 +358,58 @@ class GeminiBrain(
             }
         }
 
-        // When cloud AI cannot be reached
-        ActionDecision("Sir, Gemini AI se sampark nahi ho saka ($lastError). Kripya internet connection aur API key check karein.", null, null)
+        return if (isAudioMode) {
+            ActionDecision(null, null, null, reasonForAudioErr(lastError), shouldIgnore = true)
+        } else {
+            ActionDecision("Sir, Gemini AI se sampark nahi ho saka ($lastError). Kripya internet connection aur API key check karein.", null, null)
+        }
+    }
+
+    private fun reasonForAudioErr(err: String): String = "Audio AI error: $err"
+
+    private fun parseDecisionObject(parsedDecision: JsonObject, isAudioMode: Boolean): ActionDecision {
+        val shouldIgnore = parsedDecision.get("should_ignore")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asBoolean ?: false
+        val transcript = parsedDecision.get("transcript")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim()?.takeIf { it.isNotBlank() && it != "null" }
+        val toolName = parsedDecision.get("tool_name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
+        val rawSpeech = parsedDecision.get("speech")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
+        val reasoning = parsedDecision.get("reasoning")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
+
+        if (shouldIgnore && toolName == null) {
+            return ActionDecision(null, null, null, reasoning, transcript, shouldIgnore = true)
+        }
+
+        val asyncExecutionTools = setOf(
+            "send_whatsapp_message", "whatsapp_call", "make_phone_call", "send_sms",
+            "play_youtube", "open_app", "universal_app_action",
+            "media_control", "volume_control",
+            "instagram_send_message", "instagram_read_last_message", "instagram_watch_story",
+            "instagram_follow_account", "instagram_play_chat_reels", "instagram_play_reels"
+        )
+        val speech = when {
+            toolName != null && toolName in asyncExecutionTools -> null
+            toolName == null && rawSpeech == null -> if (isAudioMode) null else "Ji Sir?"
+            else -> rawSpeech
+        }
+        val argsObj = parsedDecision.get("tool_args")?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
+
+        val argsMap = mutableMapOf<String, Any>()
+        argsObj?.entrySet()?.forEach { (k, v) ->
+            if (!v.isJsonNull && v.isJsonPrimitive) {
+                val prim = v.asJsonPrimitive
+                when {
+                    prim.isBoolean -> argsMap[k] = prim.asBoolean
+                    prim.isNumber -> argsMap[k] = prim.asInt
+                    else -> argsMap[k] = prim.asString
+                }
+            } else if (!v.isJsonNull && v.isJsonObject) {
+                val subMap = mutableMapOf<String, Any>()
+                v.asJsonObject.entrySet().forEach { (sk, sv) ->
+                    if (!sv.isJsonNull && sv.isJsonPrimitive) subMap[sk] = sv.asString
+                }
+                argsMap[k] = subMap
+            }
+        }
+        return ActionDecision(speech, toolName, if (argsMap.isEmpty()) null else argsMap, reasoning, transcript, shouldIgnore = false)
     }
 
     /**
@@ -404,6 +651,8 @@ CORE OPERATING PRINCIPLES:
    - NEVER narrate internal steps, screens, or UI buttons (do not say what screen was opened, what was typed, or what button was tapped). Let the tool execute cleanly.
 
 3. HARDWARE & APPLICATION TOOLS:
+   - media_control(action: "play_pause"|"pause"|"play"|"next"|"previous"|"stop"): Controls active Hotstar, YouTube, Spotify, or video playback silently without speaking over media.
+   - volume_control(action: "up"|"down"|"mute"|"unmute"|"set", percent: int?): Changes device media volume silently without interrupting playback.
    - answer_call(): Answers, accepts, or picks up an incoming call (phone or WhatsApp).
    - end_call(): Cuts, ends, or disconnects an ongoing call, or declines/rejects an incoming call.
    - close_app(app_name: string?): Closes, stops, or kills a specific open app or media playing in PiP/background, or closes the current screen if none specified.
@@ -415,7 +664,7 @@ CORE OPERATING PRINCIPLES:
    - instagram_watch_story(person: string): Opens Instagram homepage and slides the horizontal story tray to play person's active story without using Search.
    - instagram_follow_account(account: string): Searches Instagram accounts and follows the verified/official matching account (prioritizing genuine profiles over fanpages).
    - instagram_play_chat_reels(sender: string, count: int, from_me: boolean): Opens sender's Instagram DM chat and plays shared reels starting from the latest upward (count=1 for latest, count=N for last N requested reels, count=-1 for all shared reels; from_me=false by default for reels sent by sender, set from_me=true ONLY if Sir explicitly asks for reels sent by himself/herself).
-   - instagram_play_reels(next: boolean): Opens Instagram's general Reels feed (only when NO friend sender is named) and scrolls next if next=true.
+   - instagram_play_reels(next: boolean): Opens Instagram's general Reels feed (only when NO friend sender is named) and scrolls next if next=true (use next=true whenever Sir asks for "agli", "next", "agla reel", "dusra" while watching Instagram!).
    - send_sms(recipient: string, message: string): Sends a normal SMS text message.
    - play_youtube(query: string): ONLY when Sir explicitly asks to play a song, music, or video on YouTube.
    - open_app(app_name: string): ONLY when Sir specifically asks to just launch or open an app without further actions.
@@ -436,7 +685,83 @@ OUTPUT FORMAT:
 Respond with ONLY a raw JSON object (no markdown, no backticks, no extra text):
 {
   "reasoning": "<1 concise sentence explaining why this tool and parameters were selected>",
-  "speech": "<Natural, short reply in everyday Hinglish, or null if calling universal_app_action or instagram_*>",
+  "speech": "<Natural, short reply in everyday Hinglish, or null if calling universal_app_action, media_control, volume_control, or instagram_*>",
+  "tool_name": "<tool_name or null>",
+  "tool_args": { ... or null }
+}
+""".trimIndent()
+    }
+
+    private fun buildAudioPrompt(
+        voskHint: String,
+        screenElementsSummary: String,
+        isMediaPlaying: Boolean,
+        speakerVerified: Boolean
+    ): String {
+        val livingMemory = memoryManager?.getLivingMemoryContext() ?: ""
+        val memoryBlock = if (livingMemory.isNotBlank()) {
+            "\nJARVIS LIVING MEMORY & USER CONTEXT:\n$livingMemory\n"
+        } else ""
+        val cleanHint = voskHint.replace("\"", "'").trim()
+
+        return """
+You are J.A.R.V.I.S., Sir's hands-free personal Android AI butler listening continuously in the background WITHOUT requiring a wake word ("Jarvis") before every command.
+Listen directly to the attached Hinglish/Hindi/English audio clip and understand what Sir spoke.
+Phonetic offline hint (may mishear Hindi words, always trust the real audio over hint): "$cleanHint"
+Context: isMediaPlaying=$isMediaPlaying, speakerVoiceLockPassed=$speakerVerified
+
+$memoryBlock
+Live Screen Elements:
+$screenElementsSummary
+
+CRITICAL HANDS-FREE FILTER RULES (`should_ignore`):
+1. Set `"should_ignore": true`, `"tool_name": null`, `"speech": null` IF the audio is:
+   - Unclear noise, coughing, breathing, silence, music lyrics, singing, OR dialogue coming from Hotstar/Reels/TV speakers.
+   - Casual human-to-human conversation (between Sir and friends/family) even if mentioning apps, calls, or people in past/narrative conversation ("kal maine Anuj ko msg kiya", "Instagram pe bahut reels aati hain", "uska phone aaya tha") WITHOUT issuing an imperative command to the assistant.
+2. Set `"should_ignore": false` ONLY when Sir issues a clear imperative command/request to operate the phone, apps, calls, messages, media, or settings OR directly addresses "Jarvis".
+3. Always infer the user's true intent dynamically from the live audio and the current Live Screen Elements (never assume fixed phrases):
+   - If Sir asks to move to the next short/reel while Instagram is open -> call `instagram_play_reels(next=true)` with `"speech": null`.
+   - If Sir asks to go back/up on the current feed -> call `scroll_screen(direction="up")` with `"speech": null`.
+   - If Sir asks to pause/play/resume/skip active video or audio -> call `media_control` with `"speech": null`.
+   - If Sir asks to adjust or mute volume -> call `volume_control` with `"speech": null`.
+
+TOOLS:
+- media_control(action: "play_pause"|"pause"|"play"|"next"|"previous"|"stop")
+- volume_control(action: "up"|"down"|"mute"|"unmute"|"set", percent: int?)
+- answer_call()
+- end_call()
+- close_app(app_name: string?)
+- make_phone_call(recipient: string)
+- whatsapp_call(recipient: string, call_type: "voice"|"video")
+- send_whatsapp_message(recipient: string, message: string)
+- instagram_send_message(recipient: string, message: string)
+- instagram_read_last_message(sender: string)
+- instagram_watch_story(person: string)
+- instagram_follow_account(account: string)
+- instagram_play_chat_reels(sender: string, count: int, from_me: boolean)
+- instagram_play_reels(next: boolean)
+- send_sms(recipient: string, message: string)
+- play_youtube(query: string)
+- open_app(app_name: string)
+- universal_app_action(app_name: string, instruction: string)
+- tap_tag(tag: int)
+- type_tag(tag: int, text: string)
+- scroll_screen(direction: "down"|"up")
+- schedule_action(delay_seconds: int, action: string, action_args: object, summary: string)
+- sleep_routine(minutes: int)
+- manage_vip(action: "add"|"remove"|"list", contact: string)
+- learn_preference(preference: string)
+- set_dnd(enabled: boolean)
+- set_brightness(level: string)
+- set_alarm(hour: int, minute: int, message: string)
+- set_timer(seconds: int, message: string)
+
+OUTPUT ONLY RAW JSON (no markdown, no backticks):
+{
+  "transcript": "<exact Hinglish/English transcription of what was heard, or empty string if noise>",
+  "should_ignore": true|false,
+  "reasoning": "<1 short sentence>",
+  "speech": "<short everyday Hinglish reply ONLY when needed, else null>",
   "tool_name": "<tool_name or null>",
   "tool_args": { ... or null }
 }

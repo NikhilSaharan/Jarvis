@@ -47,10 +47,13 @@ import com.jarvis.assistant.security.BankingProtectionManager
 import com.jarvis.assistant.security.PatternLockPadView
 import com.jarvis.assistant.update.AppUpdateManager
 import com.jarvis.assistant.voice.AlwaysOnVoiceService
+import com.jarvis.assistant.voice.PassiveVoiceCaptureEngine
 import com.jarvis.assistant.voice.SpeakerHelper
+import com.jarvis.assistant.voice.VoiceprintManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -58,6 +61,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
 
@@ -75,6 +79,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnShield: Button
     private lateinit var btnLockSetup: Button
     private lateinit var btnCheckUpdate: Button
+    private lateinit var btnVoiceLock: Button
     private lateinit var btnTalk: Button
     private lateinit var etCommandInput: EditText
     private lateinit var btnSendCommand: Button
@@ -101,7 +106,11 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         ) {
             pendingStartAlwaysOn = false
-            activatePermanentVoice()
+            if (!VoiceprintManager.isFullyConfigured(this)) {
+                showVoiceSetupPromptDialog(startMicAfter = true, onLaunch = false)
+            } else {
+                activatePermanentVoice()
+            }
         }
     }
 
@@ -159,6 +168,15 @@ class MainActivity : AppCompatActivity() {
 
         // Automatic In-App Update check on launch
         AppUpdateManager.checkForUpdates(this, isManual = false)
+
+        // Show Voice Lock + Secret Code setup prompt right after opening app if not configured yet
+        if (!VoiceprintManager.isFullyConfigured(this)) {
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (!isFinishing && !isDestroyed && !VoiceprintManager.isFullyConfigured(this)) {
+                    showVoiceSetupPromptDialog(startMicAfter = false, onLaunch = true)
+                }
+            }, 450L)
+        }
     }
 
     private fun initViews() {
@@ -171,6 +189,7 @@ class MainActivity : AppCompatActivity() {
         btnShield = findViewById(R.id.btnShield)
         btnLockSetup = findViewById(R.id.btnLockSetup)
         btnCheckUpdate = findViewById(R.id.btnCheckUpdate)
+        btnVoiceLock = findViewById(R.id.btnVoiceLock)
         btnTalk = findViewById(R.id.btnTalk)
         etCommandInput = findViewById(R.id.etCommandInput)
         btnSendCommand = findViewById(R.id.btnSendCommand)
@@ -244,6 +263,10 @@ class MainActivity : AppCompatActivity() {
             AppUpdateManager.checkForUpdates(this, isManual = true)
         }
 
+        btnVoiceLock.setOnClickListener {
+            showVoiceLockDialog()
+        }
+
         // Permanent Always-On 24/7 Voice Listener Start / Stop Toggle
         btnTalk.setOnClickListener {
             if (AlwaysOnVoiceService.isEnabled(this)) {
@@ -261,6 +284,8 @@ class MainActivity : AppCompatActivity() {
                     pendingStartAlwaysOn = true
                     requestAppPermissions()
                     Toast.makeText(this, "Mic permission allow karein Sir", Toast.LENGTH_SHORT).show()
+                } else if (!VoiceprintManager.isFullyConfigured(this)) {
+                    showVoiceSetupPromptDialog(startMicAfter = true, onLaunch = false)
                 } else {
                     activatePermanentVoice()
                 }
@@ -308,10 +333,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun activatePermanentVoice() {
         AlwaysOnVoiceService.startPermanent(this)
-        speakerHelper.speak("Permanent mic shuru kar diya hai Sir. Ab phone lock ya app band hone par bhi main sununga.")
+        val lockNote = if (VoiceprintManager.isLockActive(this)) {
+            "Ab main bina 'Jarvis' bole bhi sirf aapki aawaz sununga, aur Hotstar ya Reels band nahi honge."
+        } else {
+            "Permanent mic shuru kar diya hai Sir. Hotstar aur Reels ke saath bhi sunta rahunga."
+        }
+        speakerHelper.speak(lockNote)
         Toast.makeText(
             this,
-            "24/7 Mic ON! App close ya screen lock par bhi sunta rahega.",
+            "24/7 Mic ON! Zero-Pause mode active.",
             Toast.LENGTH_LONG
         ).show()
         requestIgnoreBatteryOptimizationsIfNeeded()
@@ -449,6 +479,8 @@ class MainActivity : AppCompatActivity() {
             if (isShieldGranted) R.color.green_active else R.color.jarvis_card_bg
         )
         btnShield.setTextColor(ContextCompat.getColor(this, if (isShieldGranted) R.color.jarvis_dark_bg else R.color.jarvis_gold))
+
+        updateVoiceLockButtonUi()
 
         when {
             isAlwaysOn && isAccRunning -> {
@@ -883,6 +915,460 @@ class MainActivity : AppCompatActivity() {
                 dialog.dismiss()
             }
         }
+        dialog.show()
+    }
+
+    private fun updateVoiceLockButtonUi() {
+        val enrolled = VoiceprintManager.isEnrolled(this)
+        val active = VoiceprintManager.isLockActive(this)
+        when {
+            active -> {
+                btnVoiceLock.text = "🛡️ MY VOICE LOCK: ON (${VoiceprintManager.getSensitivity(this).label} • Sirf Meri Awaaz)"
+                btnVoiceLock.backgroundTintList = ContextCompat.getColorStateList(this, R.color.green_active)
+                btnVoiceLock.setTextColor(ContextCompat.getColor(this, R.color.jarvis_dark_bg))
+            }
+            enrolled -> {
+                btnVoiceLock.text = "⏸️ MY VOICE LOCK: PAUSED (Tap to Enable)"
+                btnVoiceLock.backgroundTintList = ContextCompat.getColorStateList(this, R.color.jarvis_card_bg)
+                btnVoiceLock.setTextColor(ContextCompat.getColor(this, R.color.jarvis_gold))
+            }
+            else -> {
+                btnVoiceLock.text = "🎙️ MY VOICE LOCK: OFF (Tap to Train — Sirf Meri Awaaz)"
+                btnVoiceLock.backgroundTintList = ContextCompat.getColorStateList(this, R.color.jarvis_card_bg)
+                btnVoiceLock.setTextColor(ContextCompat.getColor(this, R.color.jarvis_cyan))
+            }
+        }
+    }
+
+    private fun showVoiceLockDialog() {
+        val enrolled = VoiceprintManager.isEnrolled(this)
+        val isEnabled = VoiceprintManager.isLockEnabledPref(this)
+        val curSensitivity = VoiceprintManager.getSensitivity(this)
+
+        val darkBg = Color.parseColor("#0A0E17")
+        val cyan = Color.parseColor("#00E5FF")
+        val secondary = Color.parseColor("#B0BEC5")
+        val gold = Color.parseColor("#FFD700")
+        val cyanTint = ColorStateList.valueOf(cyan)
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(darkBg)
+            setPadding(48, 36, 48, 24)
+        }
+
+        layout.addView(TextView(this).apply {
+            text = "🎙️ Personal Voice Lock (Sirf Meri Awaaz)"
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(cyan)
+            textSize = 17f
+        })
+
+        layout.addView(TextView(this).apply {
+            text = "Status: ${VoiceprintManager.getStatusSummary(this@MainActivity)}\n" +
+                "Voice Lock ON hone par Jarvis offline aapki voiceprint match karega — Hotstar, Reels, aur doosre logon ki aawaz ignore hogi."
+            setTextColor(secondary)
+            textSize = 12.5f
+            setPadding(0, 12, 0, 20)
+        })
+
+        val rbGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+        }
+        val rbRelaxed = RadioButton(this).apply {
+            text = "Relaxed (Chhote commands 'agli chalaao' easily chalenge)"
+            setTextColor(Color.WHITE)
+            buttonTintList = cyanTint
+            id = View.generateViewId()
+        }
+        val rbBalanced = RadioButton(this).apply {
+            text = "Balanced (Recommended — Best accuracy)"
+            setTextColor(Color.WHITE)
+            buttonTintList = cyanTint
+            id = View.generateViewId()
+        }
+        val rbStrict = RadioButton(this).apply {
+            text = "Strict (Maximum security — milti-julti aawaz bhi block)"
+            setTextColor(Color.WHITE)
+            buttonTintList = cyanTint
+            id = View.generateViewId()
+        }
+        rbGroup.addView(rbRelaxed)
+        rbGroup.addView(rbBalanced)
+        rbGroup.addView(rbStrict)
+        when (curSensitivity) {
+            VoiceprintManager.Sensitivity.RELAXED -> rbRelaxed.isChecked = true
+            VoiceprintManager.Sensitivity.BALANCED -> rbBalanced.isChecked = true
+            VoiceprintManager.Sensitivity.STRICT -> rbStrict.isChecked = true
+        }
+        layout.addView(rbGroup)
+
+        val btnRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 24, 0, 0)
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(layout)
+            .create()
+
+        val btnTrain = Button(this).apply {
+            text = if (enrolled) "🎙️ Re-Train (10s)" else "🎙️ Train My Voice"
+            setBackgroundColor(Color.parseColor("#00E5FF"))
+            setTextColor(darkBg)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = 10
+            }
+            setOnClickListener {
+                dialog.dismiss()
+                showVoiceEnrollmentWizard(startMicAfter = false)
+            }
+        }
+        btnRow.addView(btnTrain)
+
+        if (enrolled) {
+            val btnToggle = Button(this).apply {
+                text = if (isEnabled) "Pause Lock" else "Enable Lock"
+                setBackgroundColor(gold)
+                setTextColor(darkBg)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = 10
+                }
+                setOnClickListener {
+                    VoiceprintManager.setLockEnabled(this@MainActivity, !isEnabled)
+                    updateVoiceLockButtonUi()
+                    dialog.dismiss()
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (!isEnabled) "Voice Lock ON (Sirf aapki aawaz)" else "Voice Lock paused",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+            btnRow.addView(btnToggle)
+        }
+
+        val btnSaveClose = Button(this).apply {
+            text = "Save"
+            setBackgroundColor(Color.parseColor("#141D2B"))
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.8f)
+            setOnClickListener {
+                val chosen = when (rbGroup.checkedRadioButtonId) {
+                    rbRelaxed.id -> VoiceprintManager.Sensitivity.RELAXED
+                    rbStrict.id -> VoiceprintManager.Sensitivity.STRICT
+                    else -> VoiceprintManager.Sensitivity.BALANCED
+                }
+                VoiceprintManager.setSensitivity(this@MainActivity, chosen)
+                updateVoiceLockButtonUi()
+                dialog.dismiss()
+            }
+        }
+        btnRow.addView(btnSaveClose)
+        layout.addView(btnRow)
+        dialog.show()
+    }
+
+    private fun showVoiceSetupPromptDialog(startMicAfter: Boolean, onLaunch: Boolean) {
+        val builder = AlertDialog.Builder(this)
+            .setTitle("🎙️ Personal Voice Lock & Secret Code")
+            .setMessage(
+                "Sirf aapki hi aawaz par Jarvis chalane ke liye:\n" +
+                "1. Apna ek Secret Code type karein.\n" +
+                "2. Normal, Fast, Dheemi, Tez aawaz + Secret Code bolkar 5 quick samples save karein.\n\n" +
+                "Iske baad kisi aur ki aawaz par Jarvis block karega, aur doubt hone par pehle Secret Code poochega!"
+            )
+            .setPositiveButton("🚀 Abhi Setup Karein") { _, _ ->
+                showVoiceEnrollmentWizard(startMicAfter = startMicAfter)
+            }
+        if (onLaunch) {
+            builder.setNegativeButton("Baad Me", null)
+        } else {
+            builder.setNeutralButton("Skip Karein") { _, _ -> activatePermanentVoice() }
+            builder.setNegativeButton("Cancel", null)
+        }
+        builder.show()
+    }
+
+    private fun showVoiceEnrollmentWizard(startMicAfter: Boolean) {
+        val hasMicPerm = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasMicPerm) {
+            requestAppPermissions()
+            Toast.makeText(this, "Pehle Mic permission allow karein Sir", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val styleTitles = listOf(
+            "Sample 1/5 — Normal Voice (Samanya Gati):",
+            "Sample 2/5 — Fast Speed (Tez Speed Me Bolein):",
+            "Sample 3/5 — Low / Soft Voice (Dheemi Aawaz Me):",
+            "Sample 4/5 — Loud / Clear Voice (Tez / Unchi Aawaz Me):",
+            "Sample 5/5 — Speak Your Secret Code (Match Test):"
+        )
+        val stylePrompts = mutableListOf(
+            "\"Jarvis aaj ka mausam kaisa hai aur abhi kitne baje hain\"",
+            "\"Phone ki brightness aur volume thoda kam kar do\"",
+            "\"YouTube ya Hotstar par koi video dhire se chalao\"",
+            "\"Mera naam hamesha yaad rakhna sirf meri hi aawaz sunna\"",
+            ""
+        )
+
+        val darkBg = Color.parseColor("#0A0E17")
+        val cardBg = Color.parseColor("#141D2B")
+        val cyan = Color.parseColor("#00E5FF")
+        val gold = Color.parseColor("#FFD700")
+        val green = Color.parseColor("#00E676")
+        val secondary = Color.parseColor("#B0BEC5")
+
+        val rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(darkBg)
+            setPadding(48, 36, 48, 32)
+        }
+
+        // ── STEP 0: Type Secret Code UI ──
+        val secretStepLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        secretStepLayout.addView(TextView(this).apply {
+            text = "🔐 Step 1: Apna Secret Code Type Karein"
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(gold)
+            textSize = 16f
+        })
+        secretStepLayout.addView(TextView(this).apply {
+            text = "Koi bhi aasaan 1-3 word secret code type karein (jaise 'Alpha Nine' ya 'Mera Raaz 7').\n\n" +
+                "Setup poora karne ke liye Sample 5 me yahi code bolkar match karna hoga, aur future me jab aawaz par doubt hoga tab Jarvis yahi code poochega."
+            setTextColor(secondary)
+            textSize = 12.5f
+            setPadding(0, 12, 0, 18)
+        })
+        val etSecretCode = EditText(this).apply {
+            hint = "Yahan secret code type karein..."
+            setHintTextColor(Color.parseColor("#78909C"))
+            setTextColor(Color.WHITE)
+            setBackgroundColor(cardBg)
+            setPadding(28, 24, 28, 24)
+            setText(VoiceprintManager.getSecretCode(this@MainActivity))
+            isSingleLine = true
+        }
+        secretStepLayout.addView(etSecretCode)
+        val btnStartSamples = Button(this).apply {
+            text = "Next: 5 Voice Samples Start Karein →"
+            setBackgroundColor(cyan)
+            setTextColor(darkBg)
+            isAllCaps = false
+        }
+        secretStepLayout.addView(btnStartSamples, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 20 })
+
+        // ── STEP 1..5: Voice Sample Recording UI ──
+        val voiceStepLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        val tvStep = TextView(this).apply {
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(gold)
+            textSize = 14f
+        }
+        val tvPhrase = TextView(this).apply {
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            textSize = 16.5f
+            setBackgroundColor(cardBg)
+            setPadding(28, 28, 28, 28)
+        }
+        val tvStatus = TextView(this).apply {
+            setTextColor(cyan)
+            textSize = 13f
+            setPadding(0, 18, 0, 16)
+        }
+        val btnAction = Button(this).apply {
+            setBackgroundColor(cyan)
+            setTextColor(darkBg)
+            isAllCaps = false
+        }
+        voiceStepLayout.addView(tvStep)
+        voiceStepLayout.addView(tvPhrase, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 16 })
+        voiceStepLayout.addView(tvStatus)
+        voiceStepLayout.addView(btnAction)
+
+        val btnCancel = Button(this).apply {
+            text = "Cancel"
+            setBackgroundColor(cardBg)
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+        }
+
+        rootLayout.addView(secretStepLayout)
+        rootLayout.addView(voiceStepLayout)
+        rootLayout.addView(btnCancel, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 12 })
+
+        val samples = mutableListOf<VoiceprintManager.EnrollmentSample>()
+        val cancelled = AtomicBoolean(false)
+        var stepIdx = 0
+        var typedSecretCode = ""
+
+        AlwaysOnVoiceService.pauseForEnrollment(this)
+
+        val dialog = AlertDialog.Builder(this)
+            .setCancelable(false)
+            .setView(rootLayout)
+            .create()
+
+        dialog.setOnDismissListener {
+            cancelled.set(true)
+            AlwaysOnVoiceService.resumeAfterEnrollment(this)
+        }
+
+        btnCancel.setOnClickListener {
+            cancelled.set(true)
+            dialog.dismiss()
+        }
+
+        fun updateStepUi(justSavedCount: Int = 0) {
+            tvStep.text = styleTitles[stepIdx]
+            tvPhrase.text = stylePrompts[stepIdx]
+            if (justSavedCount > 0) {
+                tvStatus.setTextColor(green)
+                tvStatus.text = if (stepIdx == 4) {
+                    "4 styles save ho gaye! Ab apna typed Secret Code bolkar verify karein."
+                } else {
+                    "Sample $justSavedCount save! Ab bataye hue style me agla sentence bolein."
+                }
+            } else {
+                tvStatus.setTextColor(cyan)
+                tvStatus.text = if (stepIdx == 0 && !PassiveVoiceCaptureEngine.areModelsDownloaded(this)) {
+                    "First time offline Voice Lock model download hoga (~49 MB), phir Sample 1 record hoga."
+                } else if (stepIdx == 4) {
+                    "Button dabakar apna Secret Code saaf aawaz me bolein."
+                } else {
+                    "Button dabakar sentence bataye hue style me padhein (2-3 sec)."
+                }
+            }
+            btnAction.text = if (stepIdx == 4) "🔐 Speak & Match Secret Code" else "🎙️ Record Sample ${stepIdx + 1}"
+            btnAction.isEnabled = true
+        }
+
+        fun finishAndSaveAll() {
+            val saved = VoiceprintManager.saveEnrollment(this@MainActivity, samples, typedSecretCode)
+            updateVoiceLockButtonUi()
+            dialog.dismiss()
+            if (saved) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "🛡️ Voice Lock + Secret Code Active! Ab Jarvis sirf aapki aawaz sunega.",
+                    Toast.LENGTH_LONG
+                ).show()
+                JarvisLogStore.log("VOICE_LOCK", "Owner enrolled ${samples.size} multi-style samples + Secret Code.")
+                if (startMicAfter) {
+                    activatePermanentVoice()
+                } else {
+                    speakerHelper.speak("Sabhi 5 voice styles aur secret code verify ho gaye hain Sir. Ab main sirf aapki aawaz sununga.")
+                }
+            }
+        }
+
+        fun startCurrentCapture() {
+            btnAction.isEnabled = false
+            btnAction.text = "Sun raha hoon..."
+            tvStatus.setTextColor(cyan)
+            tvStatus.text = "Taiyaar ho raha hai..."
+
+            val isSecretStep = (stepIdx == 4)
+            CoroutineScope(Dispatchers.IO).launch {
+                val res = PassiveVoiceCaptureEngine.recordEnrollmentPhrase(
+                    context = this@MainActivity,
+                    isCancelled = { cancelled.get() || isFinishing || isDestroyed },
+                    onProgress = { status, levelPct ->
+                        runOnUiThread {
+                            if (!cancelled.get()) {
+                                tvStatus.text = if (levelPct > 0) "$status (Mic level: $levelPct%)" else status
+                            }
+                        }
+                    },
+                    minSpkFrames = if (isSecretStep) 45 else 75,
+                    minSpokenMs = if (isSecretStep) 900L else 1400L
+                )
+                withContext(Dispatchers.Main) {
+                    if (cancelled.get() || isFinishing || isDestroyed) return@withContext
+                    res.onSuccess { recording ->
+                        if (!isSecretStep) {
+                            samples.add(recording.sample)
+                            stepIdx++
+                            updateStepUi(justSavedCount = stepIdx)
+                        } else {
+                            // Verify typed Secret Code == spoken Secret Code AND voice consistency against Samples 1..4
+                            tvStatus.setTextColor(cyan)
+                            tvStatus.text = "Typed code aur voice match check ho raha hai..."
+                            commandExecutor.verifySecretCodeAudio(
+                                wavBytes = recording.wavBytes,
+                                expectedSecretCode = typedSecretCode,
+                                voskHint = recording.voskText,
+                                offlineFallbackMatch = VoiceprintManager::matchesSecretCodeTextOffline
+                            ) { checkRes ->
+                                if (cancelled.get() || isFinishing || isDestroyed) return@verifySecretCodeAudio
+                                if (!checkRes.matched) {
+                                    tvStatus.setTextColor(gold)
+                                    tvStatus.text = "Bola gaya code ('${checkRes.heardText}') typed Secret Code ('$typedSecretCode') se match nahi hua! Dobara bolein."
+                                    btnAction.text = "🔄 Retry Secret Code"
+                                    btnAction.isEnabled = true
+                                    return@verifySecretCodeAudio
+                                }
+
+                                // Ensure Sample 5 speaker vector came from the same voice as Samples 1..4
+                                val spk5 = recording.sample.spkVector
+                                val avgPrevSim = samples.map {
+                                    VoiceprintManager.cosineSimilarity(spk5, it.spkVector)
+                                }.maxOrNull() ?: 1.0f
+                                if (samples.isNotEmpty() && avgPrevSim < 0.35f) {
+                                    tvStatus.setTextColor(gold)
+                                    tvStatus.text = "Secret code ki aawaz pehle samples se alag lag rahi hai! Khud apni aawaz me bolein."
+                                    btnAction.text = "🔄 Retry Secret Code"
+                                    btnAction.isEnabled = true
+                                    return@verifySecretCodeAudio
+                                }
+
+                                samples.add(recording.sample)
+                                finishAndSaveAll()
+                            }
+                        }
+                    }.onFailure { err ->
+                        tvStatus.setTextColor(gold)
+                        tvStatus.text = "Dobara try karein: ${err.message}"
+                        btnAction.text = if (isSecretStep) "🔄 Retry Secret Code" else "🔄 Retry Sample ${stepIdx + 1}"
+                        btnAction.isEnabled = true
+                    }
+                }
+            }
+        }
+
+        btnStartSamples.setOnClickListener {
+            val entered = etSecretCode.text.toString().trim()
+            if (entered.length < 4) {
+                Toast.makeText(this, "Kam se kam 4 aksharon ka Secret Code type karein Sir.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            typedSecretCode = entered
+            stylePrompts[4] = "Apna Secret Code abhi bolein:\n\"$typedSecretCode\""
+            secretStepLayout.visibility = View.GONE
+            voiceStepLayout.visibility = View.VISIBLE
+            updateStepUi()
+        }
+
+        btnAction.setOnClickListener { startCurrentCapture() }
         dialog.show()
     }
 

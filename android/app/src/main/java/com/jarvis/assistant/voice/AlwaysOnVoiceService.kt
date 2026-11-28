@@ -1,6 +1,5 @@
 package com.jarvis.assistant.voice
 
-import android.Manifest
 import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -11,7 +10,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.os.Build
@@ -20,7 +18,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.UserManager
-import android.speech.SpeechRecognizer
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.jarvis.assistant.MainActivity
@@ -30,8 +27,8 @@ import com.jarvis.assistant.memory.JarvisMemoryManager
 
 /**
  * Permanent 24/7 hands-free voice listening service.
- * Stays active across background minimize, app swipe-away (START_STICKY + Alarm watchdog),
- * screen OFF / lockscreen (PARTIAL_WAKE_LOCK), and device reboot until user explicitly clicks STOP in MainActivity.
+ * Runs 100% Zero-AudioFocus passive AudioRecord + Vosk SpeakerModel voiceprint verification
+ * so Hotstar, Instagram Reels, YouTube, and music NEVER pause or mute, with NO wake word required.
  */
 class AlwaysOnVoiceService : Service() {
 
@@ -46,6 +43,8 @@ class AlwaysOnVoiceService : Service() {
         const val ACTION_START = "com.jarvis.assistant.ACTION_START_PERMANENT_MIC"
         const val ACTION_STOP = "com.jarvis.assistant.ACTION_STOP_PERMANENT_MIC"
         const val ACTION_RESTART_WATCHDOG = "com.jarvis.assistant.RESTART_ALWAYS_ON"
+        const val ACTION_PAUSE_ENROLL = "com.jarvis.assistant.ACTION_PAUSE_FOR_ENROLL"
+        const val ACTION_RESUME_ENROLL = "com.jarvis.assistant.ACTION_RESUME_AFTER_ENROLL"
 
         @Volatile
         var isRunning: Boolean = false
@@ -170,12 +169,32 @@ class AlwaysOnVoiceService : Service() {
             } catch (_: Exception) {
             }
         }
+
+        fun pauseForEnrollment(context: Context) {
+            val appCtx = context.applicationContext
+            if (!isEnabled(appCtx) || !isRunning) return
+            try {
+                val intent = Intent(appCtx, AlwaysOnVoiceService::class.java).setAction(ACTION_PAUSE_ENROLL)
+                appCtx.startService(intent)
+            } catch (_: Exception) {
+            }
+        }
+
+        fun resumeAfterEnrollment(context: Context) {
+            val appCtx = context.applicationContext
+            if (!isEnabled(appCtx)) return
+            try {
+                val intent = Intent(appCtx, AlwaysOnVoiceService::class.java).setAction(ACTION_RESUME_ENROLL)
+                ContextCompat.startForegroundService(appCtx, intent)
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var speakerHelper: SpeakerHelper
     private lateinit var commandExecutor: JarvisCommandExecutor
-    private var speechRecognizerHelper: SpeechRecognizerHelper? = null
+    private var voiceCaptureEngine: PassiveVoiceCaptureEngine? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var audioManager: AudioManager
 
@@ -186,25 +205,43 @@ class AlwaysOnVoiceService : Service() {
     private var needsMicTypeUpgrade = false
 
     @Volatile
-    private var loggedPermMissing = false
+    private var executingCommand = false
 
     @Volatile
-    private var loggedNetworkDown = false
+    private var pausedForEnrollment = false
 
-    private var consecutiveSilenceCount = 0
-    private var consecutiveErrorCount = 0
-    private var lastHeardText = ""
-    private var lastHeardAtMs = 0L
+    @Volatile
+    private var awaitingSecretCode = false
 
-    private val listenRunnable = Runnable { attemptStartListening() }
+    private var pendingDoubtDecision: com.jarvis.assistant.brain.ActionDecision? = null
+    private var pendingDoubtTranscript: String = ""
+    private var lastNotificationText = "Hotstar/Reels ke saath bina ruke sun raha hoon"
+
+    private val resumeListenRunnable = Runnable { resumePassiveListeningNow() }
+    private val secretChallengeTimeoutRunnable = Runnable {
+        if (awaitingSecretCode) {
+            awaitingSecretCode = false
+            voiceCaptureEngine?.forceForwardForChallenge = false
+            pendingDoubtDecision = null
+            pendingDoubtTranscript = ""
+            JarvisLogStore.log("VOICE_LOCK", "Secret code challenge timed out (16s); held command cancelled.")
+            updateNotificationText(
+                if (VoiceprintManager.isLockActive(this)) "Hotstar/Reels ke saath sun raha hoon — Sirf Aapki Awaaz"
+                else "Hotstar/Reels ke saath bina ruke sun raha hoon"
+            )
+            schedulePassiveResume(250L)
+        }
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (!stopping && isEnabled(this@AlwaysOnVoiceService)) {
                 if (needsMicTypeUpgrade) {
-                    promoteToForegroundNotification()
+                    promoteToForegroundNotification(lastNotificationText)
                 }
-                scheduleListen(250L)
+                if (!executingCommand && !pausedForEnrollment) {
+                    schedulePassiveResume(250L)
+                }
             }
         }
     }
@@ -217,17 +254,16 @@ class AlwaysOnVoiceService : Service() {
         notifyUi()
 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        promoteToForegroundNotification()
+        promoteToForegroundNotification(lastNotificationText)
         acquirePartialWakeLock()
 
         speakerHelper = SpeakerHelper(this).apply {
             onSpeakingStateChanged = { speaking ->
                 mainHandler.post {
-                    if (speaking) {
-                        mainHandler.removeCallbacks(listenRunnable)
-                        speechRecognizerHelper?.cancel()
-                    } else if (!stopping && isEnabled(this@AlwaysOnVoiceService)) {
-                        scheduleListen(380L)
+                    if (!speaking && !stopping && isEnabled(this@AlwaysOnVoiceService) &&
+                        !executingCommand && !pausedForEnrollment
+                    ) {
+                        schedulePassiveResume(320L)
                     }
                 }
             }
@@ -235,11 +271,20 @@ class AlwaysOnVoiceService : Service() {
         val memoryManager = JarvisMemoryManager(this)
         commandExecutor = JarvisCommandExecutor(this, speakerHelper, memoryManager)
 
-        speechRecognizerHelper = SpeechRecognizerHelper(
-            this,
-            onResult = { heard -> onVoiceHeard(heard) },
-            onError = { /* handled via onErrorCode cleanly without noisy TTS */ },
-            onErrorCode = { code -> onVoiceError(code) }
+        voiceCaptureEngine = PassiveVoiceCaptureEngine(
+            context = this,
+            onUtteranceReady = { captured -> onVerifiedSpeechCaptured(captured) },
+            onStatusUpdate = { state, msg ->
+                if (!executingCommand && !stopping && !pausedForEnrollment) {
+                    if (state == PassiveVoiceCaptureEngine.State.LISTENING ||
+                        state == PassiveVoiceCaptureEngine.State.DOWNLOADING ||
+                        state == PassiveVoiceCaptureEngine.State.WAITING_NETWORK ||
+                        state == PassiveVoiceCaptureEngine.State.WAITING_PERMISSION
+                    ) {
+                        updateNotificationText(msg)
+                    }
+                }
+            }
         )
 
         val filter = IntentFilter().apply {
@@ -256,24 +301,42 @@ class AlwaysOnVoiceService : Service() {
         } catch (_: Exception) {
         }
 
-        JarvisLogStore.log("ALWAYS_ON", "AlwaysOnVoiceService active (24/7 loop initialized).")
+        JarvisLogStore.log("ALWAYS_ON", "AlwaysOnVoiceService active (Direct Voice Lock + Zero-AudioFocus mode).")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         JarvisLogStore.init(this)
-        if (intent?.action == ACTION_STOP || !isEnabled(this)) {
+        val action = intent?.action
+        if (action == ACTION_STOP || !isEnabled(this)) {
             stopping = true
             stopSelf()
             return START_NOT_STICKY
         }
 
+        if (action == ACTION_PAUSE_ENROLL) {
+            pausedForEnrollment = true
+            mainHandler.removeCallbacks(resumeListenRunnable)
+            voiceCaptureEngine?.pauseForProcessing("Voice Lock training chal rahi hai...")
+            updateNotificationText("Voice Lock training chal rahi hai...")
+            return START_STICKY
+        }
+
+        if (action == ACTION_RESUME_ENROLL) {
+            pausedForEnrollment = false
+            schedulePassiveResume(300L)
+            return START_STICKY
+        }
+
         stopping = false
+        pausedForEnrollment = false
         isRunning = true
         notifyUi()
-        promoteToForegroundNotification()
+        promoteToForegroundNotification(lastNotificationText)
         acquirePartialWakeLock()
         scheduleWatchdogAlarm(this, WATCHDOG_INTERVAL_MS)
-        scheduleListen(250L)
+        if (!executingCommand) {
+            schedulePassiveResume(200L)
+        }
         return START_STICKY
     }
 
@@ -298,38 +361,52 @@ class AlwaysOnVoiceService : Service() {
         }
     }
 
-    private fun promoteToForegroundNotification() {
+    private fun updateNotificationText(contentText: String) {
+        if (contentText == lastNotificationText) return
+        lastNotificationText = contentText
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    "J.A.R.V.I.S. 24/7 Listening",
-                    NotificationManager.IMPORTANCE_LOW
-                )
-                getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
-            }
+            val nm = getSystemService(NotificationManager::class.java) ?: return
+            nm.notify(NOTIFICATION_ID, buildForegroundNotification(contentText))
+        } catch (_: Exception) {
+        }
+    }
 
-            val openIntent = Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            }
-            val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            } else {
-                PendingIntent.FLAG_UPDATE_CURRENT
-            }
-            val openPending = PendingIntent.getActivity(this, 0, openIntent, pendingFlags)
+    private fun buildForegroundNotification(contentText: String): Notification {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "J.A.R.V.I.S. 24/7 Listening",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+        }
 
-            // Ongoing persistent notification with NO Stop button (user stops strictly inside MainActivity)
-            val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("J.A.R.V.I.S. Mic ON (24/7)")
-                .setContentText("Hamesha sun raha hoon Sir — stop karne ke liye app kholein.")
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setContentIntent(openPending)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build()
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val openPending = PendingIntent.getActivity(this, 0, openIntent, pendingFlags)
 
+        // Ongoing persistent notification with NO Stop button (user stops strictly inside MainActivity)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("J.A.R.V.I.S. Mic ON (24/7)")
+            .setContentText(contentText)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(openPending)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+    }
+
+    private fun promoteToForegroundNotification(contentText: String = lastNotificationText) {
+        lastNotificationText = contentText
+        try {
+            val notification = buildForegroundNotification(contentText)
             if (Build.VERSION.SDK_INT >= 34) {
                 try {
                     startForeground(
@@ -338,7 +415,7 @@ class AlwaysOnVoiceService : Service() {
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                     )
                     needsMicTypeUpgrade = false
-                } catch (sec: SecurityException) {
+                } catch (_: SecurityException) {
                     needsMicTypeUpgrade = true
                     startForeground(
                         NOTIFICATION_ID,
@@ -355,33 +432,26 @@ class AlwaysOnVoiceService : Service() {
         }
     }
 
-    private fun scheduleListen(delayMs: Long) {
-        if (stopping || !isEnabled(this)) return
-        mainHandler.removeCallbacks(listenRunnable)
-        mainHandler.postDelayed(listenRunnable, delayMs)
+    private fun schedulePassiveResume(delayMs: Long) {
+        if (stopping || !isEnabled(this) || pausedForEnrollment) return
+        mainHandler.removeCallbacks(resumeListenRunnable)
+        mainHandler.postDelayed(resumeListenRunnable, delayMs)
     }
 
-    private fun attemptStartListening() {
-        if (stopping || !isEnabled(this)) return
-
-        val hasAudioPerm = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!hasAudioPerm) {
-            if (!loggedPermMissing) {
-                loggedPermMissing = true
-                JarvisLogStore.log("ALWAYS_ON_ERR", "RECORD_AUDIO permission missing; waiting...")
-            }
-            scheduleListen(4000L)
+    private fun resumePassiveListeningNow() {
+        if (stopping || !isEnabled(this) || executingCommand || pausedForEnrollment) return
+        if (SpeakerHelper.isAnySpeaking()) {
+            schedulePassiveResume(320L)
             return
         }
-        loggedPermMissing = false
-
-        if (speakerHelper.isCurrentlySpeaking()) {
-            scheduleListen(350L)
-            return
+        if (needsMicTypeUpgrade) {
+            promoteToForegroundNotification(lastNotificationText)
         }
+        voiceCaptureEngine?.startListening()
+    }
+
+    private fun onVerifiedSpeechCaptured(captured: PassiveVoiceCaptureEngine.CapturedUtterance) {
+        if (stopping || !isEnabled(this) || executingCommand || pausedForEnrollment) return
 
         val audioMode = try {
             audioManager.mode
@@ -389,108 +459,160 @@ class AlwaysOnVoiceService : Service() {
             AudioManager.MODE_NORMAL
         }
         if (audioMode == AudioManager.MODE_IN_CALL || audioMode == AudioManager.MODE_IN_COMMUNICATION) {
-            scheduleListen(1200L)
+            schedulePassiveResume(1200L)
             return
         }
 
-        if (needsMicTypeUpgrade) {
-            promoteToForegroundNotification()
-        }
+        executingCommand = true
+        mainHandler.removeCallbacks(resumeListenRunnable)
 
-        try {
-            if (consecutiveSilenceCount >= 10) {
-                consecutiveSilenceCount = 0
-                speechRecognizerHelper?.recreate()
-            }
-            speechRecognizerHelper?.startListening()
-        } catch (e: Exception) {
-            JarvisLogStore.log("ALWAYS_ON_WARN", "startListening exception: ${e.message}")
-            speechRecognizerHelper?.recreate()
-            scheduleListen(1000L)
-        }
-    }
+        // 1. Handling response to an active Secret Code verification challenge
+        if (awaitingSecretCode) {
+            mainHandler.removeCallbacks(secretChallengeTimeoutRunnable)
+            awaitingSecretCode = false
+            voiceCaptureEngine?.forceForwardForChallenge = false
+            val held = pendingDoubtDecision
+            val heldTranscript = pendingDoubtTranscript
+            pendingDoubtDecision = null
+            pendingDoubtTranscript = ""
 
-    private fun onVoiceHeard(rawText: String) {
-        val text = rawText.trim()
-        consecutiveSilenceCount = 0
-        consecutiveErrorCount = 0
-        loggedNetworkDown = false
+            val expectedCode = VoiceprintManager.getSecretCode(this)
+            updateNotificationText("Secret code verify kar raha hoon...")
 
-        if (text.length < 2 || SpeakerHelper.isAnySpeaking()) {
-            scheduleListen(350L)
-            return
-        }
-
-        val now = System.currentTimeMillis()
-        if (text.equals(lastHeardText, ignoreCase = true) && (now - lastHeardAtMs) < 2000L) {
-            scheduleListen(300L)
-            return
-        }
-        lastHeardText = text
-        lastHeardAtMs = now
-
-        commandExecutor.executeUserCommand(text, sourceTag = "USER_VOICE") {
-            if (!stopping && isEnabled(this@AlwaysOnVoiceService)) {
-                scheduleListen(420L)
-            }
-        }
-    }
-
-    private fun onVoiceError(errorCode: Int) {
-        if (stopping || !isEnabled(this)) return
-
-        when (errorCode) {
-            SpeechRecognizer.ERROR_NO_MATCH,
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                consecutiveSilenceCount++
-                consecutiveErrorCount = 0
-                scheduleListen(260L)
-            }
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
-            SpeechRecognizer.ERROR_CLIENT -> {
-                consecutiveErrorCount++
-                speechRecognizerHelper?.recreate()
-                scheduleListen(650L)
-            }
-            SpeechRecognizer.ERROR_NETWORK,
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
-            SpeechRecognizer.ERROR_SERVER -> {
-                consecutiveErrorCount++
-                if (!loggedNetworkDown) {
-                    loggedNetworkDown = true
-                    JarvisLogStore.log("ALWAYS_ON_WARN", "Speech service waiting on network/server ($errorCode); backing off...")
+            commandExecutor.verifySecretCodeAudio(
+                wavBytes = captured.wavBytes,
+                expectedSecretCode = expectedCode,
+                voskHint = captured.voskHint,
+                offlineFallbackMatch = VoiceprintManager::matchesSecretCodeTextOffline
+            ) { checkRes ->
+                if (checkRes.matched && held != null) {
+                    JarvisLogStore.log("VOICE_LOCK", "Secret code VERIFIED ('${checkRes.heardText}')! Running held command: '$heldTranscript'")
+                    updateNotificationText("Verified! Execute kar raha hoon...")
+                    commandExecutor.executePreParsedDecision(held, heldTranscript, sourceTag = "USER_VOICE") {
+                        executingCommand = false
+                        if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
+                            schedulePassiveResume(380L)
+                        }
+                    }
+                } else {
+                    JarvisLogStore.log("VOICE_LOCK", "Secret code REJECTED (heard='${checkRes.heardText}'). Held command blocked.")
+                    val reply = checkRes.dynamicReply.ifBlank {
+                        "Secret code match nahi hua — command cancel kar diya hai."
+                    }
+                    executingCommand = false
+                    commandExecutor.speakDynamic(reply)
+                    if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
+                        schedulePassiveResume(650L)
+                    }
                 }
-                val shift = minOf(consecutiveErrorCount, 3)
-                val backoff = (1500L shl shift).coerceAtMost(8000L)
-                scheduleListen(backoff)
             }
-            SpeechRecognizer.ERROR_AUDIO -> {
-                consecutiveErrorCount++
-                speechRecognizerHelper?.recreate()
-                scheduleListen(1000L)
+            return
+        }
+
+        // 2. Normal 3-Tier routing
+        when (captured.verification.tier) {
+            VoiceprintManager.MatchTier.TRUSTED -> {
+                updateNotificationText("Samajh raha hoon...")
+                val speakerVerified = VoiceprintManager.isLockActive(this) && captured.verification.allowed
+                commandExecutor.executeAudioCommand(
+                    wavBytes = captured.wavBytes,
+                    voskHint = captured.voskHint,
+                    isMediaPlaying = captured.isMediaPlaying,
+                    speakerVerified = speakerVerified,
+                    sourceTag = "USER_VOICE"
+                ) { ignored, transcript ->
+                    executingCommand = false
+                    if (!ignored && transcript.isNotBlank()) {
+                        updateNotificationText("Executed: $transcript")
+                    }
+                    if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
+                        schedulePassiveResume(if (ignored) 120L else 380L)
+                    }
+                }
             }
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-                JarvisLogStore.log("ALWAYS_ON_ERR", "Mic permission denied by OS.")
-                scheduleListen(5000L)
+
+            VoiceprintManager.MatchTier.DOUBT -> {
+                updateNotificationText("Voice check ho rahi hai...")
+                commandExecutor.evaluateDoubtOrRejectedAudio(
+                    wavBytes = captured.wavBytes,
+                    voskHint = captured.voskHint,
+                    tier = "DOUBT",
+                    similarity = captured.verification.similarity,
+                    acceptThreshold = captured.verification.acceptThreshold,
+                    isMediaPlaying = captured.isMediaPlaying
+                ) { eval ->
+                    if (!eval.isCommandAttempt || eval.heldDecision == null ||
+                        (eval.heldDecision.toolName == null && eval.heldDecision.speech == null)
+                    ) {
+                        executingCommand = false
+                        if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
+                            schedulePassiveResume(150L)
+                        }
+                        return@evaluateDoubtOrRejectedAudio
+                    }
+
+                    pendingDoubtDecision = eval.heldDecision
+                    pendingDoubtTranscript = eval.transcript
+                    awaitingSecretCode = true
+                    voiceCaptureEngine?.forceForwardForChallenge = true
+                    executingCommand = false
+
+                    val askSpeech = eval.dynamicSpeech.ifBlank {
+                        "Aawaz par thoda doubt lag raha hai — aage badhne ke liye apna secret code bataiye."
+                    }
+                    updateNotificationText("Secret code pooch raha hoon...")
+                    commandExecutor.speakDynamic(askSpeech)
+
+                    mainHandler.removeCallbacks(secretChallengeTimeoutRunnable)
+                    mainHandler.postDelayed(secretChallengeTimeoutRunnable, 16_000L)
+                    if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
+                        schedulePassiveResume(500L)
+                    }
+                }
             }
-            else -> {
-                consecutiveErrorCount++
-                speechRecognizerHelper?.recreate()
-                scheduleListen(800L)
+
+            VoiceprintManager.MatchTier.REJECTED -> {
+                commandExecutor.evaluateDoubtOrRejectedAudio(
+                    wavBytes = captured.wavBytes,
+                    voskHint = captured.voskHint,
+                    tier = "REJECTED",
+                    similarity = captured.verification.similarity,
+                    acceptThreshold = captured.verification.acceptThreshold,
+                    isMediaPlaying = captured.isMediaPlaying
+                ) { eval ->
+                    executingCommand = false
+                    if (eval.isCommandAttempt) {
+                        val refusal = eval.dynamicSpeech.ifBlank {
+                            "Aapki voice Sir se match nahi kar rahi hai, main yeh command nahi chala sakta."
+                        }
+                        JarvisLogStore.log("VOICE_LOCK", "Blocked stranger command '${eval.transcript}' -> spoken refusal")
+                        updateNotificationText("Voice match nahi hui — Blocked")
+                        commandExecutor.speakDynamic(refusal)
+                    }
+                    if (!stopping && isEnabled(this@AlwaysOnVoiceService) && !pausedForEnrollment) {
+                        schedulePassiveResume(if (eval.isCommandAttempt) 700L else 150L)
+                    }
+                }
             }
         }
     }
 
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
+        executingCommand = false
+        pausedForEnrollment = false
+        awaitingSecretCode = false
+        pendingDoubtDecision = null
+        pendingDoubtTranscript = ""
         try {
             unregisterReceiver(screenReceiver)
         } catch (_: Exception) {
         }
         try {
-            speechRecognizerHelper?.destroy()
+            voiceCaptureEngine?.release()
         } catch (_: Exception) {
         }
+        voiceCaptureEngine = null
         try {
             speakerHelper.shutdown()
         } catch (_: Exception) {

@@ -83,29 +83,149 @@ class JarvisCommandExecutor(
                 JarvisLogStore.log("CORE", "Brain: Analyzing with Gemini AI...")
                 val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
                 val decision = geminiBrain.processCommand(clean, screenContext)
-
-                val tool = decision.toolName?.takeIf { it.isNotBlank() && it != "null" }
-                val args = decision.toolArgs ?: emptyMap()
-                val speech = decision.speech?.takeIf { it.isNotBlank() && it != "null" }
-                val alreadySpoken = speech != null
-
-                if (speech != null) {
-                    JarvisLogStore.log("JARVIS_SPEAK", "Jarvis: \"$speech\"")
-                    speakerHelper.speak(speech)
-                }
-
-                if (tool == null) {
-                    JarvisLogStore.log("CORE", "[Result]: Done (Conversational)")
-                    return@launch
-                }
-
-                executeSingleTool(tool, args, alreadySpoken)
+                dispatchDecision(decision)
             } catch (e: Exception) {
                 JarvisLogStore.log("EXEC_ERROR", "Command failed cleanly: ${e.message}")
             } finally {
                 onFinished?.invoke()
             }
         }
+    }
+
+    fun executeAudioCommand(
+        wavBytes: ByteArray,
+        voskHint: String,
+        isMediaPlaying: Boolean,
+        speakerVerified: Boolean,
+        sourceTag: String = "USER_VOICE",
+        onFinished: ((ignored: Boolean, transcript: String) -> Unit)? = null
+    ) {
+        scope.launch {
+            var ignored = false
+            var transcript = ""
+            try {
+                val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
+                val decision = geminiBrain.processAudioCommand(
+                    wavBytes = wavBytes,
+                    voskHint = voskHint,
+                    screenElementsSummary = screenContext,
+                    isMediaPlaying = isMediaPlaying,
+                    speakerVerified = speakerVerified
+                )
+                transcript = decision.transcript?.trim().orEmpty()
+                if (decision.shouldIgnore) {
+                    ignored = true
+                    return@launch
+                }
+                if (transcript.isNotBlank()) {
+                    JarvisLogStore.log(sourceTag, "\"$transcript\"")
+                }
+                dispatchDecision(decision)
+            } catch (e: Exception) {
+                JarvisLogStore.log("EXEC_ERROR", "Audio command failed cleanly: ${e.message}")
+            } finally {
+                onFinished?.invoke(ignored, transcript)
+            }
+        }
+    }
+
+    fun evaluateDoubtOrRejectedAudio(
+        wavBytes: ByteArray,
+        voskHint: String,
+        tier: String,
+        similarity: Float,
+        acceptThreshold: Float,
+        isMediaPlaying: Boolean,
+        onResult: (com.jarvis.assistant.brain.GeminiBrain.UnauthorizedAudioEvaluation) -> Unit
+    ) {
+        scope.launch {
+            val res = try {
+                val screenContext = JarvisAccessibilityService.instance?.dumpScreenElementsSummary() ?: ""
+                geminiBrain.evaluateDoubtOrRejectedAudio(
+                    wavBytes = wavBytes,
+                    voskHint = voskHint,
+                    screenElementsSummary = screenContext,
+                    tier = tier,
+                    similarity = similarity,
+                    acceptThreshold = acceptThreshold,
+                    isMediaPlaying = isMediaPlaying
+                )
+            } catch (e: Exception) {
+                JarvisLogStore.log("VOICE_GUARD_ERR", "Eval error: ${e.message}")
+                com.jarvis.assistant.brain.GeminiBrain.UnauthorizedAudioEvaluation(false, "", "")
+            }
+            onResult(res)
+        }
+    }
+
+    fun verifySecretCodeAudio(
+        wavBytes: ByteArray,
+        expectedSecretCode: String,
+        voskHint: String,
+        offlineFallbackMatch: (String, String) -> Boolean,
+        onResult: (com.jarvis.assistant.brain.GeminiBrain.SecretCodeCheckResult) -> Unit
+    ) {
+        scope.launch {
+            val res = try {
+                geminiBrain.verifySecretCodeAudio(
+                    wavBytes = wavBytes,
+                    expectedSecretCode = expectedSecretCode,
+                    voskHint = voskHint,
+                    offlineFallbackMatch = offlineFallbackMatch
+                )
+            } catch (e: Exception) {
+                JarvisLogStore.log("SECRET_CHECK_ERR", "Check failed: ${e.message}")
+                com.jarvis.assistant.brain.GeminiBrain.SecretCodeCheckResult(false, voskHint, "")
+            }
+            onResult(res)
+        }
+    }
+
+    fun executePreParsedDecision(
+        decision: com.jarvis.assistant.brain.ActionDecision,
+        transcript: String = "",
+        sourceTag: String = "USER_VOICE",
+        onFinished: (() -> Unit)? = null
+    ) {
+        scope.launch {
+            try {
+                if (transcript.isNotBlank()) {
+                    JarvisLogStore.log(sourceTag, "\"$transcript\"")
+                }
+                dispatchDecision(decision)
+            } catch (e: Exception) {
+                JarvisLogStore.log("EXEC_ERROR", "Held command failed cleanly: ${e.message}")
+            } finally {
+                onFinished?.invoke()
+            }
+        }
+    }
+
+    fun speakDynamic(text: String) {
+        if (text.isBlank()) return
+        JarvisLogStore.log("JARVIS_SPEAK", "Jarvis: \"$text\"")
+        speakerHelper.speak(text)
+    }
+
+    private fun dispatchDecision(decision: com.jarvis.assistant.brain.ActionDecision) {
+        val tool = decision.toolName?.takeIf { it.isNotBlank() && it != "null" }
+        val args = decision.toolArgs ?: emptyMap()
+        val speech = decision.speech?.takeIf { it.isNotBlank() && it != "null" }
+        val alreadySpoken = speech != null
+
+        if (speech != null) {
+            JarvisLogStore.log("JARVIS_SPEAK", "Jarvis: \"$speech\"")
+            speakerHelper.speak(speech)
+        }
+
+        if (tool == null) {
+            if (alreadySpoken) {
+                JarvisLogStore.log("CORE", "[Result]: Done (Conversational)")
+            }
+            return
+        }
+
+        executeSingleTool(tool, args, alreadySpoken)
     }
 
     fun executeFromScheduler(action: String, args: Map<String, Any>, summary: String = "") {
@@ -221,6 +341,19 @@ class JarvisCommandExecutor(
                 val reply = systemController.closeApp(appName)
                 JarvisLogStore.log("APP_CONTROL", reply)
                 if (!alreadySpoken) speakerHelper.speak(reply)
+            }
+            "media_control" -> {
+                val action = (args["action"] as? String) ?: "play_pause"
+                val reply = systemController.controlMedia(action)
+                JarvisLogStore.log("MEDIA_CONTROL", "Action='$action' ${if (reply.isNotBlank()) "msg='$reply'" else "(silent)"}")
+                if (!alreadySpoken && reply.isNotBlank()) speakerHelper.speak(reply)
+            }
+            "volume_control" -> {
+                val action = (args["action"] as? String) ?: "down"
+                val percent = (args["percent"] as? Number)?.toInt()
+                val reply = systemController.controlVolume(action, percent)
+                JarvisLogStore.log("VOLUME_CONTROL", "Action='$action' pct=$percent ${if (reply.isNotBlank()) "msg='$reply'" else "(silent)"}")
+                if (!alreadySpoken && reply.isNotBlank()) speakerHelper.speak(reply)
             }
             "make_phone_call" -> {
                 runAfterScreenUnlock {

@@ -46,8 +46,12 @@ android {
         applicationId = "com.jarvis.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 23
-        versionName = "1.3.0"
+        versionCode = 26
+        versionName = "1.3.3"
+
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -115,4 +119,8 @@ dependencies {
     // Networking & JSON for Gemini API and ElevenLabs
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // Offline low-power wake-word detection ("Jarvis") without stealing Audio Focus from Hotstar/Reels
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
 }

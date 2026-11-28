@@ -1,6 +1,6 @@
 {
-  "versionCode": 23,
-  "versionName": "1.3.0",
+  "versionCode": 26,
+  "versionName": "1.3.3",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Added 24/7 permanent Always-On voice listening across background/killed app states, screen lock, and device reboot (manual Start/Stop in app), plus 3-day persistent rolling disk logs."
+  "changelog": "Added on-launch 5-style Voice Lock + Secret Code setup (Normal, Fast, Low, Loud + Secret Code), dynamic stranger voice refusal, borderline doubt Secret Code verification, and strict friend-chat anti-interference filter."
 }

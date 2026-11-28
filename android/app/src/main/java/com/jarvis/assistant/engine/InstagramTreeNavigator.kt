@@ -1140,7 +1140,8 @@ object InstagramTreeNavigator {
         }
 
         if (reelsTab != null) {
-            if (!reelsTab.node.isSelected) {
+            val alreadyInReels = reelsTab.node.isSelected
+            if (!alreadyInReels) {
                 service.tapNodeSingleTouch(reelsTab.node)
                 steps.add("Opened Reels tab")
                 delay(500)
@@ -1148,6 +1149,9 @@ object InstagramTreeNavigator {
             if (wantsNextScroll) {
                 service.scroll("down")
                 steps.add("Scrolled to next Reel")
+                if (alreadyInReels) {
+                    return FastNavResult(true, true, "", steps)
+                }
             }
             return FastNavResult(true, true, "Instagram par Reels chala di hain Sir.", steps)
         }
