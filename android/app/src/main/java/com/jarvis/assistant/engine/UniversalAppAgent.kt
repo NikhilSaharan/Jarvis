@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.jarvis.assistant.JarvisAccessibilityService
 import com.jarvis.assistant.brain.GeminiBrain
+import com.jarvis.assistant.brain.GroqFastBrain
 import com.jarvis.assistant.brain.SocialIntent
 import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.security.AutoUnlockManager
@@ -28,6 +29,7 @@ class UniversalAppAgent(
         toolName: String,
         args: Map<String, Any>,
         geminiBrain: GeminiBrain?,
+        groqBrain: GroqFastBrain? = null,
         callback: (Boolean, String) -> Unit
     ) {
         val (directIntent, fallbackInstruction) = when (toolName) {
@@ -70,7 +72,7 @@ class UniversalAppAgent(
                 SocialIntent("other", "", "", 1) to toolName
             }
         }
-        executeInternal("Instagram", fallbackInstruction, directIntent, geminiBrain, callback)
+        executeInternal("Instagram", fallbackInstruction, directIntent, geminiBrain, groqBrain, callback)
     }
 
     /**
@@ -79,10 +81,11 @@ class UniversalAppAgent(
     fun performAppAction(
         appName: String,
         instruction: String,
-        geminiBrain: GeminiBrain,
+        geminiBrain: GeminiBrain?,
+        groqBrain: GroqFastBrain? = null,
         callback: (Boolean, String) -> Unit
     ) {
-        executeInternal(appName, instruction, null, geminiBrain, callback)
+        executeInternal(appName, instruction, null, geminiBrain, groqBrain, callback)
     }
 
     private fun executeInternal(
@@ -90,6 +93,7 @@ class UniversalAppAgent(
         instruction: String,
         directSocialIntent: SocialIntent?,
         geminiBrain: GeminiBrain?,
+        groqBrain: GroqFastBrain? = null,
         callback: (Boolean, String) -> Unit
     ) {
         mainScope.launch {
@@ -180,7 +184,7 @@ class UniversalAppAgent(
                 actionHistory.addAll(fastResult.stepsTaken)
             }
 
-            if (geminiBrain == null) {
+            if (geminiBrain == null && groqBrain?.isConfigured() != true) {
                 callback(false, "Sir, $appName par action complete nahi ho saka.")
                 return@launch
             }
@@ -264,7 +268,9 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 }
 """.trimIndent()
 
-                val decision = geminiBrain.decideUIAction(prompt)
+                val decision = groqBrain?.decideUIAction(prompt)
+                    ?: geminiBrain?.decideUIAction(prompt)
+                    ?: com.jarvis.assistant.brain.UIActionDecision("error", null, null, null, "AI unavailable")
                 val summary = decision.summary ?: decision.text ?: decision.action
                 JarvisLogStore.log(
                     "FALLBACK_DECISION_$turn",
@@ -384,7 +390,8 @@ OUTPUT ONLY A RAW JSON OBJECT (no markdown, no backticks):
 
             if (finalMsg.isBlank()) {
                 finalMsg = if (isCompleted) {
-                    geminiBrain.generateCompletionConfirmation(appName, instruction)
+                    val fastConfirm = groqBrain?.generateCompletionConfirmation(appName, instruction).orEmpty()
+                    fastConfirm.ifBlank { geminiBrain?.generateCompletionConfirmation(appName, instruction).orEmpty() }
                 } else {
                     "Sir, task pura nahi ho saka."
                 }

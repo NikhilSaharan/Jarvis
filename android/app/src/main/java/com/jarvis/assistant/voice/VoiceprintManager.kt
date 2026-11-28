@@ -835,23 +835,63 @@ object VoiceprintManager {
     }
 
     fun trimSilenceEdgesPcm(pcmBytes: ByteArray): ByteArray {
-        if (pcmBytes.size <= 3200) return pcmBytes
+        if (pcmBytes.size <= 3840) return pcmBytes
         val frameBytes = 640 // 20ms @ 16kHz mono PCM16
+        var peakRms = 0.0
+        val rmsList = mutableListOf<Double>()
+        var scan = 0
+        while (scan + frameBytes <= pcmBytes.size) {
+            val r = computeSliceRms(pcmBytes, scan, scan + frameBytes)
+            rmsList.add(r)
+            if (r > peakRms) peakRms = r
+            scan += frameBytes
+        }
+        val sortedRms = rmsList.sorted()
+        val floorRms = if (sortedRms.isNotEmpty()) sortedRms[(sortedRms.size / 6).coerceAtMost(sortedRms.lastIndex)] else 90.0
+        val dynamicThr = maxOf(75.0, minOf(peakRms * 0.14, floorRms * 1.45)).coerceAtMost(195.0)
+
         var startPos = 0
-        while (startPos + frameBytes < pcmBytes.size - 3200) {
-            if (computeSliceRms(pcmBytes, startPos, startPos + frameBytes) >= 240.0) break
+        while (startPos + frameBytes < pcmBytes.size - 3840) {
+            if (computeSliceRms(pcmBytes, startPos, startPos + frameBytes) >= dynamicThr) break
             startPos += frameBytes / 2
         }
         var endPos = pcmBytes.size
-        while (endPos > startPos + 3200) {
+        while (endPos > startPos + 3840) {
             val s = (endPos - frameBytes).coerceAtLeast(startPos)
-            if (computeSliceRms(pcmBytes, s, endPos) >= 240.0) break
+            if (computeSliceRms(pcmBytes, s, endPos) >= dynamicThr) break
             endPos -= frameBytes / 2
         }
-        val paddedStart = ((startPos - 1024).coerceAtLeast(0)) and -2 // 32ms lead cushion
-        val paddedEnd = ((endPos + 1024).coerceAtMost(pcmBytes.size)) and -2 // 32ms tail cushion
+        // Keep generous 120ms (3840 bytes) lead/tail consonant cushion so soft starts & final syllables are intact
+        val paddedStart = ((startPos - 3840).coerceAtLeast(0)) and -2
+        val paddedEnd = ((endPos + 3840).coerceAtMost(pcmBytes.size)) and -2
         if (paddedEnd <= paddedStart) return pcmBytes
         return pcmBytes.copyOfRange(paddedStart, paddedEnd)
+    }
+
+    /**
+     * Gentle dynamic speech gain normalization for soft/far-field recordings before cloud STT,
+     * preserving natural headroom without clipping.
+     */
+    fun normalizeSoftSpeechPcm(pcmBytes: ByteArray): ByteArray {
+        val sampleCount = pcmBytes.size / 2
+        if (sampleCount < 640) return pcmBytes
+        val shorts = ShortArray(sampleCount)
+        ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts)
+        var maxAbs = 0
+        for (s in shorts) {
+            val a = kotlin.math.abs(s.toInt())
+            if (a > maxAbs) maxAbs = a
+        }
+        // Boost only genuinely quiet commands (peak between 450 and 9500); leave normal/loud speech untouched
+        if (maxAbs !in 450..9500) return pcmBytes
+        val gain = (14000.0 / maxAbs.toDouble()).coerceIn(1.2, 3.8)
+        val out = ByteArray(pcmBytes.size)
+        val outBuf = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        for (i in 0 until sampleCount) {
+            val scaled = (shorts[i] * gain).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+            outBuf.put(i, scaled)
+        }
+        return out
     }
 
     private fun computeSliceRms(buf: ByteArray, start: Int, end: Int): Double {

@@ -8,7 +8,6 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.NoiseSuppressor
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
@@ -62,19 +61,40 @@ class PassiveVoiceCaptureEngine(
         val verification: VoiceprintManager.VerificationResult,
         val durationMs: Long,
         val isMediaPlaying: Boolean,
-        val rawPcm: ByteArray = ByteArray(0)
+        val rawPcm: ByteArray = ByteArray(0),
+        val isInActiveCall: Boolean = false
     )
 
     companion object {
         const val SAMPLE_RATE = 16000
         private const val CHUNK_BYTES = 1024 // 32ms @ 16kHz PCM16 mono
-        private const val PRE_ROLL_FRAMES = 7 // ~224ms pre-roll before VAD onset
+        private const val PRE_ROLL_FRAMES = 10 // ~320ms pre-roll so starting consonants never clip
         private const val ONSET_FRAMES_REQUIRED = 2 // ~64ms fast normal-voice trigger
-        private const val END_SILENCE_MS = 210L
-        private const val MIN_UTTERANCE_MS = 250L
+        private const val END_SILENCE_MS = 320L
+        private const val MIN_UTTERANCE_MS = 260L
         private const val MAX_UTTERANCE_MS = 5500L
-        private const val MAX_UTTERANCE_MEDIA_MS = 3200L
+        private const val MAX_UTTERANCE_MEDIA_MS = 3400L
         private const val BYTES_PER_MS = 32 // 16000 * 2 / 1000
+
+        /**
+         * Computes speech-band (high-passed ~300Hz+) RMS of PCM16 audio.
+         * Attenuates fan/wind/AC/handling rumble by ~15-19dB while preserving human speech formants & consonants.
+         */
+        private fun computeSpeechBandRms(pcmBytes: ByteArray, length: Int): Double {
+            val count = length / 2
+            if (count <= 1) return 0.0
+            var prev = ((pcmBytes[1].toInt() shl 8) or (pcmBytes[0].toInt() and 0xFF)).toShort().toDouble()
+            var sumSq = 0.0
+            var idx = 2
+            while (idx + 1 < length) {
+                val sample = ((pcmBytes[idx + 1].toInt() shl 8) or (pcmBytes[idx].toInt() and 0xFF)).toShort().toDouble()
+                val hp = sample - 0.90 * prev
+                prev = sample
+                sumSq += hp * hp
+                idx += 2
+            }
+            return kotlin.math.sqrt(sumSq / (count - 1).coerceAtLeast(1))
+        }
 
         private const val ASR_DIR_NAME = "vosk-model-en-in"
         private const val ASR_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip"
@@ -446,7 +466,6 @@ class PassiveVoiceCaptureEngine(
             var recognizer: Recognizer? = null
             var audioRecord: AudioRecord? = null
             var aec: AcousticEchoCanceler? = null
-            var ns: NoiseSuppressor? = null
 
             return try {
                 onProgress("Engine ready ho raha hai...", 0, false)
@@ -477,9 +496,6 @@ class PassiveVoiceCaptureEngine(
                 try {
                     if (AcousticEchoCanceler.isAvailable()) {
                         aec = AcousticEchoCanceler.create(activeRecord.audioSessionId)?.apply { enabled = true }
-                    }
-                    if (NoiseSuppressor.isAvailable()) {
-                        ns = NoiseSuppressor.create(activeRecord.audioSessionId)?.apply { enabled = true }
                     }
                 } catch (_: Exception) {
                 }
@@ -599,7 +615,6 @@ class PassiveVoiceCaptureEngine(
                 } catch (_: Exception) {
                 }
                 try { aec?.release() } catch (_: Exception) {}
-                try { ns?.release() } catch (_: Exception) {}
                 try { audioRecord?.release() } catch (_: Exception) {}
                 try { recognizer?.close() } catch (_: Exception) {}
                 try { spkModel?.close() } catch (_: Exception) {}
@@ -743,7 +758,9 @@ class PassiveVoiceCaptureEngine(
             } catch (_: Exception) {
                 AudioManager.MODE_NORMAL
             }
-            if (audioMode == AudioManager.MODE_IN_CALL || audioMode == AudioManager.MODE_IN_COMMUNICATION) {
+            val inActiveCall = audioMode == AudioManager.MODE_IN_CALL || audioMode == AudioManager.MODE_IN_COMMUNICATION
+            val canConcurrentInCall = com.jarvis.assistant.JarvisAccessibilityService.isServiceRunning
+            if (inActiveCall && !canConcurrentInCall) {
                 notifyState(State.PAUSED, "Call chal rahi hai — mic paused")
                 sleepQuietly(1200L)
                 continue
@@ -754,10 +771,10 @@ class PassiveVoiceCaptureEngine(
                 continue
             }
 
-            runContinuousVadLoop()
+            val hitZeroMute = runContinuousVadLoop()
 
             if (desiredListening && !pausedForExecution && !released) {
-                sleepQuietly(1000L)
+                sleepQuietly(if (inActiveCall && hitZeroMute) 3500L else 1000L)
             }
         }
     }
@@ -793,14 +810,14 @@ class PassiveVoiceCaptureEngine(
         }
     }
 
-    private fun runContinuousVadLoop() {
-        val recognizer = voskRecognizer ?: return
+    private fun runContinuousVadLoop(): Boolean {
+        val recognizer = voskRecognizer ?: return false
         val minBuf = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        if (minBuf <= 0) return
+        if (minBuf <= 0) return false
 
         val audioBufSize = maxOf(minBuf * 2, 8192)
         val audioRecord = createPassiveAudioRecord(audioBufSize)
@@ -810,17 +827,13 @@ class PassiveVoiceCaptureEngine(
                 lastAudioInitWarnAtMs = now
                 JarvisLogStore.log("VOICE_ENGINE_WARN", "AudioRecord busy/awaiting unlock; retrying gently.")
             }
-            return
+            return false
         }
 
         var aec: AcousticEchoCanceler? = null
-        var ns: NoiseSuppressor? = null
         try {
             if (AcousticEchoCanceler.isAvailable()) {
                 aec = AcousticEchoCanceler.create(audioRecord.audioSessionId)?.apply { enabled = true }
-            }
-            if (NoiseSuppressor.isAvailable()) {
-                ns = NoiseSuppressor.create(audioRecord.audioSessionId)?.apply { enabled = true }
             }
         } catch (_: Exception) {
         }
@@ -835,14 +848,16 @@ class PassiveVoiceCaptureEngine(
         var lastVoiceMs = 0L
         var activeSpeechMs = 0L
         var peakRms = 0.0
-        var quietFloorRms = 180.0
+        var peakSpeechBandRms = 0.0
+        var quietSpeechFloorRms = 65.0
         var consecutiveZeroFrames = 0
+        var exitedDueToZeroMute = false
 
-        return try {
+        try {
             recognizer.reset()
             audioRecord.startRecording()
             if (audioRecord.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                return
+                return false
             }
 
             captureActive = true
@@ -855,7 +870,8 @@ class PassiveVoiceCaptureEngine(
                 } catch (_: Exception) {
                     AudioManager.MODE_NORMAL
                 }
-                if (mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION) {
+                val isInCallNow = mode == AudioManager.MODE_IN_CALL || mode == AudioManager.MODE_IN_COMMUNICATION
+                if (isInCallNow && !com.jarvis.assistant.JarvisAccessibilityService.isServiceRunning) {
                     break
                 }
 
@@ -878,10 +894,15 @@ class PassiveVoiceCaptureEngine(
 
                 val now = System.currentTimeMillis()
                 val rms = VoiceprintManager.computePcmRms(chunk, readBytes)
+                val speechRms = computeSpeechBandRms(chunk, readBytes)
                 if (rms < 0.5) {
                     consecutiveZeroFrames++
-                    if (consecutiveZeroFrames >= 120) {
-                        JarvisLogStore.log("VOICE_ENGINE_WARN", "Mic stream muted (digital zero); restarting AudioRecord.")
+                    val maxZeros = if (isInCallNow) 45 else 120
+                    if (consecutiveZeroFrames >= maxZeros) {
+                        if (!isInCallNow) {
+                            JarvisLogStore.log("VOICE_ENGINE_WARN", "Mic stream muted (digital zero); restarting AudioRecord.")
+                        }
+                        exitedDueToZeroMute = true
                         break
                     }
                 } else {
@@ -889,20 +910,21 @@ class PassiveVoiceCaptureEngine(
                 }
 
                 if (!inSpeech) {
-                    // Track true quiet ambient floor cleanly — NEVER climb high due to loud Reel music!
-                    quietFloorRms = if (rms < quietFloorRms * 1.4) {
-                        (quietFloorRms * 0.88 + rms * 0.12).coerceIn(85.0, 460.0)
+                    // Track true ambient speech-band floor (attenuates fan/wind rumble so quiet human voice pops at >2x SNR!)
+                    quietSpeechFloorRms = if (speechRms < quietSpeechFloorRms * 1.45) {
+                        (quietSpeechFloorRms * 0.88 + speechRms * 0.12).coerceIn(32.0, 210.0)
                     } else {
-                        (quietFloorRms * 0.992 + minOf(rms, 550.0) * 0.008).coerceIn(85.0, 460.0)
+                        (quietSpeechFloorRms * 0.996 + minOf(speechRms, 260.0) * 0.004).coerceIn(32.0, 210.0)
                     }
-                    val onsetThreshold = maxOf(255.0, quietFloorRms * 1.50).coerceAtMost(660.0)
+                    val onsetSpeechThreshold = maxOf(105.0, quietSpeechFloorRms * 2.10).coerceAtMost(320.0)
 
                     preRoll.addLast(chunk.copyOf(readBytes))
                     while (preRoll.size > PRE_ROLL_FRAMES) preRoll.removeFirst()
 
-                    if (rms >= onsetThreshold) {
+                    if (speechRms >= onsetSpeechThreshold) {
                         onsetFrames++
                         if (rms > peakRms) peakRms = rms
+                        if (speechRms > peakSpeechBandRms) peakSpeechBandRms = speechRms
                         if (onsetFrames >= ONSET_FRAMES_REQUIRED) {
                             inSpeech = true
                             lastVoiceMs = now
@@ -919,6 +941,7 @@ class PassiveVoiceCaptureEngine(
                     } else {
                         onsetFrames = 0
                         peakRms = 0.0
+                        peakSpeechBandRms = 0.0
                     }
                     continue
                 }
@@ -927,9 +950,10 @@ class PassiveVoiceCaptureEngine(
                 utterancePcm.write(chunk, 0, readBytes)
                 val voskFinal = feedRecognizerChunk(recognizer, chunk, readBytes, spkAccumulator)
                 if (rms > peakRms) peakRms = rms
+                if (speechRms > peakSpeechBandRms) peakSpeechBandRms = speechRms
 
-                val offsetThreshold = maxOf(190.0, quietFloorRms * 1.22).coerceAtMost(480.0)
-                if (rms >= offsetThreshold) {
+                val offsetSpeechThreshold = maxOf(82.0, quietSpeechFloorRms * 1.55).coerceAtMost(250.0)
+                if (speechRms >= offsetSpeechThreshold) {
                     lastVoiceMs = now
                     activeSpeechMs += (readBytes / BYTES_PER_MS).toLong()
                 }
@@ -943,7 +967,7 @@ class PassiveVoiceCaptureEngine(
                 val totalMs = (utterancePcm.size() / BYTES_PER_MS).toLong()
                 val silenceMs = now - lastVoiceMs
                 val endDetected = (totalMs >= (MIN_UTTERANCE_MS + 110L) && silenceMs >= END_SILENCE_MS) ||
-                    (voskFinal && totalMs >= 420L && silenceMs >= 160L) ||
+                    (voskFinal && totalMs >= 500L && silenceMs >= 200L) ||
                     totalMs >= maxCapMs
 
                 if (endDetected) {
@@ -967,16 +991,25 @@ class PassiveVoiceCaptureEngine(
                     }
 
                     val hadMeaningfulSignal = capturedMs >= MIN_UTTERANCE_MS &&
-                        capturedActiveMs >= 130L &&
-                        peakRms >= 290.0
+                        capturedActiveMs >= 135L &&
+                        peakSpeechBandRms >= 135.0
                     peakRms = 0.0
+                    peakSpeechBandRms = 0.0
                     if (!hadMeaningfulSignal) continue
+
+                    // Pre-dispatch human-voice harmonicity check (~1.5ms): blocks broadband fan/static noise without phrase hardcoding
+                    if (voskText.isBlank()) {
+                        val acCheck = VoiceprintManager.extractAcousticFeatures(rawPcm)
+                        if (acCheck.voicedFrames < 4) {
+                            continue
+                        }
+                    }
 
                     // Only re-run slow CPU Vosk pass if Acoustic profile is absent (legacy v1.3.6 enrollment)
                     if (!VoiceprintManager.hasAcousticProfile(appContext) &&
                         (spkVec == null || spkFrames < 50) && capturedActiveMs >= 480L
                     ) {
-                        val (denseText, denseVec, denseFrames) = extractDenseSpkFallback(recognizer, rawPcm, quietFloorRms)
+                        val (denseText, denseVec, denseFrames) = extractDenseSpkFallback(recognizer, rawPcm, quietSpeechFloorRms)
                         if (denseVec != null && denseVec.isNotEmpty() && denseFrames > spkFrames) {
                             spkVec = denseVec
                             spkFrames = denseFrames
@@ -1019,10 +1052,11 @@ class PassiveVoiceCaptureEngine(
                         lastRejectForwardMs = nowDispatchMs
                     }
 
-                    val wavBytes = VoiceprintManager.pcm16ToWav(rawPcm, SAMPLE_RATE)
+                    val sttPcm = VoiceprintManager.normalizeSoftSpeechPcm(rawPcm)
+                    val wavBytes = VoiceprintManager.pcm16ToWav(sttPcm, SAMPLE_RATE)
                     JarvisLogStore.log(
                         "VOICE_CAPTURE",
-                        "Forward tier=${verification.tier} (${verification.reason}) sim=${"%.2f".format(verification.similarity)} dur=${capturedMs}ms wav=${wavBytes.size / 1024}KB media=$isMediaPlaying vosk='$voskText'"
+                        "Forward tier=${verification.tier} (${verification.reason}) sim=${"%.2f".format(verification.similarity)} dur=${capturedMs}ms wav=${wavBytes.size / 1024}KB media=$isMediaPlaying inCall=$isInCallNow vosk='$voskText'"
                     )
 
                     // Gate duplicate dispatches while AudioRecord stays warm in memory (0ms reopen latency!)
@@ -1033,7 +1067,8 @@ class PassiveVoiceCaptureEngine(
                         verification = verification,
                         durationMs = capturedMs,
                         isMediaPlaying = isMediaPlaying,
-                        rawPcm = rawPcm
+                        rawPcm = rawPcm,
+                        isInActiveCall = isInCallNow
                     )
                     onUtteranceReady(captured)
                 }
@@ -1047,9 +1082,9 @@ class PassiveVoiceCaptureEngine(
             } catch (_: Exception) {
             }
             try { aec?.release() } catch (_: Exception) {}
-            try { ns?.release() } catch (_: Exception) {}
             try { audioRecord.release() } catch (_: Exception) {}
         }
+        return exitedDueToZeroMute
     }
 
     private fun cleanupNativeResources() {

@@ -41,11 +41,12 @@ class GroqFastBrain(
     private data class LlmSpec(
         val id: String,
         val reasoningEffort: String? = null,
+        val reasoningFormat: String? = null,
         val supportsJsonFormat: Boolean = true
     )
 
     private val chatModels = listOf(
-        LlmSpec("qwen/qwen3.8-27b", reasoningEffort = "none", supportsJsonFormat = true),
+        LlmSpec("qwen/qwen3.8-27b", reasoningEffort = "none", reasoningFormat = "hidden", supportsJsonFormat = true),
         LlmSpec("openai/gpt-oss-20b", reasoningEffort = "low", supportsJsonFormat = true),
         LlmSpec("openai/gpt-oss-120b", reasoningEffort = "low", supportsJsonFormat = true),
         LlmSpec("allam-2-7b", reasoningEffort = null, supportsJsonFormat = false)
@@ -70,12 +71,14 @@ class GroqFastBrain(
         val ok: Boolean,
         val text: String,
         val noSpeechProb: Float,
+        val avgLogProb: Float,
+        val compressionRatio: Float,
         val latencyMs: Long
     )
 
     suspend fun transcribeFast(wavBytes: ByteArray): FastTranscription = withContext(Dispatchers.IO) {
         if (!isConfigured() || wavBytes.size <= 44) {
-            return@withContext FastTranscription(false, "", 1.0f, 0L)
+            return@withContext FastTranscription(false, "", 1.0f, -2.0f, 0f, 0L)
         }
         val t0 = System.currentTimeMillis()
         try {
@@ -83,13 +86,11 @@ class GroqFastBrain(
             val multipart = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("model", "whisper-large-v3-turbo")
+                .addFormDataPart("language", "hi")
                 .addFormDataPart("file", "cmd.wav", fileBody)
                 .addFormDataPart("response_format", "verbose_json")
                 .addFormDataPart("temperature", "0")
-                .addFormDataPart(
-                    "prompt",
-                    "Hinglish Hindi English commands: Jarvis, Instagram, agli reel chalao, WhatsApp, Call, YouTube, Hotstar, FanCode, brightness, volume, lock screen."
-                )
+                .addFormDataPart("prompt", JarvisPrompts.WHISPER_VOCAB_PROMPT)
                 .build()
 
             val req = Request.Builder()
@@ -103,20 +104,47 @@ class GroqFastBrain(
                 val body = res.body?.string() ?: ""
                 if (!res.isSuccessful) {
                     JarvisLogStore.log("GROQ_ERR", "Whisper HTTP ${res.code} (${elapsed}ms)")
-                    return@withContext FastTranscription(false, "", 1.0f, elapsed)
+                    return@withContext FastTranscription(false, "", 1.0f, -2.0f, 0f, elapsed)
                 }
                 val obj = gson.fromJson(body, JsonObject::class.java)
                 val text = obj.get("text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim().orEmpty()
                 val segs = obj.getAsJsonArray("segments")
-                val noSpeech = segs?.get(0)?.asJsonObject?.get("no_speech_prob")
-                    ?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asFloat ?: 0f
-                FastTranscription(true, text, noSpeech, elapsed)
+                var worstNoSpeech = 0f
+                var minAvgLogProb = 0f
+                var maxCompRatio = 0f
+                if (segs != null && segs.size() > 0) {
+                    minAvgLogProb = Float.MAX_VALUE
+                    for (i in 0 until segs.size()) {
+                        val seg = segs.get(i)?.asJsonObject ?: continue
+                        val ns = seg.get("no_speech_prob")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asFloat ?: 0f
+                        val lp = seg.get("avg_logprob")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asFloat ?: -0.2f
+                        val cr = seg.get("compression_ratio")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asFloat ?: 1.0f
+                        if (ns > worstNoSpeech) worstNoSpeech = ns
+                        if (lp < minAvgLogProb) minAvgLogProb = lp
+                        if (cr > maxCompRatio) maxCompRatio = cr
+                    }
+                    if (minAvgLogProb == Float.MAX_VALUE) minAvgLogProb = 0f
+                }
+                FastTranscription(true, text, worstNoSpeech, minAvgLogProb, maxCompRatio, elapsed)
             }
         } catch (e: Exception) {
             val elapsed = System.currentTimeMillis() - t0
             JarvisLogStore.log("GROQ_ERR", "Whisper exc: ${e.message}")
-            FastTranscription(false, "", 1.0f, elapsed)
+            FastTranscription(false, "", 1.0f, -2.0f, 0f, elapsed)
         }
+    }
+
+    private fun hasInvalidSignalConfidence(
+        cleanText: String,
+        stt: FastTranscription
+    ): Boolean {
+        val lettersOnly = cleanText.replace(Regex("[\\s\\p{Punct}]+"), "")
+        if (lettersOnly.length < 2) return true
+        if (stt.noSpeechProb > 0.60f) return true
+        if (stt.avgLogProb < -0.78f) return true
+        if (stt.noSpeechProb > 0.35f && stt.avgLogProb < -0.52f) return true
+        if (stt.compressionRatio > 2.20f) return true
+        return false
     }
 
     private fun compactScreenSummary(raw: String): String {
@@ -127,60 +155,75 @@ class GroqFastBrain(
 
     private fun callChatJson(systemPrompt: String, userMessage: String): Pair<JsonObject, Triple<String, Long, String>>? {
         for (spec in chatModels) {
-            val tLlm = System.currentTimeMillis()
-            try {
-                val payload = JsonObject().apply {
-                    addProperty("model", spec.id)
-                    addProperty("temperature", 0.1)
-                    addProperty("max_completion_tokens", 240)
-                    if (spec.reasoningEffort != null) {
-                        addProperty("reasoning_effort", spec.reasoningEffort)
-                    }
-                    if (spec.supportsJsonFormat) {
-                        add("response_format", JsonObject().apply { addProperty("type", "json_object") })
-                    }
-                    add("messages", JsonArray().apply {
-                        add(JsonObject().apply {
-                            addProperty("role", "system")
-                            addProperty("content", systemPrompt)
-                        })
-                        add(JsonObject().apply {
-                            addProperty("role", "user")
-                            addProperty("content", userMessage)
-                        })
-                    })
-                }
-                val req = Request.Builder()
-                    .url("https://api.groq.com/openai/v1/chat/completions")
-                    .header("Authorization", "Bearer $apiKey")
-                    .post(payload.toString().toRequestBody(jsonMediaType))
-                    .build()
-
-                val res = client.newCall(req).execute()
+            val forcePlainRetry = if (spec.supportsJsonFormat) booleanArrayOf(true, false) else booleanArrayOf(false)
+            for (useJsonFormat in forcePlainRetry) {
+                val tLlm = System.currentTimeMillis()
                 try {
-                    val llmMs = System.currentTimeMillis() - tLlm
-                    val body = res.body?.string() ?: ""
-                    if (!res.isSuccessful) {
-                        JarvisLogStore.log("GROQ_ERR", "${spec.id} HTTP ${res.code} ${body.take(160)}")
-                        continue
+                    val payload = JsonObject().apply {
+                        addProperty("model", spec.id)
+                        addProperty("temperature", 0.1)
+                        addProperty("max_completion_tokens", 280)
+                        if (spec.reasoningEffort != null) {
+                            addProperty("reasoning_effort", spec.reasoningEffort)
+                        }
+                        if (spec.reasoningFormat != null) {
+                            addProperty("reasoning_format", spec.reasoningFormat)
+                        }
+                        if (useJsonFormat) {
+                            add("response_format", JsonObject().apply { addProperty("type", "json_object") })
+                        }
+                        add("messages", JsonArray().apply {
+                            add(JsonObject().apply {
+                                addProperty("role", "system")
+                                addProperty("content", systemPrompt)
+                            })
+                            add(JsonObject().apply {
+                                addProperty("role", "user")
+                                addProperty("content", userMessage)
+                            })
+                        })
                     }
-                    val root = gson.fromJson(body, JsonObject::class.java)
-                    val content = root.getAsJsonArray("choices")?.get(0)?.asJsonObject
-                        ?.getAsJsonObject("message")?.get("content")?.asString ?: continue
-                    val jsonObj = extractJsonObject(content) ?: continue
-                    return Pair(jsonObj, Triple(spec.id, llmMs, content))
-                } finally {
-                    res.close()
+                    val req = Request.Builder()
+                        .url("https://api.groq.com/openai/v1/chat/completions")
+                        .header("Authorization", "Bearer $apiKey")
+                        .post(payload.toString().toRequestBody(jsonMediaType))
+                        .build()
+
+                    val res = client.newCall(req).execute()
+                    try {
+                        val llmMs = System.currentTimeMillis() - tLlm
+                        val body = res.body?.string() ?: ""
+                        if (!res.isSuccessful) {
+                            JarvisLogStore.log("GROQ_ERR", "${spec.id} json=$useJsonFormat HTTP ${res.code} ${body.take(160)}")
+                            if (res.code == 400 && useJsonFormat) {
+                                continue // immediately retry same fast model without strict json_object validation
+                            }
+                            break
+                        }
+                        val root = gson.fromJson(body, JsonObject::class.java)
+                        val content = root.getAsJsonArray("choices")?.get(0)?.asJsonObject
+                            ?.getAsJsonObject("message")?.get("content")?.asString
+                        if (content.isNullOrBlank()) continue
+                        val jsonObj = extractJsonObject(content) ?: continue
+                        return Pair(jsonObj, Triple(spec.id, llmMs, content))
+                    } finally {
+                        res.close()
+                    }
+                } catch (e: Exception) {
+                    JarvisLogStore.log("GROQ_ERR", "${spec.id} exc=${e.message}")
+                    break
                 }
-            } catch (e: Exception) {
-                JarvisLogStore.log("GROQ_ERR", "${spec.id} exc=${e.message}")
             }
         }
         return null
     }
 
     private fun extractJsonObject(raw: String): JsonObject? {
-        val cleaned = raw.trim()
+        val cleaned = raw
+            .replace(Regex("<think>[\\s\\S]*?</think>"), "")
+            .replace("```json", "")
+            .replace("```", "")
+            .trim()
         return try {
             gson.fromJson(cleaned, JsonObject::class.java)
         } catch (_: Exception) {
@@ -196,11 +239,41 @@ class GroqFastBrain(
         }
     }
 
+    suspend fun decideUIAction(prompt: String): UIActionDecision? = withContext(Dispatchers.IO) {
+        if (!isConfigured()) return@withContext null
+        val result = callChatJson(
+            "You output ONLY a valid JSON object matching the schema requested by the user.",
+            prompt
+        ) ?: return@withContext null
+        val (parsed, meta) = result
+        val action = parsed.get("action")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString ?: "done"
+        val tag = parsed.get("tag")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asInt
+        val text = parsed.get("text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+        val dir = parsed.get("direction")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+        val summary = parsed.get("summary")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+        val reasoning = parsed.get("reasoning")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString
+        JarvisLogStore.log(
+            "GROQ_UI",
+            "model=${meta.first} latency=${meta.second}ms action=$action tag=$tag dir=$dir summary='${summary ?: ""}'"
+        )
+        UIActionDecision(action, tag, text, dir, summary, reasoning)
+    }
+
+    suspend fun generateCompletionConfirmation(appName: String, instruction: String): String = withContext(Dispatchers.IO) {
+        if (!isConfigured()) return@withContext ""
+        val sys = "Output JSON: {\"text\":\"<1 short natural Hinglish confirmation sentence>\"}. No robotic phrases."
+        val user = "Sir's command '$instruction' in $appName just finished."
+        val res = callChatJson(sys, user) ?: return@withContext ""
+        res.first.get("text")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim().orEmpty()
+    }
+
     suspend fun processAudioCommand(
         wavBytes: ByteArray,
+        voskHint: String = "",
         screenElementsSummary: String,
         isMediaPlaying: Boolean,
-        speakerVerified: Boolean
+        speakerVerified: Boolean,
+        isInActiveCall: Boolean = false
     ): ActionDecision? = withContext(Dispatchers.IO) {
         if (!isConfigured()) return@withContext null
 
@@ -208,42 +281,34 @@ class GroqFastBrain(
         if (!stt.ok) return@withContext null
 
         val cleanText = stt.text.trim()
-        if (cleanText.isBlank() || (cleanText.length < 3 && stt.noSpeechProb > 0.65f) || stt.noSpeechProb > 0.85f) {
+        if (cleanText.isBlank() || hasInvalidSignalConfidence(cleanText, stt)) {
             JarvisLogStore.log(
                 "GROQ_AUDIO",
-                "stt=${stt.latencyMs}ms ignored=true noSpeech=${"%.2f".format(stt.noSpeechProb)} transcript='$cleanText'"
+                "stt=${stt.latencyMs}ms ignored=true noSpeech=${"%.2f".format(stt.noSpeechProb)} logProb=${"%.2f".format(stt.avgLogProb)} cr=${"%.2f".format(stt.compressionRatio)} transcript='$cleanText'"
             )
-            return@withContext ActionDecision(null, null, null, "No command speech", cleanText, shouldIgnore = true)
+            return@withContext ActionDecision(null, null, null, "Low-confidence/non-speech audio", cleanText, shouldIgnore = true)
         }
 
         val livingMemory = memoryManager?.getLivingMemoryContext() ?: ""
         val compactScreen = compactScreenSummary(screenElementsSummary)
-        val sysPrompt = """
-You are J.A.R.V.I.S., Hinglish Android assistant. Output ONLY valid JSON.
-media=$isMediaPlaying verified=$speakerVerified
-${if (livingMemory.isNotBlank()) "MEM:${livingMemory.take(350)}\n" else ""}SCREEN:
-$compactScreen
-
-RULES:
-- Set should_ignore=true, tool_name=null, speech=null for casual conversation, TV/Reel lyrics, or noise without a command/question to Jarvis.
-- Never open universal_app_action("System",...) to lock screen (use lock_screen) or to speak/reply (set tool_name=null + Hinglish speech).
-- Never invent fake contacts like "last chat" — ask briefly who to contact (tool_name=null).
-- Set speech=null when invoking async tools (whatsapp, call, youtube, open_app, media_control, volume_control, lock_screen, instagram_*, universal_app_action).
-
-TOOLS:
-lock_screen(), media_control(action:"play_pause"|"pause"|"play"|"next"|"previous"|"stop"), volume_control(action:"up"|"down"|"mute"|"unmute"|"set",percent?:int), answer_call(), end_call(), close_app(app_name?), make_phone_call(recipient), whatsapp_call(recipient,call_type:"voice"|"video"), send_whatsapp_message(recipient,message), instagram_send_message(recipient,message), instagram_read_last_message(sender), instagram_watch_story(person), instagram_follow_account(account), instagram_play_chat_reels(sender,count:int,from_me:boolean), instagram_play_reels(next:boolean), send_sms(recipient,message), play_youtube(query), open_app(app_name), universal_app_action(app_name,instruction), tap_tag(tag:int), type_tag(tag:int,text), scroll_screen(direction:"down"|"up"), schedule_action(delay_seconds,action,action_args,summary), sleep_routine(minutes), manage_vip(action,contact), learn_preference(preference), set_dnd(enabled:boolean), set_brightness(level), set_alarm(hour,minute,message), set_timer(seconds,message)
-
-JSON:{"should_ignore":false,"reasoning":"","speech":null,"tool_name":null,"tool_args":{}}
-""".trimIndent()
+        val sysPrompt = JarvisPrompts.buildVoiceSystemPrompt(
+            livingMemory = livingMemory,
+            screenSummary = compactScreen,
+            isMediaPlaying = isMediaPlaying,
+            speakerVerified = speakerVerified,
+            isInActiveCall = isInActiveCall,
+            voskHint = voskHint,
+            includeAudioListenerHeader = false
+        )
 
         val result = callChatJson(sysPrompt, cleanText) ?: return@withContext null
         val (parsed, meta) = result
         if (!parsed.has("transcript")) parsed.addProperty("transcript", cleanText)
-        val decision = parseDecisionObject(parsed)
+        val decision = parseDecisionObject(parsed, suppressSpeech = isInActiveCall)
         val totalMs = stt.latencyMs + meta.second
         JarvisLogStore.log(
             "GROQ_AUDIO",
-            "stt=${stt.latencyMs}ms llm=${meta.second}ms total=${totalMs}ms model=${meta.first} ignored=${decision.shouldIgnore} transcript='${decision.transcript}' tool=${decision.toolName} args=${decision.toolArgs ?: emptyMap()}"
+            "stt=${stt.latencyMs}ms llm=${meta.second}ms total=${totalMs}ms model=${meta.first} noSp=${"%.2f".format(stt.noSpeechProb)} lp=${"%.2f".format(stt.avgLogProb)} ignored=${decision.shouldIgnore} transcript='${decision.transcript}' tool=${decision.toolName} args=${decision.toolArgs ?: emptyMap()}"
         )
         decision
     }
@@ -261,23 +326,22 @@ JSON:{"should_ignore":false,"reasoning":"","speech":null,"tool_name":null,"tool_
         if (!stt.ok) return@withContext null
 
         val cleanText = stt.text.trim()
-        if (cleanText.isBlank() || stt.noSpeechProb > 0.72f) {
+        if (cleanText.isBlank() || hasInvalidSignalConfidence(cleanText, stt)) {
             return@withContext GeminiBrain.UnauthorizedAudioEvaluation(false, cleanText, "")
         }
 
         val isDoubt = tier.equals("DOUBT", ignoreCase = true)
+        val livingMemory = memoryManager?.getLivingMemoryContext() ?: ""
         val compactScreen = compactScreenSummary(screenElementsSummary)
-        val sysPrompt = """
-You protect Sir's phone via Voice Lock. tier=$tier sim=${"%.2f".format(similarity)}/${"%.2f".format(acceptThreshold)} media=$isMediaPlaying.
-SCREEN:
-$compactScreen
-Decide if transcript is an explicit phone command to Jarvis (true) vs casual room talk/noise (false).
-If true & tier=DOUBT: fill held_command JSON and short Hinglish dynamic_speech asking Sir's Secret Code.
-If true & tier=REJECTED: held_command=null and short Hinglish refusal saying voice does not match Sir's voice.
-If false: is_command_attempt=false, dynamic_speech="", held_command=null.
-Tools for held_command: lock_screen(), media_control(action), volume_control(action,percent), answer_call(), end_call(), close_app(app_name), make_phone_call(recipient), whatsapp_call(recipient,call_type), send_whatsapp_message(recipient,message), instagram_*, send_sms(recipient,message), play_youtube(query), open_app(app_name), universal_app_action(app_name,instruction), tap_tag(tag), type_tag(tag,text), scroll_screen(direction), set_dnd(enabled), set_brightness(level), set_alarm(hour,minute,message), set_timer(seconds,message).
-JSON:{"is_command_attempt":false,"dynamic_speech":"","held_command":null}
-""".trimIndent()
+        val sysPrompt = JarvisPrompts.buildVoiceGuardPrompt(
+            tier = tier,
+            similarity = similarity,
+            acceptThreshold = acceptThreshold,
+            isMediaPlaying = isMediaPlaying,
+            screenSummary = compactScreen,
+            livingMemory = livingMemory,
+            includeAudioHeader = false
+        )
 
         val result = callChatJson(sysPrompt, cleanText) ?: return@withContext null
         val (obj, meta) = result
@@ -308,7 +372,7 @@ JSON:{"is_command_attempt":false,"dynamic_speech":"","held_command":null}
         GeminiBrain.SecretCodeCheckResult(matched, heard, reply)
     }
 
-    private fun parseDecisionObject(parsed: JsonObject): ActionDecision {
+    private fun parseDecisionObject(parsed: JsonObject, suppressSpeech: Boolean = false): ActionDecision {
         val shouldIgnore = parsed.get("should_ignore")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asBoolean ?: false
         val transcript = parsed.get("transcript")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.trim()?.takeIf { it.isNotBlank() && it != "null" }
         val toolName = parsed.get("tool_name")?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asString?.takeIf { it != "null" && it.isNotBlank() }
@@ -319,15 +383,9 @@ JSON:{"is_command_attempt":false,"dynamic_speech":"","held_command":null}
             return ActionDecision(null, null, null, reasoning, transcript, shouldIgnore = true)
         }
 
-        val asyncExecutionTools = setOf(
-            "send_whatsapp_message", "whatsapp_call", "make_phone_call", "send_sms",
-            "play_youtube", "open_app", "universal_app_action",
-            "media_control", "volume_control", "lock_screen",
-            "instagram_send_message", "instagram_read_last_message", "instagram_watch_story",
-            "instagram_follow_account", "instagram_play_chat_reels", "instagram_play_reels"
-        )
         val speech = when {
-            toolName != null && toolName in asyncExecutionTools -> null
+            suppressSpeech -> null
+            toolName != null && toolName in JarvisPrompts.ASYNC_SILENT_TOOLS -> null
             else -> rawSpeech
         }
         val argsMap = mutableMapOf<String, Any>()

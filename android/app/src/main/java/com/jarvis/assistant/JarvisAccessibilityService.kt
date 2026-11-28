@@ -1,10 +1,12 @@
 package com.jarvis.assistant
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.Rect
 import android.media.AudioManager
@@ -17,6 +19,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import androidx.core.content.ContextCompat
 import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.engine.SystemController
 import com.jarvis.assistant.memory.JarvisMemoryManager
@@ -37,6 +40,12 @@ data class ScreenElement(
     val node: AccessibilityNodeInfo
 )
 
+data class WhatsAppNotice(
+    val sender: String,
+    val message: String,
+    val timestampMs: Long
+)
+
 class JarvisAccessibilityService : AccessibilityService() {
 
     companion object {
@@ -46,6 +55,30 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         val isServiceRunning: Boolean
             get() = instance != null
+
+        private val recentWhatsAppNotices = ArrayDeque<WhatsAppNotice>()
+
+        fun recordWhatsAppNotice(rawText: String) {
+            val clean = rawText.trim()
+            if (clean.isBlank()) return
+            val parts = clean.split(Regex("\\s+-\\s+|:\\s+"), limit = 2)
+            val sender = parts.getOrNull(0)?.trim().orEmpty()
+            val msg = parts.getOrNull(1)?.trim().orEmpty()
+            if (sender.isBlank() || msg.isBlank()) return
+            val lower = clean.lowercase()
+            if (lower.contains("checking for new messages") || lower.contains("backup in progress")) return
+            synchronized(recentWhatsAppNotices) {
+                recentWhatsAppNotices.removeAll { it.sender == sender && it.message == msg }
+                recentWhatsAppNotices.addFirst(WhatsAppNotice(sender, msg, System.currentTimeMillis()))
+                while (recentWhatsAppNotices.size > 15) recentWhatsAppNotices.removeLast()
+            }
+        }
+
+        fun getRecentWhatsAppNotices(): List<WhatsAppNotice> {
+            synchronized(recentWhatsAppNotices) {
+                return recentWhatsAppNotices.toList()
+            }
+        }
     }
 
     private var lastIncomingCallAnnounceTime = 0L
@@ -184,6 +217,7 @@ class JarvisAccessibilityService : AccessibilityService() {
             if (isPhoneCall || isMissed) {
                 speaker.speak("Sir, ${if (isVip) "VIP " else ""}$fullText")
             } else if (isWhatsApp) {
+                recordWhatsAppNotice(fullText)
                 speaker.speak("Sir, WhatsApp par message aaya hai: $fullText")
             }
         }
@@ -785,51 +819,156 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Answers an incoming phone or VoIP/WhatsApp call.
+     * Answers an incoming phone or VoIP/WhatsApp call across all windows (full screen or heads-up banner).
      */
     fun answerCall(): Boolean {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val isRingingPhone = am?.mode == AudioManager.MODE_RINGTONE
+        val hasAnswerPerm = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ANSWER_PHONE_CALLS
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && hasAnswerPerm && isRingingPhone) {
+            try {
                 val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                @Suppress("DEPRECATION")
                 telecomManager?.acceptRingingCall()
+                JarvisLogStore.log("ACC_CALL", "telecomManager.acceptRingingCall() invoked")
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "TelecomManager acceptRingingCall exception: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "TelecomManager acceptRingingCall exception: ${e.message}")
         }
 
-        val answerKeywords = listOf("answer", "accept", "pick up", "swipe up to answer", "incoming call")
-        for (kw in answerKeywords) {
-            val node = findClickableNode(kw)
-            if (node != null) {
-                tapElement(node)
+        val answerKeywords = listOf("answer", "accept", "pick up", "receive", "tap to answer")
+        val btn = findNodeAcrossWindows(resolveClickableParent = true) { node ->
+            val pkg = node.packageName?.toString()?.lowercase() ?: ""
+            val isCallPkg = pkg.contains("dialer") || pkg.contains("incall") || pkg.contains("telecom") ||
+                pkg.contains("phone") || pkg.contains("whatsapp") || pkg.contains("systemui")
+            if (!isCallPkg) return@findNodeAcrossWindows false
+            val text = node.text?.toString()?.lowercase() ?: ""
+            val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+            val resId = node.viewIdResourceName?.lowercase() ?: ""
+            answerKeywords.any { kw -> text.contains(kw) || cd.contains(kw) } ||
+                resId.contains("answer") || resId.contains("accept")
+        }
+        if (btn != null) {
+            val clicked = clickNode(btn) || tapElement(btn)
+            JarvisLogStore.log("ACC_CALL", "UI answerCall node clicked=$clicked")
+            if (clicked) return true
+        }
+
+        // Swipe-up handle fallback on lock-screen incoming call UI
+        val swipeHandle = findNodeAcrossWindows(resolveClickableParent = false) { node ->
+            val text = node.text?.toString()?.lowercase() ?: ""
+            val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+            text.contains("swipe up to answer") || cd.contains("swipe up to answer") || cd.contains("answer call")
+        }
+        if (swipeHandle != null) {
+            val r = Rect()
+            swipeHandle.getBoundsInScreen(r)
+            if (r.width() > 0 && r.height() > 0) {
+                val path = Path().apply {
+                    moveTo(r.centerX().toFloat(), r.centerY().toFloat())
+                    lineTo(r.centerX().toFloat(), (r.centerY() - 380f).coerceAtLeast(100f))
+                }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, 220))
+                    .build()
+                val swiped = dispatchGesture(gesture, null, null)
+                if (swiped) return true
+            }
+        }
+
+        // Last resort: try TelecomManager even if AudioManager mode didn't report RINGTONE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && hasAnswerPerm) {
+            try {
+                val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                @Suppress("DEPRECATION")
+                telecomManager?.acceptRingingCall()
                 return true
+            } catch (_: Exception) {
             }
         }
         return false
     }
 
     /**
-     * Ends an ongoing phone/WhatsApp call or rejects an incoming call.
+     * Ends an ongoing phone/WhatsApp call or rejects an incoming call across all windows.
      */
     fun endCall(): Boolean {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val hasAnswerPerm = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ANSWER_PHONE_CALLS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && hasAnswerPerm) {
+            try {
                 val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
-                if (telecomManager?.endCall() == true) return true
+                @Suppress("DEPRECATION")
+                if (telecomManager?.endCall() == true) {
+                    JarvisLogStore.log("ACC_CALL", "telecomManager.endCall() ok=true")
+                    return true
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "TelecomManager endCall exception: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "TelecomManager endCall exception: ${e.message}")
         }
 
-        val endKeywords = listOf("end call", "disconnect", "decline", "reject", "hang up", "cut", "dismiss")
-        for (kw in endKeywords) {
-            val node = findClickableNode(kw)
-            if (node != null) {
-                tapElement(node)
-                return true
-            }
+        val endKeywords = listOf("end call", "disconnect", "decline", "reject", "hang up", "dismiss")
+        val btn = findNodeAcrossWindows(resolveClickableParent = true) { node ->
+            val pkg = node.packageName?.toString()?.lowercase() ?: ""
+            val isCallPkg = pkg.contains("dialer") || pkg.contains("incall") || pkg.contains("telecom") ||
+                pkg.contains("phone") || pkg.contains("whatsapp") || pkg.contains("systemui")
+            if (!isCallPkg) return@findNodeAcrossWindows false
+            val text = node.text?.toString()?.lowercase() ?: ""
+            val cd = node.contentDescription?.toString()?.lowercase() ?: ""
+            val resId = node.viewIdResourceName?.lowercase() ?: ""
+            endKeywords.any { kw -> text.contains(kw) || cd.contains(kw) } ||
+                resId.contains("decline") || resId.contains("reject") || resId.endsWith("end_call") || resId.endsWith("end")
+        }
+        if (btn != null) {
+            val clicked = clickNode(btn) || tapElement(btn)
+            JarvisLogStore.log("ACC_CALL", "UI endCall node clicked=$clicked")
+            if (clicked) return true
         }
         return false
+    }
+
+    /**
+     * Toggles Speakerphone button directly on the active Dialer / InCallUI / WhatsApp call screen.
+     * Checks selected/checked/audio state first so enabling an already-on speaker does not turn it off.
+     */
+    fun setCallSpeakerUi(enabled: Boolean): Boolean? {
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val btn = findNodeAcrossWindows(resolveClickableParent = true) { node ->
+            val pkg = node.packageName?.toString()?.lowercase() ?: ""
+            val isCallPkg = pkg.contains("dialer") || pkg.contains("incall") || pkg.contains("telecom") ||
+                pkg.contains("phone") || pkg.contains("whatsapp")
+            if (!isCallPkg) return@findNodeAcrossWindows false
+            val txt = node.text?.toString()?.lowercase()?.trim() ?: ""
+            val cd = node.contentDescription?.toString()?.lowercase()?.trim() ?: ""
+            val res = node.viewIdResourceName?.lowercase() ?: ""
+            val isSpeakerLabel = txt == "speaker" || cd == "speaker" || cd.contains("speakerphone") ||
+                cd.contains("speaker") || res.contains("speaker") || res.contains("audio_button")
+            isSpeakerLabel && !cd.contains("more")
+        } ?: return null
+
+        @Suppress("DEPRECATION")
+        val currentAudioSpeaker = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            am?.communicationDevice?.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER || am?.isSpeakerphoneOn == true
+        } else {
+            am?.isSpeakerphoneOn == true
+        }
+        val cdNow = btn.contentDescription?.toString()?.lowercase() ?: ""
+        val uiSelected = btn.isSelected || btn.isChecked || cdNow.contains("speaker on") || currentAudioSpeaker
+        if (uiSelected == enabled) {
+            JarvisLogStore.log("ACC_CALL", "Speakerphone already enabled=$enabled")
+            return true
+        }
+        val clicked = clickNode(btn) || tapElement(btn)
+        JarvisLogStore.log("ACC_CALL", "Speakerphone UI toggled to enabled=$enabled ok=$clicked")
+        return clicked
     }
 
     /**

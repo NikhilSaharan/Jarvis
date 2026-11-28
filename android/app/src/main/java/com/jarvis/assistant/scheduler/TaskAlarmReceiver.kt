@@ -90,9 +90,13 @@ class TaskAlarmReceiver : BroadcastReceiver() {
                     }
                     "play_youtube" -> {
                         val q = (args["query"] as? String) ?: "trending songs"
-                        systemController.playYoutube(q)
-                        delay(1000)
-                        AutoUnlockManager.unlockAppLockIfPresent(context)
+                        systemController.playYoutube(q) { _, directPlayed ->
+                            CoroutineScope(Dispatchers.Main).launch {
+                                delay(950)
+                                AutoUnlockManager.unlockAppLockIfPresent(context)
+                                if (!directPlayed) nodeActionEngine.tapFirstYoutubeSearchResult()
+                            }
+                        }
                     }
                     "open_app" -> {
                         val app = (args["app_name"] as? String) ?: ""
@@ -103,6 +107,23 @@ class TaskAlarmReceiver : BroadcastReceiver() {
                     "set_dnd" -> {
                         val enabled = (args["enabled"] as? Boolean) ?: true
                         systemController.setDnd(enabled)
+                    }
+                    "set_brightness" -> {
+                        val level = args["level"]?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: "medium"
+                        systemController.setBrightness(level)
+                    }
+                    "toggle_flashlight" -> {
+                        val raw = args["enabled"]
+                        val enabled: Boolean? = when (raw) {
+                            is Boolean -> raw
+                            is String -> when (raw.lowercase().trim()) {
+                                "true", "on" -> true
+                                "false", "off" -> false
+                                else -> null
+                            }
+                            else -> null
+                        }
+                        systemController.setFlashlight(enabled)
                     }
                     "instagram_send_message",
                     "instagram_read_last_message",

@@ -5,6 +5,10 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Resources
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
@@ -18,8 +22,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -31,10 +38,35 @@ class SystemController(private val context: Context) {
         get() = context.applicationContext
 
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .build()
+
+    @Volatile
+    private var torchEnabledState = false
+
+    @Volatile
+    private var torchCallbackRegistered = false
+
+    private fun ensureTorchCallbackRegistered() {
+        val cm = cameraManager ?: return
+        if (torchCallbackRegistered) return
+        try {
+            cm.registerTorchCallback(object : CameraManager.TorchCallback() {
+                override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
+                    torchEnabledState = enabled
+                }
+            }, Handler(Looper.getMainLooper()))
+            torchCallbackRegistered = true
+        } catch (_: Exception) {
+        }
+    }
+
+    init {
+        ensureTorchCallbackRegistered()
+    }
 
     private val knownAppPackages = mapOf(
         "instagram" to "com.instagram.android",
@@ -135,28 +167,55 @@ class SystemController(private val context: Context) {
     }
 
     /**
-     * Sets Screen Brightness directly. Opens permission screen if not granted.
+     * Dynamically resolves the device's real brightness range (e.g., 0..255 on Pixel/AOSP,
+     * 0..4095 on OnePlus/OxygenOS/ColorOS) and adjusts screen brightness accurately.
      */
     fun setBrightness(level: String): String {
-        val brightnessValue = when (level.lowercase().trim()) {
-            "low", "dim", "kam" -> 30
-            "medium", "mid", "normal" -> 120
-            "high", "bright", "zyada" -> 200
-            "max", "full" -> 255
-            "min", "minimum" -> 10
-            else -> level.toIntOrNull()?.coerceIn(0, 255) ?: 120
-        }
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                if (!Settings.System.canWrite(context)) {
-                    val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
-                        data = Uri.parse("package:${context.packageName}")
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    }
-                    context.startActivity(intent)
-                    return "Sir, brightness change karne ke liye Write Settings permission allow kar dijiye (Screen open kar di hai)."
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.System.canWrite(context)) {
+                val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+                return "Sir, brightness change karne ke liye Write Settings permission allow kar dijiye (Screen open kar di hai)."
+            }
+
+            val current = Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 120)
+            val sysRes = Resources.getSystem()
+            val maxResId = sysRes.getIdentifier("config_screenBrightnessSettingMaximum", "integer", "android")
+            val minResId = sysRes.getIdentifier("config_screenBrightnessSettingMinimum", "integer", "android")
+            var minB = if (minResId != 0) sysRes.getInteger(minResId).coerceAtLeast(1) else 1
+            var maxB = if (maxResId != 0) sysRes.getInteger(maxResId).coerceAtLeast(255) else 255
+            if (current > maxB) {
+                maxB = when {
+                    current > 2047 -> 4095
+                    current > 1023 -> 2047
+                    else -> 1023
                 }
             }
+            if (minB >= maxB) minB = 1
+
+            val norm = level.lowercase().trim().removeSuffix("%").trim()
+            val targetBrightness = when (norm) {
+                "min", "minimum", "zero", "0", "bilkul kam", "lowest" -> minB
+                "low", "dim", "kam" -> (minB + (maxB - minB) * 0.12f).toInt()
+                "medium", "mid", "normal", "half", "50" -> (minB + (maxB - minB) * 0.48f).toInt()
+                "high", "bright", "zyada", "tezz" -> (minB + (maxB - minB) * 0.82f).toInt()
+                "max", "full", "highest", "100" -> maxB
+                "up", "increase", "badhao" -> (current + ((maxB - minB) * 0.30f).toInt()).coerceAtMost(maxB)
+                "down", "decrease", "kam karo", "thoda kam" -> (current - ((maxB - minB) * 0.30f).toInt()).coerceAtLeast(minB)
+                else -> {
+                    val num = norm.toIntOrNull()
+                    when {
+                        num == null -> (minB + (maxB - minB) * 0.48f).toInt()
+                        num <= 0 -> minB
+                        num <= 100 -> (minB + (maxB - minB) * (num / 100f)).toInt()
+                        else -> num.coerceIn(minB, maxB)
+                    }
+                }
+            }.coerceIn(minB, maxB)
+
             Settings.System.putInt(
                 context.contentResolver,
                 Settings.System.SCREEN_BRIGHTNESS_MODE,
@@ -165,11 +224,43 @@ class SystemController(private val context: Context) {
             Settings.System.putInt(
                 context.contentResolver,
                 Settings.System.SCREEN_BRIGHTNESS,
-                brightnessValue
+                targetBrightness
             )
-            "Brightness $level kar di hai Sir."
+            val pct = ((targetBrightness - minB) * 100f / (maxB - minB).coerceAtLeast(1)).toInt().coerceIn(0, 100)
+            "Brightness $pct% kar di hai Sir."
         } catch (e: Exception) {
+            Log.e("SystemController", "Brightness error: ${e.message}")
             "Brightness adjust nahi ho saki Sir."
+        }
+    }
+
+    /**
+     * Toggles or explicitly sets the device camera flashlight/torch via CameraManager.
+     */
+    fun setFlashlight(enabled: Boolean?): String {
+        val cm = cameraManager ?: return "Sir, flashlight control available nahi hai."
+        ensureTorchCallbackRegistered()
+        return try {
+            var chosenId: String? = null
+            for (id in cm.cameraIdList) {
+                val chars = cm.getCameraCharacteristics(id)
+                val hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                if (!hasFlash) continue
+                val facing = chars.get(CameraCharacteristics.LENS_FACING)
+                if (facing == CameraCharacteristics.LENS_FACING_BACK) {
+                    chosenId = id
+                    break
+                }
+                if (chosenId == null) chosenId = id
+            }
+            val camId = chosenId ?: return "Is device par flashlight unit nahi mila Sir."
+            val target = enabled ?: !torchEnabledState
+            cm.setTorchMode(camId, target)
+            torchEnabledState = target
+            if (target) "Flashlight on kar di hai Sir." else "Flashlight off kar di hai Sir."
+        } catch (e: Exception) {
+            Log.e("SystemController", "Flashlight error: ${e.message}")
+            "Flashlight toggle nahi ho saki Sir (camera busy ho sakta hai)."
         }
     }
 
@@ -254,10 +345,11 @@ class SystemController(private val context: Context) {
 
     /**
      * Direct YouTube Player Auto-Play:
-     * Resolves the top video ID via background scrape and launches `watch?v=VIDEO_ID`.
-     * Autoplays directly without leaving the user on a search list!
+     * Resolves the top video ID via InnerTube ANDROID API / Web search with consent cookies,
+     * and launches `watch?v=VIDEO_ID`. Reports whether direct playback succeeded so caller
+     * can auto-tap first video via Accessibility if search UI had to be used as fallback.
      */
-    fun playYoutube(query: String, callback: ((String) -> Unit)? = null) {
+    fun playYoutube(query: String, callback: ((String, Boolean) -> Unit)? = null) {
         val cleanQuery = cleanYoutubeQuery(query)
         CoroutineScope(Dispatchers.IO).launch {
             val videoId = fetchYoutubeVideoId(cleanQuery)
@@ -265,21 +357,21 @@ class SystemController(private val context: Context) {
                 if (!videoId.isNullOrEmpty()) {
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/watch?v=$videoId")).apply {
                         setPackage("com.google.android.youtube")
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                     }
                     try {
                         context.startActivity(intent)
-                        callback?.invoke("YouTube par '$cleanQuery' direct play kar diya hai Sir.")
+                        callback?.invoke("YouTube par '$cleanQuery' direct play kar diya hai Sir.", true)
                     } catch (e: Exception) {
                         intent.setPackage(null)
                         context.startActivity(intent)
-                        callback?.invoke("YouTube par '$cleanQuery' play kar diya hai Sir.")
+                        callback?.invoke("YouTube par '$cleanQuery' play kar diya hai Sir.", true)
                     }
                 } else {
                     val encoded = Uri.encode(cleanQuery)
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=$encoded")).apply {
                         setPackage("com.google.android.youtube")
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                     }
                     try {
                         context.startActivity(intent)
@@ -287,7 +379,7 @@ class SystemController(private val context: Context) {
                         intent.setPackage(null)
                         context.startActivity(intent)
                     }
-                    callback?.invoke("YouTube par '$cleanQuery' open kar diya hai Sir.")
+                    callback?.invoke("YouTube par '$cleanQuery' open kar diya hai Sir.", false)
                 }
             }
         }
@@ -299,18 +391,59 @@ class SystemController(private val context: Context) {
     }
 
     private fun fetchYoutubeVideoId(query: String): String? {
+        // 1. Primary: YouTube InnerTube ANDROID search API (zero consent/HTML challenge)
+        try {
+            val jsonMedia = "application/json; charset=utf-8".toMediaType()
+            val payload = JSONObject().apply {
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", "ANDROID")
+                        put("clientVersion", "19.09.37")
+                        put("deviceMake", Build.MANUFACTURER ?: "Google")
+                        put("deviceModel", Build.MODEL ?: "Android")
+                        put("osName", "ANDROID")
+                        put("osVersion", Build.VERSION.RELEASE ?: "14")
+                        put("hl", "en")
+                        put("gl", "IN")
+                    })
+                })
+                put("query", query)
+            }
+            val req = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
+                .header("User-Agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 14; en_IN) gzip")
+                .post(payload.toString().toRequestBody(jsonMedia))
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string().orEmpty()
+                    val organicMatch = Regex(""""videoWithContextRenderer":\{.*?"videoId":"([a-zA-Z0-9_-]{11})"""").find(body)
+                        ?: Regex(""""compactVideoRenderer":\{.*?"videoId":"([a-zA-Z0-9_-]{11})"""").find(body)
+                        ?: Regex(""""videoId":"([a-zA-Z0-9_-]{11})"""").find(body)
+                    val vid = organicMatch?.groupValues?.get(1)
+                    if (!vid.isNullOrBlank()) return vid
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("SystemController", "InnerTube search notice: ${e.message}")
+        }
+
+        // 2. Fallback: Web results page with Consent cookies
         return try {
             val encoded = Uri.encode(query)
-            val url = "https://www.youtube.com/results?search_query=$encoded"
+            val url = "https://www.youtube.com/results?search_query=$encoded&hl=en&gl=IN"
             val request = Request.Builder()
                 .url(url)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+                .header("Accept-Language", "en-IN,en;q=0.9,hi;q=0.8")
+                .header("Cookie", "CONSENT=YES+cb.20210328-17-p0.en+FX+678; SOCS=CAI")
                 .build()
-            val response = httpClient.newCall(request).execute()
-            val html = response.body?.string() ?: ""
-            val regex = Regex(""""videoId":"([a-zA-Z0-9_-]{11})"""")
-            val match = regex.find(html)
-            match?.groupValues?.get(1)
+            httpClient.newCall(request).execute().use { response ->
+                val html = response.body?.string().orEmpty()
+                val match = Regex(""""videoRenderer":\{.*?"videoId":"([a-zA-Z0-9_-]{11})"""").find(html)
+                    ?: Regex(""""videoId":"([a-zA-Z0-9_-]{11})"""").find(html)
+                match?.groupValues?.get(1)
+            }
         } catch (e: Exception) {
             Log.e("SystemController", "Failed to fetch YouTube video ID: ${e.message}")
             null
@@ -580,35 +713,92 @@ class SystemController(private val context: Context) {
     }
 
     /**
-     * Adjusts media stream volume directly without launching external UI.
+     * Toggles speakerphone ON or OFF during an active phone or WhatsApp call.
+     * Prefers tapping the live call-screen Speaker UI node across windows (reliable on Android 12-14),
+     * and falls back to AudioManager routing APIs.
+     */
+    fun setSpeakerphone(enabled: Boolean): String {
+        val accUiResult = com.jarvis.assistant.JarvisAccessibilityService.instance?.setCallSpeakerUi(enabled)
+        if (accUiResult == true) {
+            return if (enabled) "Speaker on kar diya hai Sir." else "Speaker off kar diya hai Sir."
+        }
+        return try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            var applied = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val devices = audioManager.availableCommunicationDevices
+                val targetDevice = if (enabled) {
+                    devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                } else {
+                    devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                }
+                if (targetDevice != null) {
+                    applied = audioManager.setCommunicationDevice(targetDevice)
+                }
+            }
+            @Suppress("DEPRECATION")
+            if (!applied) {
+                audioManager.isSpeakerphoneOn = enabled
+                applied = (audioManager.isSpeakerphoneOn == enabled)
+            }
+            if (applied) {
+                if (enabled) "Speaker on kar diya hai Sir." else "Speaker off kar diya hai Sir."
+            } else {
+                "Call screen par speaker button nahi mila Sir — kripya screen se tap karein."
+            }
+        } catch (e: Exception) {
+            Log.w("SystemController", "Speakerphone toggle failed: ${e.message}")
+            "Speaker change nahi ho saka Sir."
+        }
+    }
+
+    /**
+     * Adjusts device volume cleanly on the active stream (Call/Ring/Music) without launching external UI.
      */
     fun controlVolume(action: String, percent: Int? = null): String {
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         return try {
-            val stream = AudioManager.STREAM_MUSIC
-            val maxVol = audioManager.getStreamMaxVolume(stream)
+            val mode = audioManager.mode
+            val stream = when (mode) {
+                AudioManager.MODE_IN_CALL, AudioManager.MODE_IN_COMMUNICATION -> AudioManager.STREAM_VOICE_CALL
+                AudioManager.MODE_RINGTONE -> AudioManager.STREAM_RING
+                else -> AudioManager.STREAM_MUSIC
+            }
+            val maxVol = audioManager.getStreamMaxVolume(stream).coerceAtLeast(1)
+            val curVol = audioManager.getStreamVolume(stream)
             val norm = action.lowercase().trim()
+            val step = maxOf(2, (maxVol * 0.22f).toInt())
+
             when {
-                percent != null && (norm == "set" || norm == "level") -> {
-                    val target = ((percent.coerceIn(0, 100) * maxVol) / 100.0).toInt().coerceIn(0, maxVol)
+                percent != null -> {
+                    val clamped = percent.coerceIn(0, 100)
+                    val target = ((clamped * maxVol) / 100.0).toInt().coerceIn(0, maxVol)
                     audioManager.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
                 }
-                norm == "mute" -> {
-                    audioManager.setStreamVolume(stream, 0, AudioManager.FLAG_SHOW_UI)
+                norm == "mute" || norm == "zero" || norm == "band" -> {
+                    val minAllowed = if (stream == AudioManager.STREAM_VOICE_CALL) 1 else 0
+                    audioManager.setStreamVolume(stream, minAllowed, AudioManager.FLAG_SHOW_UI)
+                }
+                norm == "max" || norm == "full" -> {
+                    audioManager.setStreamVolume(stream, maxVol, AudioManager.FLAG_SHOW_UI)
+                }
+                norm == "low" || norm == "kam" -> {
+                    val target = minOf((curVol - step).coerceAtLeast(1), (maxVol * 0.25f).toInt().coerceAtLeast(1))
+                    audioManager.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
                 }
                 norm == "unmute" -> {
-                    val cur = audioManager.getStreamVolume(stream)
-                    if (cur == 0) {
+                    if (curVol <= 1) {
                         audioManager.setStreamVolume(stream, (maxVol / 3).coerceAtLeast(1), AudioManager.FLAG_SHOW_UI)
                     }
                 }
-                norm == "up" || norm == "increase" || norm == "high" -> {
-                    audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
-                    audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, 0)
+                norm == "up" || norm == "increase" || norm == "high" || norm == "badhao" -> {
+                    val target = (curVol + step).coerceAtMost(maxVol)
+                    audioManager.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
                 }
                 else -> {
-                    audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
-                    audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_LOWER, 0)
+                    val minAllowed = if (stream == AudioManager.STREAM_VOICE_CALL) 1 else 0
+                    val target = (curVol - step).coerceAtLeast(minAllowed)
+                    audioManager.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
                 }
             }
             ""

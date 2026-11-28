@@ -1,6 +1,6 @@
 {
-  "versionCode": 30,
-  "versionName": "1.3.7",
+  "versionCode": 31,
+  "versionName": "1.3.8",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Fixed 20x missed Hindi/short commands (new language-independent 48-dim Acoustic Mel Voiceprint + Pitch + Vosk hybrid so frames=0 never drops Hindi commands), added optional Groq Turbo (~400-650ms fast voice + AI via free console.groq.com key), prevented System Tracing launch, and 210ms snappier VAD."
+  "changelog": "Shared JarvisPrompts for Groq & Gemini, Whisper language=hi + signal confidence filtering (stops Urdu/phantom hallucinations), speech-band HPF VAD + soft-voice gain + NoiseSuppressor removal (fixes missed voice), dynamic OnePlus/Android brightness scale, flashlight & speakerphone tools, incoming call ANSWER_PHONE_CALLS + UI fix, fast WhatsApp reader, and InnerTube + UI YouTube autoplay."
 }

@@ -247,6 +247,249 @@ class NodeActionEngine(
     }
 
     /**
+     * Reads incoming WhatsApp messages fast without extra AI Vision/JSON hops:
+     * Checks live WhatsApp chat rows (unread or latest) and enters a chat thread when needed
+     * (either when a specific sender is requested or when unread message hides preview text).
+     */
+    fun readWhatsAppMessages(sender: String, callback: (Boolean, String) -> Unit) {
+        val cleanSender = sender.trim()
+        mainScope.launch {
+            val service = JarvisAccessibilityService.instance
+            if (service == null) {
+                val recent = com.jarvis.assistant.JarvisAccessibilityService.getRecentWhatsAppNotices()
+                if (recent.isNotEmpty()) {
+                    val notice = if (cleanSender.isNotBlank()) {
+                        recent.firstOrNull { it.sender.contains(cleanSender, ignoreCase = true) }
+                    } else recent.firstOrNull()
+                    if (notice != null) {
+                        callback(true, "WhatsApp par ${notice.sender} ka message hai: ${notice.message}")
+                        return@launch
+                    }
+                }
+                callback(false, "Accessibility Service active nahi hai Sir.")
+                return@launch
+            }
+
+            if (!AutoUnlockManager.ensureScreenUnlocked(systemController.appContext)) {
+                callback(false, "Sir, phone screen unlock nahi ho saki.")
+                return@launch
+            }
+
+            // If caller wants a specific person and has a saved phone number, jump directly to their WhatsApp chat!
+            if (cleanSender.isNotBlank()) {
+                val (number, displayName) = telephonyHelper.resolveContactNumber(cleanSender)
+                if (!number.isNullOrBlank()) {
+                    systemController.openChatWhatsApp(number)
+                    val threadReady = waitForWhatsAppChatScreen(service, 4800L)
+                    if (threadReady) {
+                        delay(150)
+                        val msg = extractLatestWhatsAppChatText(service)
+                        val reply = if (!msg.isNullOrBlank()) {
+                            "WhatsApp par $displayName ka last message hai: $msg"
+                        } else {
+                            "$displayName ki WhatsApp chat khol di hai Sir, koi recent text message nahi dikha."
+                        }
+                        callback(true, reply)
+                        return@launch
+                    }
+                }
+            }
+
+            // Ensure WhatsApp Chats list is visible
+            val openMsg = systemController.openApp("WhatsApp")
+            if (openMsg.contains("nahi mila")) {
+                callback(false, openMsg)
+                return@launch
+            }
+
+            val waitStart = System.currentTimeMillis()
+            while (System.currentTimeMillis() - waitStart < 4500L) {
+                if (AutoUnlockManager.isAppLockScreen(service)) {
+                    AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
+                    delay(80)
+                    continue
+                }
+                val pkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase().orEmpty()
+                if (pkg.contains("whatsapp")) {
+                    val hasChatsRows = service.dumpScreenElements().any {
+                        val r = it.node.viewIdResourceName ?: ""
+                        r.contains("contact_row_container", ignoreCase = true)
+                    }
+                    if (hasChatsRows) break
+                    // If WhatsApp opened inside an old chat thread, navigate back to Chats inbox
+                    val inChatThread = service.dumpScreenElements().any {
+                        val r = it.node.viewIdResourceName ?: ""
+                        r.endsWith(":id/entry") || r.contains("conversation_contact_name", ignoreCase = true)
+                    }
+                    if (inChatThread) {
+                        service.performBack()
+                        delay(280)
+                        continue
+                    }
+                }
+                delay(55)
+            }
+
+            val els = service.dumpScreenElements()
+            val chatRows = els.filter {
+                val r = it.node.viewIdResourceName ?: ""
+                r.contains("contact_row_container", ignoreCase = true)
+            }
+
+            if (chatRows.isEmpty()) {
+                val recent = com.jarvis.assistant.JarvisAccessibilityService.getRecentWhatsAppNotices().firstOrNull()
+                if (recent != null) {
+                    callback(true, "WhatsApp par ${recent.sender} ka message aaya tha: ${recent.message}")
+                } else {
+                    callback(false, "WhatsApp chats screen load nahi ho saki Sir.")
+                }
+                return@launch
+            }
+
+            fun rowText(el: com.jarvis.assistant.ScreenElement): String =
+                el.text.ifBlank { el.contentDescription }.trim()
+
+            // If specific sender named without saved phone number (group name or unsaved name):
+            if (cleanSender.isNotBlank()) {
+                val matchedRow = chatRows.firstOrNull {
+                    rowText(it).contains(cleanSender, ignoreCase = true)
+                }
+                if (matchedRow != null) {
+                    service.clickNode(matchedRow.node)
+                    waitForWhatsAppChatScreen(service, 2200L)
+                    delay(150)
+                    val msg = extractLatestWhatsAppChatText(service)
+                    val reply = if (!msg.isNullOrBlank()) {
+                        "WhatsApp par $cleanSender chat mein last message hai: $msg"
+                    } else {
+                        "$cleanSender ki WhatsApp chat khol di hai Sir."
+                    }
+                    callback(true, reply)
+                    return@launch
+                }
+            }
+
+            // General "kiska message aaya hai" query: prefer unread rows first, else newest top chat row
+            val unreadRows = chatRows.filter { rowText(it).contains("unread", ignoreCase = true) }
+            val candidates = if (unreadRows.isNotEmpty()) unreadRows else listOf(chatRows.first())
+            val summaries = mutableListOf<String>()
+
+            for (row in candidates.take(2)) {
+                val raw = rowText(row)
+                val parts = raw.split("|").map { it.trim() }.filter { it.isNotBlank() }
+                val chatName = parts.firstOrNull() ?: "Someone"
+                val previewParts = parts.drop(1).filterNot {
+                    it.matches(Regex("\\d{1,2}:\\d{2}\\s*(am|pm)?", RegexOption.IGNORE_CASE)) ||
+                        it.matches(Regex("\\d+")) ||
+                        it.contains("unread message", ignoreCase = true)
+                }
+                if (previewParts.isNotEmpty() && !raw.contains("unread message", ignoreCase = true)) {
+                    summaries.add("$chatName ne bheja: ${previewParts.joinToString(" ")}")
+                } else if (summaries.isEmpty()) {
+                    // Open the unread chat row to read the actual hidden message content!
+                    service.clickNode(row.node)
+                    if (waitForWhatsAppChatScreen(service, 2000L)) {
+                        delay(150)
+                        val msg = extractLatestWhatsAppChatText(service)
+                        if (!msg.isNullOrBlank()) {
+                            summaries.add("$chatName ka unread message hai: $msg")
+                        } else {
+                            summaries.add("$chatName ka unread message aaya hai")
+                        }
+                    } else {
+                        summaries.add("$chatName ka unread message aaya hai")
+                    }
+                    break
+                } else {
+                    summaries.add("$chatName ka unread message hai")
+                }
+            }
+
+            val finalSpeech = if (summaries.isNotEmpty()) {
+                "WhatsApp par ${summaries.joinToString("; ")} Sir."
+            } else {
+                "Abhi koi naya WhatsApp message nahi dikha Sir."
+            }
+            callback(true, finalSpeech)
+        }
+    }
+
+    private suspend fun waitForWhatsAppChatScreen(service: JarvisAccessibilityService, timeoutMs: Long): Boolean {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (AutoUnlockManager.isAppLockScreen(service)) {
+                AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
+                delay(70)
+                continue
+            }
+            val inChat = service.dumpScreenElements().any {
+                val r = it.node.viewIdResourceName ?: ""
+                r.endsWith(":id/entry") || r.contains("message_text", ignoreCase = true) || r.contains("conversation_contact_name", ignoreCase = true)
+            }
+            if (inChat) return true
+            delay(55)
+        }
+        return false
+    }
+
+    private fun extractLatestWhatsAppChatText(service: JarvisAccessibilityService): String? {
+        val els = service.dumpScreenElements()
+        val dm = service.resources.displayMetrics
+        val minContentTop = (dm.heightPixels * 0.11f).toInt()
+        val msgNodes = els.filter {
+            val res = it.node.viewIdResourceName ?: ""
+            val cls = it.className.lowercase()
+            res.contains("message_text", ignoreCase = true) ||
+                (cls.contains("textview") && !it.isClickable && it.bounds.top > minContentTop && it.text.isNotBlank() &&
+                    !it.text.matches(Regex("\\d{1,2}:\\d{2}\\s*(am|pm)?", RegexOption.IGNORE_CASE)) &&
+                    !it.text.equals("Today", ignoreCase = true) && !it.text.equals("Yesterday", ignoreCase = true) &&
+                    !it.text.contains("end-to-end encrypted", ignoreCase = true))
+        }
+        return msgNodes.lastOrNull()?.text?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Fallback helper for YouTube search results page when direct videoId fetch was offline/blocked:
+     * Automatically taps the first organic video card so playback starts hands-free.
+     */
+    suspend fun tapFirstYoutubeSearchResult() {
+        val service = JarvisAccessibilityService.instance ?: return
+        val dm = service.resources.displayMetrics
+        val minTop = (dm.heightPixels * 0.10f).toInt()
+        val minCardW = (dm.widthPixels * 0.30f).toInt()
+        val minCardH = (dm.heightPixels * 0.06f).toInt()
+        val waitStart = System.currentTimeMillis()
+        while (System.currentTimeMillis() - waitStart < 2500L) {
+            if (AutoUnlockManager.isAppLockScreen(service)) {
+                AutoUnlockManager.unlockAppLockIfPresent(systemController.appContext)
+                delay(80)
+                continue
+            }
+            val pkg = service.rootInActiveWindow?.packageName?.toString()?.lowercase().orEmpty()
+            if (pkg.contains("youtube")) {
+                val els = service.dumpScreenElements()
+                val alreadyPlaying = els.any {
+                    val res = it.node.viewIdResourceName?.lowercase() ?: ""
+                    res.contains("player_fragment") || res.contains("watch_player") || res.contains("player_control")
+                }
+                if (alreadyPlaying) return
+
+                val videoCard = els.firstOrNull { el ->
+                    val label = el.text.ifBlank { el.contentDescription }.lowercase()
+                    el.isClickable && el.bounds.top > minTop && el.bounds.width() > minCardW && el.bounds.height() > minCardH &&
+                        (label.contains("ago") || label.contains("views") || label.contains("minutes") || label.contains("seconds") || label.contains("play video")) &&
+                        !label.contains("sponsored") && !label.contains("ad ")
+                }
+                if (videoCard != null) {
+                    service.clickNode(videoCard.node)
+                    return
+                }
+            }
+            delay(85)
+        }
+    }
+
+    /**
      * Universal Tap by Set-of-Marks tag number ([1], [2], [3]...).
      * Uses the live-refreshed cached snapshot element so shifting animations never cause wrong clicks.
      */

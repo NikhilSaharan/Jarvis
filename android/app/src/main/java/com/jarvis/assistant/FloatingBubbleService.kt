@@ -267,8 +267,34 @@ class FloatingBubbleService : Service() {
                 systemController.setDnd(enabled)
             }
             "set_brightness" -> {
-                val level = (args["level"] as? String) ?: "medium"
-                systemController.setBrightness(level)
+                val level = args["level"]?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: "medium"
+                val reply = systemController.setBrightness(level)
+                if (!alreadySpoken || reply.contains("permission", ignoreCase = true)) {
+                    speakerHelper.speak(reply)
+                }
+            }
+            "toggle_flashlight" -> {
+                val raw = args["enabled"]
+                val enabled: Boolean? = when (raw) {
+                    is Boolean -> raw
+                    is String -> when (raw.lowercase().trim()) {
+                        "true", "on", "enable", "start" -> true
+                        "false", "off", "disable", "stop" -> false
+                        else -> null
+                    }
+                    else -> null
+                }
+                val reply = systemController.setFlashlight(enabled)
+                if (!alreadySpoken) speakerHelper.speak(reply)
+            }
+            "toggle_speakerphone" -> {
+                val raw = args["enabled"]
+                val enabled = when (raw) {
+                    is Boolean -> raw
+                    is String -> raw.lowercase().trim() !in listOf("false", "off", "disable")
+                    else -> true
+                }
+                systemController.setSpeakerphone(enabled)
             }
             "set_alarm" -> {
                 val h = (args["hour"] as? Number)?.toInt() ?: 7
@@ -319,10 +345,13 @@ class FloatingBubbleService : Service() {
             "play_youtube" -> {
                 runAfterScreenUnlock {
                     val q = (args["query"] as? String) ?: "trending songs"
-                    systemController.playYoutube(q) { _ ->
+                    systemController.playYoutube(q) { _, directPlayed ->
                         serviceScope.launch {
                             delay(900)
                             AutoUnlockManager.unlockAppLockIfPresent(this@FloatingBubbleService, geminiBrain)
+                            if (!directPlayed) {
+                                nodeActionEngine.tapFirstYoutubeSearchResult()
+                            }
                         }
                     }
                 }
@@ -338,6 +367,12 @@ class FloatingBubbleService : Service() {
                 val msg = (args["message"] as? String) ?: ""
                 nodeActionEngine.sendWhatsAppMessage(rec, msg) { success, reply ->
                     if (success) speakerHelper.speak(reply)
+                }
+            }
+            "whatsapp_read_messages" -> {
+                val sender = (args["sender"] as? String) ?: (args["recipient"] as? String) ?: ""
+                nodeActionEngine.readWhatsAppMessages(sender) { _, reply ->
+                    if (!alreadySpoken && reply.isNotBlank()) speakerHelper.speak(reply)
                 }
             }
             "whatsapp_call" -> {

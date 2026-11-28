@@ -481,7 +481,8 @@ class AlwaysOnVoiceService : Service() {
         } catch (_: Exception) {
             AudioManager.MODE_NORMAL
         }
-        if (audioMode == AudioManager.MODE_IN_CALL || audioMode == AudioManager.MODE_IN_COMMUNICATION) {
+        val inCallNow = audioMode == AudioManager.MODE_IN_CALL || audioMode == AudioManager.MODE_IN_COMMUNICATION
+        if (inCallNow && !com.jarvis.assistant.JarvisAccessibilityService.isServiceRunning) {
             voiceCaptureEngine?.setDispatchInFlight(false)
             schedulePassiveResume(1200L)
             return
@@ -546,6 +547,7 @@ class AlwaysOnVoiceService : Service() {
                     voskHint = captured.voskHint,
                     isMediaPlaying = captured.isMediaPlaying,
                     speakerVerified = speakerVerified,
+                    isInActiveCall = captured.isInActiveCall || inCallNow,
                     sourceTag = "USER_VOICE"
                 ) { ignored, transcript ->
                     if (!ignored && transcript.isNotBlank()) {
