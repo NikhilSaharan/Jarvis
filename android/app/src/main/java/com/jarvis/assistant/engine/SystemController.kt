@@ -365,6 +365,9 @@ class SystemController(private val context: Context) {
                 val pName = ri.activityInfo.packageName.lowercase()
                 val label = ri.loadLabel(pm).toString()
                 val lowerLabel = label.lowercase()
+                if ((pName.contains("traceur") || lowerLabel == "system tracing") && !rawQuery.contains("tracing")) {
+                    continue
+                }
 
                 val score = when {
                     lowerLabel == cleanQuery || lowerLabel == rawQuery -> 100

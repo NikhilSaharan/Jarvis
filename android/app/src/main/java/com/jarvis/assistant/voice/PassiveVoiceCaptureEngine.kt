@@ -61,7 +61,8 @@ class PassiveVoiceCaptureEngine(
         val voskHint: String,
         val verification: VoiceprintManager.VerificationResult,
         val durationMs: Long,
-        val isMediaPlaying: Boolean
+        val isMediaPlaying: Boolean,
+        val rawPcm: ByteArray = ByteArray(0)
     )
 
     companion object {
@@ -69,10 +70,10 @@ class PassiveVoiceCaptureEngine(
         private const val CHUNK_BYTES = 1024 // 32ms @ 16kHz PCM16 mono
         private const val PRE_ROLL_FRAMES = 7 // ~224ms pre-roll before VAD onset
         private const val ONSET_FRAMES_REQUIRED = 2 // ~64ms fast normal-voice trigger
-        private const val END_SILENCE_MS = 350L
-        private const val MIN_UTTERANCE_MS = 320L
+        private const val END_SILENCE_MS = 210L
+        private const val MIN_UTTERANCE_MS = 250L
         private const val MAX_UTTERANCE_MS = 5500L
-        private const val MAX_UTTERANCE_MEDIA_MS = 3800L
+        private const val MAX_UTTERANCE_MEDIA_MS = 3200L
         private const val BYTES_PER_MS = 32 // 16000 * 2 / 1000
 
         private const val ASR_DIR_NAME = "vosk-model-en-in"
@@ -556,8 +557,10 @@ class PassiveVoiceCaptureEngine(
                 spkAccumulator.consume(recognizer.finalResult)
                 var (voskText, spkVec, spkFrames) = spkAccumulator.build()
                 val rawPcm = pcmOut.toByteArray()
+                val cleanPcm = VoiceprintManager.trimTrailingSilencePcm(rawPcm)
+                val acFeatures = VoiceprintManager.extractAcousticFeatures(cleanPcm)
 
-                if (spkVec == null || spkVec.isEmpty() || spkFrames < minSpkFrames) {
+                if ((spkVec == null || spkVec.isEmpty() || spkFrames < minSpkFrames) && acFeatures.voicedFrames < 14) {
                     val (denseText, denseVec, denseFrames) = extractDenseSpkFallback(recognizer, rawPcm, noiseFloor)
                     if (denseVec != null && denseVec.isNotEmpty() && denseFrames > spkFrames) {
                         spkVec = denseVec
@@ -566,18 +569,24 @@ class PassiveVoiceCaptureEngine(
                     }
                 }
 
-                if (spkVec == null || spkVec.isEmpty() || spkFrames < minSpkFrames) {
+                val hasUsableAcoustic = acFeatures.voicedFrames >= 14 && acFeatures.vector.isNotEmpty()
+                val hasUsableVosk = spkVec != null && spkVec.isNotEmpty() && spkFrames >= minSpkFrames
+                if (!hasUsableAcoustic && !hasUsableVosk) {
                     return Result.failure(
-                        IOException("Sample bahut chhota ya unclear tha (frames=$spkFrames). Thoda clear 2-3 sec bolein.")
+                        IOException("Sample bahut chhota ya unclear tha (voice=${acFeatures.voicedFrames}). Thoda clear 2 sec bolein.")
                     )
                 }
 
-                val cleanPcm = VoiceprintManager.trimTrailingSilencePcm(rawPcm)
-                val pitchHz = VoiceprintManager.extractPcmPitchHz(cleanPcm)
                 val wav = VoiceprintManager.pcm16ToWav(cleanPcm, SAMPLE_RATE)
                 Result.success(
                     EnrollmentRecording(
-                        sample = VoiceprintManager.EnrollmentSample(spkVec, spkFrames, pitchHz),
+                        sample = VoiceprintManager.EnrollmentSample(
+                            spkVector = spkVec ?: FloatArray(0),
+                            spkFrames = maxOf(spkFrames, acFeatures.voicedFrames),
+                            pitchHz = acFeatures.pitchHz,
+                            acousticVector = acFeatures.vector,
+                            voicedFrames = acFeatures.voicedFrames
+                        ),
                         wavBytes = wav,
                         voskText = voskText
                     )
@@ -933,8 +942,8 @@ class PassiveVoiceCaptureEngine(
                 val maxCapMs = if (isMediaNow) MAX_UTTERANCE_MEDIA_MS else MAX_UTTERANCE_MS
                 val totalMs = (utterancePcm.size() / BYTES_PER_MS).toLong()
                 val silenceMs = now - lastVoiceMs
-                val endDetected = (totalMs >= (MIN_UTTERANCE_MS + 140L) && silenceMs >= END_SILENCE_MS) ||
-                    (voskFinal && totalMs >= 580L && silenceMs >= 220L) ||
+                val endDetected = (totalMs >= (MIN_UTTERANCE_MS + 110L) && silenceMs >= END_SILENCE_MS) ||
+                    (voskFinal && totalMs >= 420L && silenceMs >= 160L) ||
                     totalMs >= maxCapMs
 
                 if (endDetected) {
@@ -958,13 +967,15 @@ class PassiveVoiceCaptureEngine(
                     }
 
                     val hadMeaningfulSignal = capturedMs >= MIN_UTTERANCE_MS &&
-                        capturedActiveMs >= 190L &&
-                        peakRms >= 350.0
+                        capturedActiveMs >= 130L &&
+                        peakRms >= 290.0
                     peakRms = 0.0
                     if (!hadMeaningfulSignal) continue
 
-                    // Recover full x-vector cleanly if a mid-command pause fragmented Vosk segments
-                    if ((spkVec == null || spkFrames < 50) && capturedActiveMs >= 520L) {
+                    // Only re-run slow CPU Vosk pass if Acoustic profile is absent (legacy v1.3.6 enrollment)
+                    if (!VoiceprintManager.hasAcousticProfile(appContext) &&
+                        (spkVec == null || spkFrames < 50) && capturedActiveMs >= 480L
+                    ) {
                         val (denseText, denseVec, denseFrames) = extractDenseSpkFallback(recognizer, rawPcm, quietFloorRms)
                         if (denseVec != null && denseVec.isNotEmpty() && denseFrames > spkFrames) {
                             spkVec = denseVec
@@ -986,13 +997,13 @@ class PassiveVoiceCaptureEngine(
                         forceForwardForChallenge -> true
                         verification.tier == VoiceprintManager.MatchTier.TRUSTED -> true
                         verification.tier == VoiceprintManager.MatchTier.DOUBT -> {
-                            !isMediaPlaying || capturedMs >= 700L
+                            !isMediaPlaying || capturedMs >= 550L
                         }
                         else -> {
                             !isMediaPlaying &&
-                                capturedMs >= 750L &&
+                                capturedMs >= 700L &&
                                 (nowDispatchMs - lastRejectForwardMs) >= 8000L &&
-                                verification.spkFrames >= 45
+                                verification.spkFrames >= 12
                         }
                     }
 
@@ -1021,7 +1032,8 @@ class PassiveVoiceCaptureEngine(
                         voskHint = voskText,
                         verification = verification,
                         durationMs = capturedMs,
-                        isMediaPlaying = isMediaPlaying
+                        isMediaPlaying = isMediaPlaying,
+                        rawPcm = rawPcm
                     )
                     onUtteranceReady(captured)
                 }

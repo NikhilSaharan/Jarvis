@@ -47,9 +47,21 @@ class GeminiBrain(
 ) {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(7, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectionPool(okhttp3.ConnectionPool(4, 5, TimeUnit.MINUTES))
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
         .build()
+
+    fun prewarm() {
+        try {
+            val req = Request.Builder()
+                .url("https://generativelanguage.googleapis.com/")
+                .head()
+                .build()
+            client.newCall(req).execute().close()
+        } catch (_: Exception) {
+        }
+    }
 
     private val gson = Gson()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -669,7 +681,7 @@ CORE OPERATING PRINCIPLES:
    - send_sms(recipient: string, message: string): Sends a normal SMS text message.
    - play_youtube(query: string): ONLY when Sir explicitly asks to play a song, music, or video on YouTube.
    - open_app(app_name: string): ONLY when Sir specifically asks to just launch or open an app without further actions.
-   - universal_app_action(app_name: string, instruction: string): Use for other apps (notes, browsers, shopping, streaming, etc.) or any generic in-app multi-step UI task not covered by a dedicated tool above (NEVER use for screen lock).
+   - universal_app_action(app_name: string, instruction: string): Use for other apps (notes, browsers, shopping, streaming, etc.) or any generic in-app multi-step UI task not covered by a dedicated tool above (NEVER use for screen lock, and NEVER open "System" when Sir asks you to speak/check audio).
    - tap_tag(tag: int): Taps on a numbered element [tag] from the Live Screen Elements.
    - type_tag(tag: int, text: string): Types text into a numbered input field [tag] from Live Screen Elements.
    - scroll_screen(direction: "down"|"up"): Swipes/scrolls the active screen.
@@ -726,6 +738,7 @@ CRITICAL HANDS-FREE FILTER RULES (`should_ignore`):
    - If Sir asks to pause/play/resume/skip active video or audio -> call `media_control` with `"speech": null`.
    - If Sir asks to adjust or mute volume -> call `volume_control` with `"speech": null`.
    - If Sir asks to lock the screen or turn off the display -> call `lock_screen()` with `"speech": null` (NEVER call `universal_app_action` or Settings for screen lock).
+   - If Sir simply checks if you hear him or says conversational lines ("jaldi kuch to bolo", "meri aawaz aa rahi hai kya", "hello Jarvis") -> set `"tool_name": null` and reply briefly in `"speech"` (NEVER launch `universal_app_action("System", ...)`).
    - NEVER invent placeholder recipients ("last chat", "someone", "friend") if Sir asks to message/call someone without giving a contact name — set `"tool_name": null` and ask briefly in Hinglish who to contact.
 
 TOOLS:

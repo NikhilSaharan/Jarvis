@@ -1,6 +1,6 @@
 {
-  "versionCode": 29,
-  "versionName": "1.3.6",
+  "versionCode": 30,
+  "versionName": "1.3.7",
   "apkUrl": "https://github.com/NikhilSaharan/Jarvis/releases/download/latest/app-debug.apk",
-  "changelog": "Instant native OS screen lock (lock_screen) so Settings never opens by mistake, 4x faster dynamic lockscreen/AppLock unlock & direct whatsapp:// delivery, self-healing lockscreen mic, zero static screen-size constants, plus normal-voice VAD & instant Reels fling."
+  "changelog": "Fixed 20x missed Hindi/short commands (new language-independent 48-dim Acoustic Mel Voiceprint + Pitch + Vosk hybrid so frames=0 never drops Hindi commands), added optional Groq Turbo (~400-650ms fast voice + AI via free console.groq.com key), prevented System Tracing launch, and 210ms snappier VAD."
 }

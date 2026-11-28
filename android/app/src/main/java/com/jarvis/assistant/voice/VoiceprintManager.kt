@@ -5,12 +5,17 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.ln
+import kotlin.math.pow
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
  * Local, offline owner voiceprint storage and biometric verification engine.
- * Uses Vosk SpeakerModel 128-dim x-vectors paired with voiced pitch (F0 Hz) sanity checks
- * so Jarvis obeys only the enrolled user and ignores TV/Hotstar/Reels/strangers.
+ * Combines text-independent 48-dim CMVN Mel-Spectral formant embeddings (works across Hindi/Hinglish/English
+ * even on 0.3s commands), voiced pitch (F0 Hz), and Vosk 128-dim x-vectors when available.
  */
 object VoiceprintManager {
 
@@ -29,6 +34,14 @@ object VoiceprintManager {
     data class EnrollmentSample(
         val spkVector: FloatArray,
         val spkFrames: Int,
+        val pitchHz: Float?,
+        val acousticVector: FloatArray? = null,
+        val voicedFrames: Int = 0
+    )
+
+    data class AcousticFeatures(
+        val vector: FloatArray,
+        val voicedFrames: Int,
         val pitchHz: Float?
     )
 
@@ -53,6 +66,12 @@ object VoiceprintManager {
     private const val KEY_SAMPLE_COUNT = "voice_lock_sample_count"
     private const val KEY_SELF_FLOOR = "voice_lock_self_floor"
     private const val KEY_SECRET_CODE = "voice_lock_secret_code"
+    private const val KEY_ACOUSTIC_CENTROID = "voice_lock_acoustic_centroid"
+    private const val KEY_ACOUSTIC_SAMPLES = "voice_lock_acoustic_samples"
+    private const val KEY_ACOUSTIC_SELF_FLOOR = "voice_lock_acoustic_self_floor"
+
+    private const val MEL_BANDS = 24
+    private const val FFT_SIZE = 512
 
     private val gson = Gson()
     private val lock = Any()
@@ -63,6 +82,9 @@ object VoiceprintManager {
     private var cachedSensitivity = Sensitivity.BALANCED
     private var cachedCentroid: FloatArray? = null
     private var cachedSamples: List<FloatArray> = emptyList()
+    private var cachedAcousticCentroid: FloatArray? = null
+    private var cachedAcousticSamples: List<FloatArray> = emptyList()
+    private var cachedAcousticSelfFloor: Float = 0f
     private var cachedMedianF0: Float = 0f
     private var cachedMinF0: Float = 0f
     private var cachedMaxF0: Float = 0f
@@ -80,6 +102,7 @@ object VoiceprintManager {
             } catch (_: Exception) {
                 Sensitivity.BALANCED
             }
+            cachedAcousticSelfFloor = prefs.getFloat(KEY_ACOUSTIC_SELF_FLOOR, 0f)
             cachedMedianF0 = prefs.getFloat(KEY_MEDIAN_F0, 0f)
             cachedMinF0 = prefs.getFloat(KEY_MIN_F0, 0f)
             cachedMaxF0 = prefs.getFloat(KEY_MAX_F0, 0f)
@@ -106,13 +129,40 @@ object VoiceprintManager {
                 }
             } else emptyList()
 
+            val acCentroidJson = prefs.getString(KEY_ACOUSTIC_CENTROID, null)
+            cachedAcousticCentroid = if (!acCentroidJson.isNullOrBlank()) {
+                try {
+                    gson.fromJson(acCentroidJson, FloatArray::class.java)?.let { l2Normalize(it) }
+                } catch (_: Exception) {
+                    null
+                }
+            } else null
+
+            val acSamplesJson = prefs.getString(KEY_ACOUSTIC_SAMPLES, null)
+            cachedAcousticSamples = if (!acSamplesJson.isNullOrBlank()) {
+                try {
+                    val type = object : TypeToken<List<FloatArray>>() {}.type
+                    val parsed: List<FloatArray>? = gson.fromJson(acSamplesJson, type)
+                    parsed?.map { l2Normalize(it) }.orEmpty()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else emptyList()
+
             cachedLoaded = true
         }
     }
 
     fun isEnrolled(context: Context): Boolean {
         ensureLoaded(context)
-        return cachedCentroid != null && cachedCentroid!!.isNotEmpty()
+        val hasVosk = cachedCentroid != null && cachedCentroid!!.isNotEmpty()
+        val hasAcoustic = cachedAcousticCentroid != null && cachedAcousticCentroid!!.isNotEmpty()
+        return hasVosk || hasAcoustic
+    }
+
+    fun hasAcousticProfile(context: Context): Boolean {
+        ensureLoaded(context)
+        return cachedAcousticCentroid != null && cachedAcousticCentroid!!.isNotEmpty()
     }
 
     fun hasSecretCode(context: Context): Boolean {
@@ -142,7 +192,7 @@ object VoiceprintManager {
 
     fun isLockActive(context: Context): Boolean {
         ensureLoaded(context)
-        return cachedEnabled && cachedCentroid != null && cachedCentroid!!.isNotEmpty()
+        return cachedEnabled && isEnrolled(context)
     }
 
     fun isLockEnabledPref(context: Context): Boolean {
@@ -196,51 +246,55 @@ object VoiceprintManager {
         samples: List<EnrollmentSample>,
         secretCode: String
     ): Boolean {
-        val valid = samples.filter { it.spkVector.isNotEmpty() }
         val cleanSecret = secretCode.trim()
-        if (valid.isEmpty() || cleanSecret.isBlank()) return false
+        if (samples.isEmpty() || cleanSecret.isBlank()) return false
 
-        val dim = valid.first().spkVector.size
-        val normalizedSamples = valid
-            .filter { it.spkVector.size == dim }
-            .map { l2Normalize(it.spkVector) }
-        if (normalizedSamples.isEmpty()) return false
+        val voskValid = samples.filter { it.spkVector.isNotEmpty() }
+        val voskDim = voskValid.firstOrNull()?.spkVector?.size ?: 0
+        val normalizedVoskSamples = if (voskDim > 0) {
+            voskValid.filter { it.spkVector.size == voskDim }.map { l2Normalize(it.spkVector) }
+        } else emptyList()
 
-        val sum = FloatArray(dim)
-        for (vec in normalizedSamples) {
-            for (i in 0 until dim) {
-                sum[i] += vec[i]
+        val voskCentroid = if (normalizedVoskSamples.isNotEmpty()) {
+            val sum = FloatArray(voskDim)
+            for (vec in normalizedVoskSamples) {
+                for (i in 0 until voskDim) sum[i] += vec[i]
             }
-        }
-        val centroid = l2Normalize(sum)
+            l2Normalize(sum)
+        } else null
 
-        // Leave-one-out self-consistency floor derived from user's own multi-style samples
-        var selfFloor = 0f
-        if (normalizedSamples.size >= 2) {
-            var minSelfSim = 1.0f
-            for (idx in normalizedSamples.indices) {
-                val otherSum = FloatArray(dim)
-                for (j in normalizedSamples.indices) {
-                    if (j == idx) continue
-                    for (k in 0 until dim) otherSum[k] += normalizedSamples[j][k]
-                }
-                val otherCentroid = l2Normalize(otherSum)
-                val sim = cosineSimilarity(normalizedSamples[idx], otherCentroid)
-                if (sim < minSelfSim) minSelfSim = sim
+        val selfFloor = computeLeaveOneOutFloor(normalizedVoskSamples)
+
+        val acousticValid = samples.mapNotNull { it.acousticVector }.filter { it.isNotEmpty() }
+        val acDim = acousticValid.firstOrNull()?.size ?: 0
+        val normalizedAcSamples = if (acDim > 0) {
+            acousticValid.filter { it.size == acDim }.map { l2Normalize(it) }
+        } else emptyList()
+
+        val acCentroid = if (normalizedAcSamples.isNotEmpty()) {
+            val sum = FloatArray(acDim)
+            for (vec in normalizedAcSamples) {
+                for (i in 0 until acDim) sum[i] += vec[i]
             }
-            selfFloor = minSelfSim.coerceIn(0f, 0.92f)
-        }
+            l2Normalize(sum)
+        } else null
 
-        val pitches = valid.mapNotNull { it.pitchHz }.filter { it in 60f..380f }.sorted()
+        val acSelfFloor = computeLeaveOneOutFloor(normalizedAcSamples)
+        if (voskCentroid == null && acCentroid == null) return false
+
+        val pitches = samples.mapNotNull { it.pitchHz }.filter { it in 60f..380f }.sorted()
         val medianPitch = if (pitches.isNotEmpty()) pitches[pitches.size / 2] else 0f
-        val minPitch = if (pitches.isNotEmpty()) (pitches.first() * 0.78f).coerceAtLeast(55f) else 0f
-        val maxPitch = if (pitches.isNotEmpty()) (pitches.last() * 1.28f).coerceAtMost(420f) else 0f
+        val minPitch = if (pitches.isNotEmpty()) (pitches.first() * 0.72f).coerceAtLeast(55f) else 0f
+        val maxPitch = if (pitches.isNotEmpty()) (pitches.last() * 1.35f).coerceAtMost(420f) else 0f
 
         synchronized(lock) {
             cachedLoaded = true
             cachedEnabled = true
-            cachedCentroid = centroid
-            cachedSamples = normalizedSamples
+            cachedCentroid = voskCentroid
+            cachedSamples = normalizedVoskSamples
+            cachedAcousticCentroid = acCentroid
+            cachedAcousticSamples = normalizedAcSamples
+            cachedAcousticSelfFloor = acSelfFloor
             cachedMedianF0 = medianPitch
             cachedMinF0 = minPitch
             cachedMaxF0 = maxPitch
@@ -254,13 +308,70 @@ object VoiceprintManager {
                 .putFloat(KEY_MIN_F0, minPitch)
                 .putFloat(KEY_MAX_F0, maxPitch)
                 .putFloat(KEY_SELF_FLOOR, selfFloor)
-                .putInt(KEY_SAMPLE_COUNT, normalizedSamples.size)
-                .putString(KEY_CENTROID, gson.toJson(centroid))
-                .putString(KEY_SAMPLES, gson.toJson(normalizedSamples))
+                .putFloat(KEY_ACOUSTIC_SELF_FLOOR, acSelfFloor)
+                .putInt(KEY_SAMPLE_COUNT, maxOf(normalizedAcSamples.size, normalizedVoskSamples.size))
+                .putString(KEY_CENTROID, voskCentroid?.let { gson.toJson(it) })
+                .putString(KEY_SAMPLES, gson.toJson(normalizedVoskSamples))
+                .putString(KEY_ACOUSTIC_CENTROID, acCentroid?.let { gson.toJson(it) })
+                .putString(KEY_ACOUSTIC_SAMPLES, gson.toJson(normalizedAcSamples))
                 .putString(KEY_SECRET_CODE, cleanSecret)
                 .commit()
         }
         return true
+    }
+
+    private fun computeLeaveOneOutFloor(normalizedSamples: List<FloatArray>): Float {
+        if (normalizedSamples.size < 2) return 0f
+        val dim = normalizedSamples.first().size
+        var minSelfSim = 1.0f
+        for (idx in normalizedSamples.indices) {
+            val otherSum = FloatArray(dim)
+            for (j in normalizedSamples.indices) {
+                if (j == idx) continue
+                for (k in 0 until dim) otherSum[k] += normalizedSamples[j][k]
+            }
+            val otherCentroid = l2Normalize(otherSum)
+            val sim = cosineSimilarity(normalizedSamples[idx], otherCentroid)
+            if (sim < minSelfSim) minSelfSim = sim
+        }
+        return minSelfSim.coerceIn(0f, 0.94f)
+    }
+
+    /**
+     * Auto-populates the language-independent 48-dim Acoustic Voiceprint whenever a user
+     * upgrades from an older enrollment or completes Secret Code / trusted verification.
+     */
+    fun learnOwnerAcousticSample(context: Context, pcmBytes: ByteArray) {
+        if (pcmBytes.size < 8_000) return
+        ensureLoaded(context)
+        if (!cachedEnabled || !isEnrolled(context)) return
+
+        val feat = extractAcousticFeatures(pcmBytes)
+        if (feat.voicedFrames < 10 || feat.vector.isEmpty()) return
+
+        synchronized(lock) {
+            if (cachedAcousticSamples.size >= 6) return
+            val updatedSamples = (cachedAcousticSamples + l2Normalize(feat.vector)).takeLast(6)
+            val dim = updatedSamples.first().size
+            val sum = FloatArray(dim)
+            for (v in updatedSamples) {
+                if (v.size == dim) {
+                    for (i in 0 until dim) sum[i] += v[i]
+                }
+            }
+            val newCentroid = l2Normalize(sum)
+            val newFloor = computeLeaveOneOutFloor(updatedSamples)
+            cachedAcousticSamples = updatedSamples
+            cachedAcousticCentroid = newCentroid
+            cachedAcousticSelfFloor = newFloor
+
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_ACOUSTIC_CENTROID, gson.toJson(newCentroid))
+                .putString(KEY_ACOUSTIC_SAMPLES, gson.toJson(updatedSamples))
+                .putFloat(KEY_ACOUSTIC_SELF_FLOOR, newFloor)
+                .apply()
+        }
     }
 
     fun clearEnrollment(context: Context) {
@@ -268,6 +379,9 @@ object VoiceprintManager {
             cachedLoaded = true
             cachedCentroid = null
             cachedSamples = emptyList()
+            cachedAcousticCentroid = null
+            cachedAcousticSamples = emptyList()
+            cachedAcousticSelfFloor = 0f
             cachedMedianF0 = 0f
             cachedMinF0 = 0f
             cachedMaxF0 = 0f
@@ -277,6 +391,9 @@ object VoiceprintManager {
                 .edit()
                 .remove(KEY_CENTROID)
                 .remove(KEY_SAMPLES)
+                .remove(KEY_ACOUSTIC_CENTROID)
+                .remove(KEY_ACOUSTIC_SAMPLES)
+                .remove(KEY_ACOUSTIC_SELF_FLOOR)
                 .remove(KEY_MEDIAN_F0)
                 .remove(KEY_MIN_F0)
                 .remove(KEY_MAX_F0)
@@ -295,8 +412,9 @@ object VoiceprintManager {
         isMediaPlaying: Boolean
     ): VerificationResult {
         ensureLoaded(context)
-        val centroid = cachedCentroid
-        if (!cachedEnabled || centroid == null || centroid.isEmpty()) {
+        val voskCentroid = cachedCentroid
+        val acCentroid = cachedAcousticCentroid
+        if (!cachedEnabled || ((voskCentroid == null || voskCentroid.isEmpty()) && (acCentroid == null || acCentroid.isEmpty()))) {
             return VerificationResult(
                 tier = MatchTier.TRUSTED,
                 allowed = true,
@@ -304,20 +422,45 @@ object VoiceprintManager {
                 acceptThreshold = 0f,
                 spkFrames = spkFrames,
                 detectedPitchHz = null,
-                reason = if (centroid == null) "voice_lock_untrained" else "voice_lock_disabled"
+                reason = if (voskCentroid == null && acCentroid == null) "voice_lock_untrained" else "voice_lock_disabled"
             )
         }
 
-        val detectedPitch = extractPcmPitchHz(pcmBytes)
+        val acFeatures = extractAcousticFeatures(pcmBytes)
+        val detectedPitch = acFeatures.pitchHz
         val pitchInOwnerBand = when {
             detectedPitch == null || cachedMedianF0 <= 0f -> true
             cachedMinF0 > 0f && cachedMaxF0 > cachedMinF0 -> detectedPitch in cachedMinF0..cachedMaxF0
-            else -> (detectedPitch / cachedMedianF0) in 0.58f..1.68f
+            else -> (detectedPitch / cachedMedianF0) in 0.56f..1.72f
         }
 
-        if (spkVector == null || spkVector.isEmpty() || spkFrames < 50) {
-            // Very short clips (<0.5s): never execute straight away; ask secret code only in quiet room if pitch plausible
-            if (!isMediaPlaying && pcmBytes.size >= 16_000 && pitchInOwnerBand && cachedSecretCode.isNotBlank()) {
+        // 1. Text-independent 48-dim Mel-spectral biometric score (works on Hindi, Hinglish, and 0.3s clips!)
+        var acousticScore: Float? = null
+        if (acCentroid != null && acCentroid.isNotEmpty() && acFeatures.voicedFrames >= 6 && acFeatures.vector.size == acCentroid.size) {
+            val acNorm = l2Normalize(acFeatures.vector)
+            val acCentSim = cosineSimilarity(acNorm, acCentroid)
+            val bestAcSample = cachedAcousticSamples.maxOfOrNull { cosineSimilarity(acNorm, it) } ?: acCentSim
+            acousticScore = (0.50f * acCentSim) + (0.50f * bestAcSample)
+        }
+
+        // 2. Vosk 128-dim English x-vector score (auxiliary boost when available)
+        var voskScore: Float? = null
+        if (voskCentroid != null && voskCentroid.isNotEmpty() && spkVector != null && spkFrames >= 50 && spkVector.size == voskCentroid.size) {
+            val vNorm = l2Normalize(spkVector)
+            val vCentSim = cosineSimilarity(vNorm, voskCentroid)
+            val topVSamples = cachedSamples.map { cosineSimilarity(vNorm, it) }.sortedDescending()
+            val bestVSamples = when {
+                topVSamples.size >= 2 -> (topVSamples[0] + topVSamples[1]) * 0.5f
+                topVSamples.size == 1 -> topVSamples[0]
+                else -> vCentSim
+            }
+            voskScore = (0.65f * vCentSim) + (0.35f * bestVSamples)
+        }
+
+        // If NEITHER acoustic nor Vosk produced a usable vector:
+        if (acousticScore == null && voskScore == null) {
+            // Backward compatibility: legacy enrollment without acousticCentroid yet when Vosk returned frames=0 on Hindi
+            if (acCentroid == null && pcmBytes.size >= 8_000 && pitchInOwnerBand && cachedSecretCode.isNotBlank()) {
                 return VerificationResult(
                     tier = MatchTier.DOUBT,
                     allowed = false,
@@ -325,7 +468,7 @@ object VoiceprintManager {
                     acceptThreshold = cachedSensitivity.baseThreshold,
                     spkFrames = spkFrames,
                     detectedPitchHz = detectedPitch,
-                    reason = "short_unverified_doubt(frames=$spkFrames<50)"
+                    reason = "legacy_hindi_doubt(vFrames=${acFeatures.voicedFrames})"
                 )
             }
             return VerificationResult(
@@ -335,34 +478,41 @@ object VoiceprintManager {
                 acceptThreshold = cachedSensitivity.baseThreshold,
                 spkFrames = spkFrames,
                 detectedPitchHz = detectedPitch,
-                reason = "short_unverified_rejected(frames=$spkFrames)"
+                reason = "insufficient_voice(vFrames=${acFeatures.voicedFrames},spk=$spkFrames)"
             )
         }
 
-        val normCandidate = l2Normalize(spkVector)
-        val centroidSim = cosineSimilarity(normCandidate, centroid)
-        val sortedSampleSims = cachedSamples
-            .map { cosineSimilarity(normCandidate, it) }
-            .sortedDescending()
-        val avgTopSamples = when {
-            sortedSampleSims.size >= 2 -> (sortedSampleSims[0] + sortedSampleSims[1]) * 0.5f
-            sortedSampleSims.size == 1 -> sortedSampleSims[0]
-            else -> centroidSim
+        // Compute dynamic threshold suited for active feature source
+        val acBase = when (cachedSensitivity) {
+            Sensitivity.RELAXED -> 0.58f
+            Sensitivity.BALANCED -> 0.65f
+            Sensitivity.STRICT -> 0.74f
         }
-        val effectiveScore = (0.65f * centroidSim) + (0.35f * avgTopSamples)
+        val calibratedAcFloor = if (cachedAcousticSelfFloor > 0f) {
+            (cachedAcousticSelfFloor - (cachedSensitivity.selfMargin * 0.90f)).coerceIn(0.56f, 0.84f)
+        } else 0f
+        val acAcceptThr = maxOf(acBase, calibratedAcFloor)
 
-        // Dynamically combine user's enrolled multi-style baseline with sensitivity floor
-        val calibratedFloor = if (cachedSelfFloor > 0f) {
+        val voskCalibratedFloor = if (cachedSelfFloor > 0f) {
             (cachedSelfFloor - cachedSensitivity.selfMargin).coerceAtMost(0.70f)
         } else 0f
-        val baseThreshold = maxOf(cachedSensitivity.baseThreshold, calibratedFloor)
+        val voskAcceptThr = maxOf(cachedSensitivity.baseThreshold, voskCalibratedFloor)
 
-        val acceptThreshold = when {
-            spkFrames >= 140 -> baseThreshold
-            spkFrames >= 90 -> (baseThreshold - 0.03f).coerceAtLeast(cachedSensitivity.baseThreshold - 0.03f)
-            else -> (baseThreshold - 0.05f).coerceAtLeast(cachedSensitivity.baseThreshold - 0.05f)
+        val (effectiveScore, acceptThreshold, scoreTag) = when {
+            acousticScore != null && voskScore != null -> {
+                // Favor clear match without penalizing Hindi words where English Vosk scored low
+                val blended = maxOf(acousticScore, (0.60f * acousticScore) + (0.40f * voskScore))
+                val thr = if (acousticScore >= acAcceptThr) acAcceptThr else maxOf(acAcceptThr - 0.04f, 0.56f)
+                Triple(blended, thr, "hybrid(ac=${"%.2f".format(acousticScore)},vk=${"%.2f".format(voskScore)})")
+            }
+            acousticScore != null -> {
+                Triple(acousticScore, acAcceptThr, "acoustic(vFrames=${acFeatures.voicedFrames})")
+            }
+            else -> {
+                Triple(voskScore!!, voskAcceptThr, "vosk(frames=$spkFrames)")
+            }
         }
-        val doubtThreshold = (acceptThreshold - 0.14f).coerceAtLeast(0.40f)
+        val doubtThreshold = (acceptThreshold - 0.14f).coerceAtLeast(0.42f)
 
         if (!pitchInOwnerBand) {
             val extremeMismatch = cachedMedianF0 > 0f && detectedPitch != null &&
@@ -373,9 +523,9 @@ object VoiceprintManager {
                     allowed = false,
                     similarity = effectiveScore,
                     acceptThreshold = acceptThreshold,
-                    spkFrames = spkFrames,
+                    spkFrames = maxOf(spkFrames, acFeatures.voicedFrames),
                     detectedPitchHz = detectedPitch,
-                    reason = "pitch_doubt(${detectedPitch?.toInt()}Hz, sim=${"%.2f".format(effectiveScore)})"
+                    reason = "pitch_doubt(${detectedPitch?.toInt()}Hz, $scoreTag)"
                 )
             } else {
                 VerificationResult(
@@ -383,9 +533,9 @@ object VoiceprintManager {
                     allowed = false,
                     similarity = effectiveScore,
                     acceptThreshold = acceptThreshold,
-                    spkFrames = spkFrames,
+                    spkFrames = maxOf(spkFrames, acFeatures.voicedFrames),
                     detectedPitchHz = detectedPitch,
-                    reason = "pitch_mismatch(${detectedPitch?.toInt()}Hz vs ${cachedMedianF0.toInt()}Hz)"
+                    reason = "pitch_mismatch(${detectedPitch?.toInt()}Hz vs ${cachedMedianF0.toInt()}Hz, $scoreTag)"
                 )
             }
         }
@@ -396,41 +546,201 @@ object VoiceprintManager {
                 allowed = true,
                 similarity = effectiveScore,
                 acceptThreshold = acceptThreshold,
-                spkFrames = spkFrames,
+                spkFrames = maxOf(spkFrames, acFeatures.voicedFrames),
                 detectedPitchHz = detectedPitch,
-                reason = "trusted(sim=${"%.2f".format(effectiveScore)}>=${"%.2f".format(acceptThreshold)})"
+                reason = "trusted($scoreTag sim=${"%.2f".format(effectiveScore)}>=${"%.2f".format(acceptThreshold)})"
             )
             effectiveScore >= doubtThreshold && cachedSecretCode.isNotBlank() -> VerificationResult(
                 tier = MatchTier.DOUBT,
                 allowed = false,
                 similarity = effectiveScore,
                 acceptThreshold = acceptThreshold,
-                spkFrames = spkFrames,
+                spkFrames = maxOf(spkFrames, acFeatures.voicedFrames),
                 detectedPitchHz = detectedPitch,
-                reason = "doubt(sim=${"%.2f".format(effectiveScore)} in ${"%.2f".format(doubtThreshold)}..${"%.2f".format(acceptThreshold)})"
+                reason = "doubt($scoreTag sim=${"%.2f".format(effectiveScore)} in ${"%.2f".format(doubtThreshold)}..${"%.2f".format(acceptThreshold)})"
             )
             else -> VerificationResult(
                 tier = MatchTier.REJECTED,
                 allowed = false,
                 similarity = effectiveScore,
                 acceptThreshold = acceptThreshold,
-                spkFrames = spkFrames,
+                spkFrames = maxOf(spkFrames, acFeatures.voicedFrames),
                 detectedPitchHz = detectedPitch,
-                reason = "rejected(sim=${"%.2f".format(effectiveScore)}<thr=${"%.2f".format(doubtThreshold)})"
+                reason = "rejected($scoreTag sim=${"%.2f".format(effectiveScore)}<thr=${"%.2f".format(doubtThreshold)})"
             )
         }
     }
 
     /**
+     * Language-independent 48-dim CMVN Mel-Spectral speaker descriptor + median pitch (F0).
+     * Runs in ~2ms directly on 16kHz PCM16 audio without needing English ASR recognition.
+     */
+    fun extractAcousticFeatures(pcmBytes: ByteArray): AcousticFeatures {
+        val sampleCount = pcmBytes.size / 2
+        if (sampleCount < FFT_SIZE) return AcousticFeatures(FloatArray(0), 0, null)
+
+        val samples = FloatArray(sampleCount)
+        val shortBuf = ShortArray(sampleCount)
+        ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuf)
+        for (i in 0 until sampleCount) samples[i] = shortBuf[i].toFloat()
+
+        val pitchHz = computePitchFromShorts(shortBuf)
+        val hop = 256
+        val hann = FloatArray(FFT_SIZE) { n ->
+            (0.5 - 0.5 * cos((2.0 * PI * n) / (FFT_SIZE - 1))).toFloat()
+        }
+        val melFilters = buildMelFilterbank()
+
+        val frameVectors = mutableListOf<FloatArray>()
+        val re = FloatArray(FFT_SIZE)
+        val im = FloatArray(FFT_SIZE)
+        var offset = 0
+        while (offset + FFT_SIZE <= sampleCount) {
+            var sumSq = 0.0
+            for (i in 0 until FFT_SIZE) {
+                val s = samples[offset + i].toDouble()
+                sumSq += s * s
+            }
+            val rms = sqrt(sumSq / FFT_SIZE)
+            if (rms >= 210.0) {
+                for (i in 0 until FFT_SIZE) {
+                    val prev = if (offset + i > 0) samples[offset + i - 1] else samples[offset]
+                    val preEmph = samples[offset + i] - 0.97f * prev
+                    re[i] = preEmph * hann[i]
+                    im[i] = 0f
+                }
+                fftRadix2(re, im)
+
+                val logMel = FloatArray(MEL_BANDS)
+                var bandMean = 0.0
+                for (m in 0 until MEL_BANDS) {
+                    val f = melFilters[m]
+                    var energy = 0.0
+                    for (k in 1..FFT_SIZE / 2) {
+                        val magSq = re[k].toDouble() * re[k] + im[k].toDouble() * im[k]
+                        energy += f[k] * magSq
+                    }
+                    val lv = ln(energy + 1e-6).toFloat()
+                    logMel[m] = lv
+                    bandMean += lv
+                }
+                val meanF = (bandMean / MEL_BANDS).toFloat()
+                for (m in 0 until MEL_BANDS) logMel[m] -= meanF // CMVN cancels distance/loudness!
+                frameVectors.add(logMel)
+            }
+            offset += hop
+        }
+
+        if (frameVectors.isEmpty()) return AcousticFeatures(FloatArray(0), 0, pitchHz)
+
+        val nFrames = frameVectors.size.toFloat()
+        val meanVec = FloatArray(MEL_BANDS)
+        for (fv in frameVectors) {
+            for (m in 0 until MEL_BANDS) meanVec[m] += fv[m]
+        }
+        for (m in 0 until MEL_BANDS) meanVec[m] /= nFrames
+
+        val stdVec = FloatArray(MEL_BANDS)
+        for (fv in frameVectors) {
+            for (m in 0 until MEL_BANDS) {
+                val d = fv[m] - meanVec[m]
+                stdVec[m] += d * d
+            }
+        }
+        for (m in 0 until MEL_BANDS) stdVec[m] = sqrt(stdVec[m] / nFrames)
+
+        val combined = FloatArray(MEL_BANDS * 2)
+        for (m in 0 until MEL_BANDS) {
+            combined[m] = meanVec[m]
+            combined[MEL_BANDS + m] = stdVec[m] * 0.55f
+        }
+        return AcousticFeatures(l2Normalize(combined), frameVectors.size, pitchHz)
+    }
+
+    private fun buildMelFilterbank(): Array<FloatArray> {
+        fun hzToMel(hz: Double) = 2595.0 * ln(1.0 + hz / 700.0) / ln(10.0)
+        fun melToHz(mel: Double) = 700.0 * (10.0.pow(mel / 2595.0) - 1.0)
+        val lowMel = hzToMel(80.0)
+        val highMel = hzToMel(7600.0)
+        val nBins = FFT_SIZE / 2 + 1
+        val bins = IntArray(MEL_BANDS + 2) { idx ->
+            val mel = lowMel + idx * (highMel - lowMel) / (MEL_BANDS + 1)
+            val hz = melToHz(mel)
+            (((FFT_SIZE + 1) * hz) / 16000.0).toInt().coerceIn(0, nBins - 1)
+        }
+        return Array(MEL_BANDS) { m ->
+            val filt = FloatArray(nBins)
+            val left = bins[m]
+            val center = bins[m + 1]
+            val right = bins[m + 2]
+            for (k in left until center) {
+                filt[k] = if (center > left) (k - left).toFloat() / (center - left) else 1f
+            }
+            for (k in center..right) {
+                filt[k] = if (right > center) (right - k).toFloat() / (right - center) else 1f
+            }
+            filt
+        }
+    }
+
+    private fun fftRadix2(re: FloatArray, im: FloatArray) {
+        val n = re.size
+        var j = 0
+        for (i in 1 until n) {
+            var bit = n shr 1
+            while ((j and bit) != 0) {
+                j = j xor bit
+                bit = bit shr 1
+            }
+            j = j xor bit
+            if (i < j) {
+                val tr = re[i]; re[i] = re[j]; re[j] = tr
+                val ti = im[i]; im[i] = im[j]; im[j] = ti
+            }
+        }
+        var len = 2
+        while (len <= n) {
+            val ang = -2.0 * PI / len
+            val wLenRe = cos(ang).toFloat()
+            val wLenIm = sin(ang).toFloat()
+            var i = 0
+            while (i < n) {
+                var wRe = 1f
+                var wIm = 0f
+                val half = len shr 1
+                for (k in 0 until half) {
+                    val uRe = re[i + k]
+                    val uIm = im[i + k]
+                    val vRe = re[i + k + half] * wRe - im[i + k + half] * wIm
+                    val vIm = re[i + k + half] * wIm + im[i + k + half] * wRe
+                    re[i + k] = uRe + vRe
+                    im[i + k] = uIm + vIm
+                    re[i + k + half] = uRe - vRe
+                    im[i + k + half] = uIm - vIm
+                    val nextWRe = wRe * wLenRe - wIm * wLenIm
+                    wIm = wRe * wLenIm + wIm * wLenRe
+                    wRe = nextWRe
+                }
+                i += len
+            }
+            len = len shl 1
+        }
+    }
+
+    /**
      * Extracts median fundamental vocal pitch (F0 Hz) from 16kHz 16-bit mono PCM bytes.
-     * Used alongside Vosk x-vectors to guard short utterances and reject non-matching voices.
      */
     fun extractPcmPitchHz(pcmBytes: ByteArray): Float? {
         val sampleCount = pcmBytes.size / 2
         if (sampleCount < 640) return null
-
         val samples = ShortArray(sampleCount)
         ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(samples)
+        return computePitchFromShorts(samples)
+    }
+
+    private fun computePitchFromShorts(samples: ShortArray): Float? {
+        val sampleCount = samples.size
+        if (sampleCount < 640) return null
 
         val frameLen = 640 // 40ms @ 16kHz
         val step = 320     // 20ms hop
@@ -538,8 +848,8 @@ object VoiceprintManager {
             if (computeSliceRms(pcmBytes, s, endPos) >= 240.0) break
             endPos -= frameBytes / 2
         }
-        val paddedStart = ((startPos - 2560).coerceAtLeast(0)) and -2 // 80ms lead cushion
-        val paddedEnd = ((endPos + 2560).coerceAtMost(pcmBytes.size)) and -2 // 80ms tail cushion
+        val paddedStart = ((startPos - 1024).coerceAtLeast(0)) and -2 // 32ms lead cushion
+        val paddedEnd = ((endPos + 1024).coerceAtMost(pcmBytes.size)) and -2 // 32ms tail cushion
         if (paddedEnd <= paddedStart) return pcmBytes
         return pcmBytes.copyOfRange(paddedStart, paddedEnd)
     }

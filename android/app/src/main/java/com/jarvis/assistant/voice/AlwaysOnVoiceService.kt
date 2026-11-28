@@ -275,6 +275,7 @@ class AlwaysOnVoiceService : Service() {
         }
         val memoryManager = JarvisMemoryManager(this)
         commandExecutor = JarvisCommandExecutor(this, speakerHelper, memoryManager)
+        commandExecutor.prewarmConnections()
 
         voiceCaptureEngine = PassiveVoiceCaptureEngine(
             context = this,
@@ -500,6 +501,12 @@ class AlwaysOnVoiceService : Service() {
             pendingDoubtTranscript = ""
 
             val expectedCode = VoiceprintManager.getSecretCode(this)
+            val hintLower = captured.voskHint.lowercase()
+            if (hintLower in listOf("cancel", "chhodo", "rehne do", "stop")) {
+                updateNotificationText("Cancelled.")
+                releaseMicDispatchLock(180L)
+                return
+            }
             updateNotificationText("Secret code verify kar raha hoon...")
 
             commandExecutor.verifySecretCodeAudio(
@@ -509,10 +516,11 @@ class AlwaysOnVoiceService : Service() {
                 offlineFallbackMatch = VoiceprintManager::matchesSecretCodeTextOffline
             ) { checkRes ->
                 if (checkRes.matched && held != null) {
+                    VoiceprintManager.learnOwnerAcousticSample(this, captured.rawPcm)
                     JarvisLogStore.log("VOICE_LOCK", "Secret code VERIFIED ('${checkRes.heardText}')! Running held command: '$heldTranscript'")
                     updateNotificationText("Verified! Execute kar raha hoon...")
                     commandExecutor.executePreParsedDecision(held, heldTranscript, sourceTag = "USER_VOICE") {
-                        releaseMicDispatchLock(220L)
+                        releaseMicDispatchLock(140L)
                     }
                 } else {
                     JarvisLogStore.log("VOICE_LOCK", "Secret code REJECTED (heard='${checkRes.heardText}'). Held command blocked.")
@@ -520,7 +528,7 @@ class AlwaysOnVoiceService : Service() {
                         "Secret code match nahi hua — command cancel kar diya hai."
                     }
                     commandExecutor.speakDynamic(reply)
-                    releaseMicDispatchLock(550L)
+                    releaseMicDispatchLock(450L)
                 }
             }
             return
@@ -530,6 +538,9 @@ class AlwaysOnVoiceService : Service() {
         when (captured.verification.tier) {
             VoiceprintManager.MatchTier.TRUSTED -> {
                 val speakerVerified = VoiceprintManager.isLockActive(this) && captured.verification.allowed
+                if (speakerVerified && !VoiceprintManager.hasAcousticProfile(this)) {
+                    VoiceprintManager.learnOwnerAcousticSample(this, captured.rawPcm)
+                }
                 commandExecutor.executeAudioCommand(
                     wavBytes = captured.wavBytes,
                     voskHint = captured.voskHint,
@@ -540,7 +551,7 @@ class AlwaysOnVoiceService : Service() {
                     if (!ignored && transcript.isNotBlank()) {
                         updateNotificationText("Executed: $transcript")
                     }
-                    releaseMicDispatchLock(if (ignored) 20L else 180L)
+                    releaseMicDispatchLock(if (ignored) 15L else 120L)
                 }
             }
 

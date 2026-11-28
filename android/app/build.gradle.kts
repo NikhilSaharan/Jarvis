@@ -6,9 +6,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-fun getGeminiApiKey(): String {
+fun getConfigSecret(keyName: String): String {
     // 1. Try Environment Variable (GitHub Actions Secret / System env)
-    val envKey = System.getenv("GEMINI_API_KEY")
+    val envKey = System.getenv(keyName)
     if (!envKey.isNullOrBlank()) return envKey
 
     // 2. Try local.properties in android directory
@@ -17,7 +17,7 @@ fun getGeminiApiKey(): String {
         try {
             val properties = Properties()
             properties.load(FileInputStream(localPropertiesFile))
-            val key = properties.getProperty("GEMINI_API_KEY")
+            val key = properties.getProperty(keyName)
             if (!key.isNullOrBlank()) return key
         } catch (_: Exception) {}
     }
@@ -28,8 +28,8 @@ fun getGeminiApiKey(): String {
         try {
             for (line in rootEnvFile.readLines()) {
                 val trimmed = line.trim()
-                if (trimmed.startsWith("GEMINI_API_KEY=")) {
-                    val key = trimmed.substringAfter("GEMINI_API_KEY=").trim().trim('"', '\'')
+                if (trimmed.startsWith("$keyName=")) {
+                    val key = trimmed.substringAfter("$keyName=").trim().trim('"', '\'')
                     if (key.isNotBlank()) return key
                 }
             }
@@ -46,8 +46,8 @@ android {
         applicationId = "com.jarvis.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 29
-        versionName = "1.3.6"
+        versionCode = 30
+        versionName = "1.3.7"
 
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
@@ -55,8 +55,10 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        val apiKey = getGeminiApiKey()
+        val apiKey = getConfigSecret("GEMINI_API_KEY")
         buildConfigField("String", "GEMINI_API_KEY", "\"$apiKey\"")
+        val groqKey = getConfigSecret("GROQ_API_KEY")
+        buildConfigField("String", "GROQ_API_KEY", "\"$groqKey\"")
     }
 
     signingConfigs {

@@ -4,6 +4,7 @@ import android.content.Context
 import com.jarvis.assistant.BuildConfig
 import com.jarvis.assistant.JarvisAccessibilityService
 import com.jarvis.assistant.brain.GeminiBrain
+import com.jarvis.assistant.brain.GroqFastBrain
 import com.jarvis.assistant.debug.JarvisLogStore
 import com.jarvis.assistant.memory.JarvisMemoryManager
 import com.jarvis.assistant.scheduler.ScheduledTaskManager
@@ -40,6 +41,10 @@ class JarvisCommandExecutor(
     var geminiBrain: GeminiBrain = createBrain()
         private set
 
+    @Volatile
+    var groqBrain: GroqFastBrain = createGroqBrain()
+        private set
+
     private fun createBrain(): GeminiBrain {
         val defaultKey = BuildConfig.GEMINI_API_KEY
         val prefs = appContext.getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
@@ -57,12 +62,39 @@ class JarvisCommandExecutor(
         return GeminiBrain(apiKey, memoryManager)
     }
 
-    fun reloadApiKey(customKey: String? = null) {
+    private fun createGroqBrain(): GroqFastBrain {
+        val defaultGroq = BuildConfig.GROQ_API_KEY
         val prefs = appContext.getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
-        if (customKey != null) {
-            prefs.edit().putString("gemini_api_key", customKey.trim()).apply()
+        val storedKey = prefs.getString("groq_api_key", "")?.trim().orEmpty()
+        val effective = if (storedKey.isBlank() && defaultGroq.isNotBlank()) {
+            prefs.edit().putString("groq_api_key", defaultGroq).apply()
+            defaultGroq
+        } else {
+            storedKey
         }
+        return GroqFastBrain(effective, memoryManager)
+    }
+
+    fun reloadApiKey(customKey: String? = null, customGroqKey: String? = null) {
+        val prefs = appContext.getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
+        val ed = prefs.edit()
+        if (customKey != null) {
+            ed.putString("gemini_api_key", customKey.trim())
+        }
+        if (customGroqKey != null) {
+            ed.putString("groq_api_key", customGroqKey.trim())
+        }
+        ed.apply()
         geminiBrain = createBrain()
+        groqBrain = createGroqBrain()
+        prewarmConnections()
+    }
+
+    fun prewarmConnections() {
+        ioScope.launch {
+            geminiBrain.prewarm()
+            groqBrain.prewarm()
+        }
     }
 
     private fun buildScreenContextForBrain(): String {
@@ -116,7 +148,14 @@ class JarvisCommandExecutor(
             var transcript = ""
             try {
                 val screenContext = buildScreenContextForBrain()
-                val decision = geminiBrain.processAudioCommand(
+                val decision = (if (groqBrain.isConfigured()) {
+                    groqBrain.processAudioCommand(
+                        wavBytes = wavBytes,
+                        screenElementsSummary = screenContext,
+                        isMediaPlaying = isMediaPlaying,
+                        speakerVerified = speakerVerified
+                    )
+                } else null) ?: geminiBrain.processAudioCommand(
                     wavBytes = wavBytes,
                     voskHint = voskHint,
                     screenElementsSummary = screenContext,
@@ -154,7 +193,16 @@ class JarvisCommandExecutor(
         ioScope.launch {
             val res = try {
                 val screenContext = buildScreenContextForBrain()
-                geminiBrain.evaluateDoubtOrRejectedAudio(
+                (if (groqBrain.isConfigured()) {
+                    groqBrain.evaluateDoubtOrRejectedAudio(
+                        wavBytes = wavBytes,
+                        screenElementsSummary = screenContext,
+                        tier = tier,
+                        similarity = similarity,
+                        acceptThreshold = acceptThreshold,
+                        isMediaPlaying = isMediaPlaying
+                    )
+                } else null) ?: geminiBrain.evaluateDoubtOrRejectedAudio(
                     wavBytes = wavBytes,
                     voskHint = voskHint,
                     screenElementsSummary = screenContext,
@@ -182,7 +230,13 @@ class JarvisCommandExecutor(
     ) {
         scope.launch {
             val res = try {
-                geminiBrain.verifySecretCodeAudio(
+                (if (groqBrain.isConfigured()) {
+                    groqBrain.verifySecretCodeAudio(
+                        wavBytes = wavBytes,
+                        expectedSecretCode = expectedSecretCode,
+                        offlineFallbackMatch = offlineFallbackMatch
+                    )
+                } else null) ?: geminiBrain.verifySecretCodeAudio(
                     wavBytes = wavBytes,
                     expectedSecretCode = expectedSecretCode,
                     voskHint = voskHint,

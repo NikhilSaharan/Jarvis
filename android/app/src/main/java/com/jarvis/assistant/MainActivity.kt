@@ -232,20 +232,53 @@ class MainActivity : AppCompatActivity() {
 
         btnApiKey.setOnClickListener {
             val prefs = getSharedPreferences("jarvis_config", Context.MODE_PRIVATE)
-            val currentKey = prefs.getString("gemini_api_key", "") ?: ""
-            val input = EditText(this).apply {
-                setText(currentKey)
-                hint = "Enter/paste Gemini API Key"
+            val currentGeminiKey = prefs.getString("gemini_api_key", "") ?: ""
+            val currentGroqKey = prefs.getString("groq_api_key", "") ?: ""
+
+            val container = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(48, 24, 48, 12)
             }
+            container.addView(TextView(this).apply {
+                text = "1. Gemini API Key (Fallback / Default):"
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+            })
+            val inputGemini = EditText(this).apply {
+                setText(currentGeminiKey)
+                hint = "Paste Gemini API Key"
+                isSingleLine = true
+            }
+            container.addView(inputGemini)
+
+            container.addView(TextView(this).apply {
+                text = "\n2. Ultra-Fast Voice Key — Groq (Free at console.groq.com, ~0.4s speed):"
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+            })
+            val inputGroq = EditText(this).apply {
+                setText(currentGroqKey)
+                hint = "gsk_... (Optional — 4x faster Hindi+English voice)"
+                isSingleLine = true
+            }
+            container.addView(inputGroq)
+
             AlertDialog.Builder(this)
-                .setTitle("Gemini API Key")
-                .setMessage("Paste your new Gemini API key here:")
-                .setView(input)
+                .setTitle("AI Speed & API Keys")
+                .setMessage("Instant (~400-650ms) voice ke liye console.groq.com par free account banakar API key paste karein:")
+                .setView(container)
                 .setPositiveButton("Save") { _, _ ->
-                    val newKey = input.text.toString().trim()
-                    commandExecutor.reloadApiKey(newKey)
-                    appendLog("[Config]: API Key updated successfully.")
-                    Toast.makeText(this, "API Key Saved!", Toast.LENGTH_SHORT).show()
+                    val newGemini = inputGemini.text.toString().trim()
+                    val newGroq = inputGroq.text.toString().trim()
+                    commandExecutor.reloadApiKey(newGemini, newGroq)
+                    appendLog("[Config]: API Keys updated (Groq=${if (newGroq.isNotBlank()) "FAST ON" else "OFF"}).")
+                    Toast.makeText(this, "API Keys Saved!", Toast.LENGTH_SHORT).show()
+                }
+                .setNeutralButton("Get Free Groq Key") { _, _ ->
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://console.groq.com/keys")))
+                    } catch (_: Exception) {
+                    }
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
@@ -1343,12 +1376,19 @@ class MainActivity : AppCompatActivity() {
                                     return@verifySecretCodeAudio
                                 }
 
-                                // Ensure Sample 5 speaker vector came from the same voice as Samples 1..4
+                                // Ensure Sample 5 matches speaker voice against Samples 1..4 (Acoustic or Vosk)
+                                val ac5 = recording.sample.acousticVector
+                                val acSim = if (ac5 != null && ac5.isNotEmpty()) {
+                                    samples.mapNotNull { it.acousticVector }.filter { it.size == ac5.size }
+                                        .maxOfOrNull { VoiceprintManager.cosineSimilarity(ac5, it) }
+                                } else null
                                 val spk5 = recording.sample.spkVector
-                                val avgPrevSim = samples.map {
-                                    VoiceprintManager.cosineSimilarity(spk5, it.spkVector)
-                                }.maxOrNull() ?: 1.0f
-                                if (samples.isNotEmpty() && avgPrevSim < 0.35f) {
+                                val vkSim = if (spk5.isNotEmpty()) {
+                                    samples.filter { it.spkVector.size == spk5.size }
+                                        .maxOfOrNull { VoiceprintManager.cosineSimilarity(spk5, it.spkVector) }
+                                } else null
+                                val bestPrevSim = listOfNotNull(acSim, vkSim).maxOrNull() ?: 1.0f
+                                if (samples.isNotEmpty() && bestPrevSim < 0.38f) {
                                     tvStatus.setTextColor(gold)
                                     tvStatus.text = "Secret code ki aawaz pehle samples se alag lag rahi hai! Khud apni aawaz me bolein."
                                     btnAction.text = "🔄 Retry Secret Code"
